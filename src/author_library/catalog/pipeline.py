@@ -1,0 +1,388 @@
+"""Classification pipeline — the gate through which every document enters.
+
+No document passes into the system without classification. The pipeline:
+1. Accepts a ParsedDocument + optional user metadata hints
+2. Runs the classification engine
+3. Creates the appropriate CatalogEntry subclass
+4. Stores in the works table via WorkRepository
+5. Returns the catalog entry with classification result
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import TYPE_CHECKING, Any
+
+import structlog
+
+from author_library.catalog.classifier import SourceClassifier
+from author_library.catalog.models import (
+    CatalogEntry,
+    ClassificationResult,
+    ContextualCatalogEntry,
+    FormatIngested,
+    PrimaryCatalogEntry,
+    ProcessingRoute,
+    SecondaryCatalogEntry,
+    SourceClass,
+    TertiaryCatalogEntry,
+    route_for_source_class,
+)
+from author_library.errors import ClassificationError
+
+if TYPE_CHECKING:
+    from author_library.config import Settings
+    from author_library.parsing.models import ParsedDocument
+    from author_library.storage.repositories import WorkRepository
+
+log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline result
+# ---------------------------------------------------------------------------
+
+
+class PipelineResult:
+    """Result of the classification pipeline for a document.
+
+    Contains the catalog entry, classification result, and the
+    downstream processing route determined by source class.
+    """
+
+    def __init__(
+        self,
+        *,
+        catalog_entry: CatalogEntry,
+        classification: ClassificationResult,
+        processing_route: ProcessingRoute,
+    ) -> None:
+        self.catalog_entry = catalog_entry
+        self.classification = classification
+        self.processing_route = processing_route
+
+    def __repr__(self) -> str:
+        return (
+            f"PipelineResult(work_id={self.catalog_entry.work_id!r}, "
+            f"source_class={self.classification.source_class}, "
+            f"route={self.processing_route})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Classification pipeline
+# ---------------------------------------------------------------------------
+
+
+class ClassificationPipeline:
+    """Gates every document entering the system through classification.
+
+    The pipeline coordinates between the classification engine, catalog
+    entry creation, and storage persistence.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        work_repository: WorkRepository,
+        subject_author: str,
+    ) -> None:
+        self._classifier = SourceClassifier(settings)
+        self._work_repo = work_repository
+        self._subject_author = subject_author
+
+    async def process(
+        self,
+        document: ParsedDocument,
+        *,
+        metadata_hints: dict[str, Any] | None = None,
+        user_overrides: dict[str, Any] | None = None,
+    ) -> PipelineResult:
+        """Classify a document and create its catalog entry.
+
+        Args:
+            document: Parsed document to process.
+            metadata_hints: Optional hints for the classifier (e.g., known bibliography entries).
+            user_overrides: Optional field overrides for the catalog entry. Allows users to
+                supply class-specific fields that cannot be inferred from the document alone
+                (e.g., subject_author_id, work_type, engagement_type).
+
+        Returns:
+            PipelineResult with catalog entry, classification, and processing route.
+
+        Raises:
+            ClassificationError: If classification or catalog entry creation fails.
+        """
+        overrides = user_overrides or {}
+
+        # Step 1: Run the classification engine
+        classification = await self._classifier.classify(
+            document,
+            subject_author=self._subject_author,
+            metadata_hints=metadata_hints,
+        )
+
+        log.info(
+            "pipeline_classification_complete",
+            title=document.metadata.title,
+            source_class=classification.source_class,
+            confidence=classification.confidence,
+        )
+
+        # Step 2: Build the appropriate catalog entry
+        catalog_entry = self._build_catalog_entry(
+            document=document,
+            classification=classification,
+            overrides=overrides,
+        )
+
+        # Step 3: Store in the works table
+        try:
+            work_data = self._catalog_entry_to_work_dict(catalog_entry, classification)
+            await self._work_repo.create(work_data)
+        except Exception as exc:
+            raise ClassificationError(
+                f"Failed to store catalog entry: {exc}",
+                context={"work_id": catalog_entry.work_id},
+                cause=exc,
+            ) from exc
+
+        log.info(
+            "pipeline_entry_stored",
+            work_id=catalog_entry.work_id,
+            source_class=classification.source_class,
+        )
+
+        # Step 4: Determine processing route
+        route = route_for_source_class(classification.source_class)
+
+        return PipelineResult(
+            catalog_entry=catalog_entry,
+            classification=classification,
+            processing_route=route,
+        )
+
+    def _build_catalog_entry(
+        self,
+        *,
+        document: ParsedDocument,
+        classification: ClassificationResult,
+        overrides: dict[str, Any],
+    ) -> CatalogEntry:
+        """Build the appropriate CatalogEntry subclass based on classification."""
+        # Core fields shared across all classes
+        core = self._extract_core_fields(document, classification, overrides)
+
+        source_class = classification.source_class
+
+        try:
+            if source_class == SourceClass.PRIMARY:
+                return PrimaryCatalogEntry(
+                    **core,
+                    subject_author_id=overrides.get(
+                        "subject_author_id", self._subject_author_slug()
+                    ),
+                    work_type=overrides.get("work_type", "other"),
+                    chronological_position=overrides.get("chronological_position"),
+                    voice_profile_eligible=overrides.get("voice_profile_eligible", True),
+                    dedication=overrides.get("dedication"),
+                    table_of_contents=(
+                        document.metadata.table_of_contents
+                        if document.metadata.table_of_contents
+                        else overrides.get("table_of_contents")
+                    ),
+                )
+            elif source_class == SourceClass.SECONDARY:
+                return SecondaryCatalogEntry(
+                    **core,
+                    about_author_id=overrides.get(
+                        "about_author_id", self._subject_author_slug()
+                    ),
+                    external_author=overrides.get(
+                        "external_author", document.metadata.author or "Unknown"
+                    ),
+                    external_author_affiliation=overrides.get("external_author_affiliation"),
+                    relationship=overrides.get("relationship", "other"),
+                    perspective_note=overrides.get(
+                        "perspective_note",
+                        f"Classified as secondary source about {self._subject_author}. "
+                        f"Confidence: {classification.confidence:.2f}.",
+                    ),
+                    contains_primary_quotes=overrides.get("contains_primary_quotes", False),
+                    quote_extraction_note=overrides.get("quote_extraction_note"),
+                )
+            elif source_class == SourceClass.CONTEXTUAL:
+                return ContextualCatalogEntry(
+                    **core,
+                    referenced_by=overrides.get(
+                        "referenced_by", self._subject_author_slug()
+                    ),
+                    engagement_type=overrides.get("engagement_type", "frequently-cites"),
+                    engagement_note=overrides.get(
+                        "engagement_note",
+                        f"Classified as contextual source for {self._subject_author}. "
+                        f"Confidence: {classification.confidence:.2f}.",
+                    ),
+                    engagement_works=overrides.get("engagement_works"),
+                    engagement_frequency=overrides.get("engagement_frequency"),
+                )
+            else:
+                # Tertiary
+                return TertiaryCatalogEntry(
+                    **core,
+                    reference_type=overrides.get("reference_type", "bibliography"),
+                    coverage_note=overrides.get("coverage_note"),
+                )
+        except Exception as exc:
+            raise ClassificationError(
+                f"Failed to build catalog entry: {exc}",
+                context={
+                    "source_class": source_class,
+                    "title": document.metadata.title,
+                },
+                cause=exc,
+            ) from exc
+
+    def _extract_core_fields(
+        self,
+        document: ParsedDocument,
+        classification: ClassificationResult,
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Extract core catalog fields from the document and overrides."""
+        title = overrides.get("title", document.metadata.title or "Untitled")
+        author = overrides.get("author", document.metadata.author or "Unknown")
+
+        # Build work_id from author and title slugs
+        work_id = overrides.get("work_id", self._generate_work_id(author, title))
+
+        # Determine format from document
+        format_ingested = overrides.get("format_ingested", document.format)
+
+        return {
+            "work_id": work_id,
+            "title": title,
+            "author": author,
+            "source_class": classification.source_class,
+            "source_class_note": overrides.get(
+                "source_class_note", classification.reasoning
+            ),
+            "publication_year": overrides.get(
+                "publication_year",
+                self._extract_year(document.metadata.publication_date),
+            ),
+            "original_publication_year": overrides.get("original_publication_year"),
+            "edition": overrides.get("edition"),
+            "publisher": overrides.get("publisher", document.metadata.publisher or "Unknown"),
+            "isbn": overrides.get("isbn", document.metadata.isbn),
+            "format_ingested": format_ingested,
+            "language": overrides.get("language", document.metadata.language),
+            "word_count": overrides.get("word_count", document.metadata.word_count),
+            "genre_tags": overrides.get("genre_tags", ["unclassified"]),
+            "subject_headings": overrides.get("subject_headings", ["General"]),
+            "ocr_quality": overrides.get("ocr_quality"),
+            "ingestion_date": overrides.get("ingestion_date", date.today()),
+            "notes": overrides.get("notes"),
+        }
+
+    @staticmethod
+    def _generate_work_id(author: str, title: str) -> str:
+        """Generate a work_id from author and title per catalog-schema.md §6."""
+        import re
+
+        def slugify(text: str) -> str:
+            slug = text.lower().strip()
+            slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+            slug = re.sub(r"[\s]+", "-", slug)
+            slug = re.sub(r"-+", "-", slug)
+            return slug.strip("-")
+
+        author_slug = slugify(author)
+        title_slug = slugify(title)
+
+        work_id = f"{author_slug}--{title_slug}"
+
+        # Truncate to max length
+        if len(work_id) > 128:
+            work_id = work_id[:128].rstrip("-")
+
+        return work_id
+
+    @staticmethod
+    def _extract_year(publication_date: str | None) -> int:
+        """Extract year from a date string, defaulting to current year."""
+        if publication_date and len(publication_date) >= 4:
+            try:
+                return int(publication_date[:4])
+            except ValueError:
+                pass
+        return date.today().year
+
+    def _subject_author_slug(self) -> str:
+        """Generate a slug from the subject author name."""
+        import re
+
+        slug = self._subject_author.lower().strip()
+        slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+        slug = re.sub(r"[\s]+", "-", slug)
+        return slug.strip("-")
+
+    @staticmethod
+    def _catalog_entry_to_work_dict(
+        entry: CatalogEntry,
+        classification: ClassificationResult,
+    ) -> dict[str, Any]:
+        """Convert a CatalogEntry to the dict format expected by WorkRepository."""
+        # Get all model fields as a dict
+        data = entry.model_dump()
+
+        # The works table stores class-specific fields in source_metadata JSONB
+        core_fields = {
+            "work_id",
+            "title",
+            "author",
+            "source_class",
+            "source_class_note",
+            "publication_year",
+            "original_publication_year",
+            "edition",
+            "publisher",
+            "isbn",
+            "format_ingested",
+            "language",
+            "word_count",
+            "genre_tags",
+            "subject_headings",
+            "ocr_quality",
+            "ingestion_date",
+            "notes",
+        }
+
+        # Separate core fields from source-class-specific fields
+        work: dict[str, Any] = {}
+        source_metadata: dict[str, Any] = {}
+
+        for key, value in data.items():
+            if key in core_fields:
+                work[key] = value
+            else:
+                source_metadata[key] = value
+
+        # Add classification result to source_metadata
+        source_metadata["classification_confidence"] = classification.confidence
+        source_metadata["classification_signals"] = classification.signals_detected
+
+        work["source_metadata"] = source_metadata
+
+        # Convert enums to their string values for storage
+        if isinstance(work.get("source_class"), SourceClass):
+            work["source_class"] = work["source_class"].value
+        if isinstance(work.get("format_ingested"), FormatIngested):
+            work["format_ingested"] = work["format_ingested"].value
+
+        # Convert date to string for JSON serialization
+        if isinstance(work.get("ingestion_date"), date):
+            work["ingestion_date"] = work["ingestion_date"].isoformat()
+
+        return work
