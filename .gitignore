@@ -17,6 +17,9 @@ env/
 .env.local
 .env.*.local
 
+# User credentials / secrets
+.user_files/
+
 # IDE
 .idea/
 .vscode/
