@@ -1,0 +1,267 @@
+"""Tests for voice profile extraction."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from author_library.errors import IntelligenceError
+from author_library.intelligence.voice_profile import (
+    VoiceProfile,
+    VoiceProfileExtractor,
+    _sample_diverse_chunks,
+)
+
+if TYPE_CHECKING:
+    from author_library.config import Settings
+    from author_library.storage.postgres import PostgresPool
+
+from tests.test_intelligence.conftest import (
+    insert_sample_data,
+    requires_anthropic_key,
+)
+
+# ---------------------------------------------------------------------------
+# Model validation tests
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceProfileModel:
+    """Test VoiceProfile Pydantic model validation."""
+
+    def test_valid_voice_profile(self) -> None:
+        """A fully populated voice profile should validate."""
+        profile = VoiceProfile(
+            author_id="malcolm-guite",
+            register="academic but accessible, conversational scholarly",
+            sentence_patterns=[
+                "favors complex sentences with embedded clauses",
+                "alternates between analytical exposition and poetic quotation",
+            ],
+            vocabulary_tendencies=[
+                "frequently uses 'sacramental', 'incarnational'",
+                "draws on theological vocabulary naturally",
+            ],
+            rhetorical_moves=[
+                "builds arguments through close reading of poetry",
+                "uses typological parallels between texts",
+            ],
+            characteristic_phrases=[
+                "outward and visible sign",
+                "the poet's task",
+            ],
+            humor_style="dry wit, self-deprecating",
+            example_passages=["A representative passage of the author's work."],
+            confidence=0.85,
+        )
+        assert profile.author_id == "malcolm-guite"
+        assert profile.confidence == 0.85
+        assert len(profile.sentence_patterns) == 2
+
+    def test_confidence_bounds(self) -> None:
+        """Confidence must be between 0.0 and 1.0."""
+        with pytest.raises(ValueError):
+            VoiceProfile(
+                author_id="test",
+                register="test",
+                sentence_patterns=[],
+                vocabulary_tendencies=[],
+                rhetorical_moves=[],
+                characteristic_phrases=[],
+                confidence=1.5,
+            )
+
+    def test_minimal_voice_profile(self) -> None:
+        """A voice profile with minimal fields should validate."""
+        profile = VoiceProfile(
+            author_id="test-author",
+            register="informal",
+            sentence_patterns=[],
+            vocabulary_tendencies=[],
+            rhetorical_moves=[],
+            characteristic_phrases=[],
+            confidence=0.3,
+        )
+        assert profile.humor_style is None
+        assert profile.example_passages == []
+
+
+# ---------------------------------------------------------------------------
+# Chunk sampling tests
+# ---------------------------------------------------------------------------
+
+
+class TestChunkSampling:
+    """Test the diverse chunk sampling strategy."""
+
+    def test_sample_returns_all_when_under_limit(self) -> None:
+        """Should return all chunks when count <= max."""
+        chunks = [{"work_id": f"w{i}", "text": f"t{i}"} for i in range(5)]
+        result = _sample_diverse_chunks(chunks, max_count=10)
+        assert len(result) == 5
+
+    def test_sample_limits_to_max(self) -> None:
+        """Should limit to max_count."""
+        chunks = [{"work_id": f"w{i % 3}", "text": f"t{i}"} for i in range(50)]
+        result = _sample_diverse_chunks(chunks, max_count=10)
+        assert len(result) <= 10
+
+    def test_sample_distributes_across_works(self) -> None:
+        """Should sample from multiple works, not just one."""
+        chunks = (
+            [{"work_id": "w1", "text": f"t{i}", "chapter": f"ch{i}"} for i in range(20)]
+            + [{"work_id": "w2", "text": f"t{i}", "chapter": f"ch{i}"} for i in range(20)]
+            + [{"work_id": "w3", "text": f"t{i}", "chapter": f"ch{i}"} for i in range(20)]
+        )
+        result = _sample_diverse_chunks(chunks, max_count=15)
+        work_ids = {c["work_id"] for c in result}
+        assert len(work_ids) == 3, "Should sample from all three works"
+
+    def test_sample_prefers_different_chapters(self) -> None:
+        """Should prefer chunks from different chapters within a work."""
+        chunks = [
+            {"work_id": "w1", "text": f"t{i}", "chapter": f"ch{i}"}
+            for i in range(10)
+        ]
+        result = _sample_diverse_chunks(chunks, max_count=5)
+        chapters = {c["chapter"] for c in result}
+        assert len(chapters) == 5, "Should select 5 different chapters"
+
+
+# ---------------------------------------------------------------------------
+# Extraction integration test (requires API key)
+# ---------------------------------------------------------------------------
+
+
+@requires_anthropic_key
+async def test_voice_extraction_integration(
+    pg_pool: PostgresPool,
+    app_settings: Settings,
+) -> None:
+    """End-to-end voice profile extraction against real API."""
+    await insert_sample_data(pg_pool)
+
+    from author_library.storage.repositories import PgChunkRepository, PgWorkRepository
+
+    work_repo = PgWorkRepository(pg_pool)
+    chunk_repo = PgChunkRepository(pg_pool)
+
+    extractor = VoiceProfileExtractor(app_settings)
+    profile = await extractor.extract(
+        author_id="malcolm-guite",
+        author_name="Malcolm Guite",
+        work_repo=work_repo,
+        chunk_repo=chunk_repo,
+    )
+
+    assert profile.author_id == "malcolm-guite"
+    assert 0.0 <= profile.confidence <= 1.0
+    assert profile.register  # non-empty
+    assert len(profile.characteristic_phrases) > 0
+
+
+# ---------------------------------------------------------------------------
+# Error handling tests
+# ---------------------------------------------------------------------------
+
+
+class TestVoiceExtractionErrors:
+    """Test error handling in voice profile extraction."""
+
+    async def test_no_api_key_raises_error(self) -> None:
+        """Should raise IntelligenceError when API key is missing."""
+        from author_library.config import Settings
+
+        settings = Settings()
+        # Ensure no API key (default empty)
+        extractor = VoiceProfileExtractor(settings)
+
+        with pytest.raises(IntelligenceError, match="API key is required"):
+            await extractor.extract(
+                author_id="test",
+                author_name="Test",
+                work_repo=_StubWorkRepo([]),  # type: ignore[arg-type]
+                chunk_repo=_StubChunkRepo([]),  # type: ignore[arg-type]
+            )
+
+    async def test_insufficient_corpus_raises_error(
+        self,
+        pg_pool: PostgresPool,
+    ) -> None:
+        """Should raise IntelligenceError when corpus is too small."""
+        await insert_sample_data(pg_pool)
+
+        # Remove most chunks to create insufficient corpus
+        await pg_pool.execute(
+            "DELETE FROM chunks WHERE position > 1"
+        )
+
+        from author_library.config import APIKeySettings, Settings
+
+        settings = Settings(
+            api_keys=APIKeySettings(anthropic_api_key="sk-fake-key-for-test"),
+        )
+
+        from author_library.storage.repositories import PgChunkRepository, PgWorkRepository
+
+        extractor = VoiceProfileExtractor(settings)
+
+        with pytest.raises(IntelligenceError, match="Insufficient primary corpus"):
+            await extractor.extract(
+                author_id="malcolm-guite",
+                author_name="Malcolm Guite",
+                work_repo=PgWorkRepository(pg_pool),
+                chunk_repo=PgChunkRepository(pg_pool),
+            )
+
+
+# ---------------------------------------------------------------------------
+# Stubs for testing error paths (not mock data — just interface stubs)
+# ---------------------------------------------------------------------------
+
+
+class _StubWorkRepo:
+    """Minimal work repository for testing error paths."""
+
+    def __init__(self, works: list[dict[str, Any]]) -> None:
+        self._works = works
+
+    async def list_by_author(self, author: str) -> list[dict[str, Any]]:
+        return self._works
+
+    async def get(self, work_id: str) -> dict[str, Any] | None:
+        return None
+
+    async def create(self, work: dict[str, Any]) -> str:
+        return work["work_id"]
+
+    async def update(self, work_id: str, fields: dict[str, Any]) -> bool:
+        return False
+
+    async def delete(self, work_id: str) -> bool:
+        return False
+
+
+class _StubChunkRepo:
+    """Minimal chunk repository for testing error paths."""
+
+    def __init__(self, chunks: list[dict[str, Any]]) -> None:
+        self._chunks = chunks
+
+    async def list_by_work(
+        self, work_id: str, *, granularity: str | None = None
+    ) -> list[dict[str, Any]]:
+        return self._chunks
+
+    async def get(self, chunk_id: Any) -> dict[str, Any] | None:
+        return None
+
+    async def create(self, chunk: dict[str, Any]) -> Any:
+        return None
+
+    async def delete(self, chunk_id: Any) -> bool:
+        return False
+
+    async def delete_by_work(self, work_id: str) -> int:
+        return 0

@@ -51,3 +51,7 @@ class ConfigurationError(AuthorLibraryError):
 
 class ParsingError(AuthorLibraryError):
     """Raised when document parsing fails."""
+
+
+class IntelligenceError(AuthorLibraryError):
+    """Raised when intelligence extraction operations fail."""
