@@ -28,11 +28,12 @@ env/
 .DS_Store
 Thumbs.db
 
-# Testing
+# Testing / Linting
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
+.ruff_cache/
 
 # td task management (local state)
 .todos/
