@@ -33,6 +33,7 @@ from author_library.errors import ClassificationError
 if TYPE_CHECKING:
     from author_library.config import Settings
     from author_library.parsing.models import ParsedDocument
+    from author_library.storage.postgres import PostgresPool
     from author_library.storage.repositories import WorkRepository
 
 log = structlog.get_logger(__name__)
@@ -87,10 +88,12 @@ class ClassificationPipeline:
         settings: Settings,
         work_repository: WorkRepository,
         subject_author: str,
+        pg_pool: PostgresPool | None = None,
     ) -> None:
         self._classifier = SourceClassifier(settings)
         self._work_repo = work_repository
         self._subject_author = subject_author
+        self._pg_pool = pg_pool
 
     async def process(
         self,
@@ -129,6 +132,17 @@ class ClassificationPipeline:
             source_class=classification.source_class,
             confidence=classification.confidence,
         )
+
+        # Step 1.5: Resolve missing author from subject_author slug
+        if not document.metadata.author and "author" not in overrides:
+            resolved = await self._resolve_author_name()
+            if resolved:
+                overrides = {**overrides, "author": resolved}
+                log.info(
+                    "pipeline_author_resolved",
+                    resolved_author=resolved,
+                    source="subject_author_lookup",
+                )
 
         # Step 2: Build the appropriate catalog entry
         catalog_entry = self._build_catalog_entry(
@@ -327,6 +341,37 @@ class ClassificationPipeline:
         slug = re.sub(r"[^a-z0-9\s-]", "", slug)
         slug = re.sub(r"[\s]+", "-", slug)
         return slug.strip("-")
+
+    async def _resolve_author_name(self) -> str | None:
+        """Resolve the subject author's canonical name from the authors table.
+
+        Falls back to title-casing the slug if no database entry exists or
+        if no pg_pool is available.
+        """
+        slug = self._subject_author_slug()
+
+        if self._pg_pool is not None:
+            try:
+                row = await self._pg_pool.fetch_one(
+                    "SELECT canonical_name FROM authors WHERE id = $1", slug
+                )
+                if row is not None:
+                    name: str = row["canonical_name"]
+                    log.debug(
+                        "author_name_resolved_from_db",
+                        slug=slug,
+                        canonical_name=name,
+                    )
+                    return name
+            except Exception as exc:
+                log.warning(
+                    "author_name_lookup_failed",
+                    slug=slug,
+                    error=str(exc),
+                )
+
+        # Fallback: title-case the slug (e.g. "fred-rogers" → "Fred Rogers")
+        return slug.replace("-", " ").title()
 
     @staticmethod
     def _catalog_entry_to_work_dict(

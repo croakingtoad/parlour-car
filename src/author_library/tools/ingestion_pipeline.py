@@ -153,6 +153,7 @@ class IngestionPipeline:
             settings=self._settings,
             work_repository=self._storage.works,
             subject_author=subject_author_id,
+            pg_pool=self._storage.pg,
         )
 
         pipeline_result = await classification_pipeline.process(
