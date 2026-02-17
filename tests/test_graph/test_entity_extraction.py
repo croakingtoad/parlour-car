@@ -10,6 +10,7 @@ from author_library.graph.entity_extraction import (
     EntityExtractor,
     ExtractedEntity,
     ExtractionResult,
+    _strip_code_fences,
 )
 
 from .conftest import requires_anthropic, requires_neo4j
@@ -124,6 +125,42 @@ class TestExtractionResponseParsing:
         assert len(extraction) == 1
         assert extraction[0].themes == []
         assert extraction[0].arguments == []
+
+    def test_parse_malformed_json_raises(self) -> None:
+        """Malformed JSON raises JSONDecodeError (enabling retry logic)."""
+        import pytest
+
+        malformed = '[{"chunk_id": "chunk-001", "themes": [{"name": "unterminated'
+        with pytest.raises(json.JSONDecodeError):
+            _parse_test_response(malformed)
+
+
+class TestStripCodeFences:
+    """Test the _strip_code_fences helper function."""
+
+    def test_plain_json(self) -> None:
+        """Plain JSON without fences passes through."""
+        text = '[{"key": "value"}]'
+        assert _strip_code_fences(text) == text
+
+    def test_json_code_fence(self) -> None:
+        """```json ... ``` fences are stripped."""
+        inner = '[{"key": "value"}]'
+        assert _strip_code_fences(f"```json\n{inner}\n```") == inner
+
+    def test_plain_code_fence(self) -> None:
+        """``` ... ``` fences without language tag are stripped."""
+        inner = '[{"key": "value"}]'
+        assert _strip_code_fences(f"```\n{inner}\n```") == inner
+
+    def test_with_surrounding_whitespace(self) -> None:
+        """Leading/trailing whitespace around fences is handled."""
+        inner = '[{"key": "value"}]'
+        assert _strip_code_fences(f"  \n```json\n{inner}\n```\n  ") == inner
+
+    def test_no_fences_with_whitespace(self) -> None:
+        """Plain text with whitespace is just stripped."""
+        assert _strip_code_fences("  [1, 2]  ") == "[1, 2]"
 
 
 class TestEntityExtractionModels:
@@ -279,13 +316,7 @@ class TestEntityExtractionWithNeo4j:
 
 def _parse_test_response(response_text: str) -> list[ChunkExtraction]:
     """Parse an extraction response without instantiating a full EntityExtractor."""
-    # Replicate the parsing logic for unit testing
-    text = response_text.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [ln for ln in lines[1:] if not ln.strip().startswith("```")]
-        text = "\n".join(lines)
-
+    text = _strip_code_fences(response_text)
     raw_list = json.loads(text)
     extractions: list[ChunkExtraction] = []
 

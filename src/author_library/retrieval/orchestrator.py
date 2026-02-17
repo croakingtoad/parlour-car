@@ -10,6 +10,7 @@ then runs a three-pass retrieval pipeline:
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -33,6 +34,20 @@ if TYPE_CHECKING:
     from author_library.storage.repositories import EmbeddingRepository
 
 log = structlog.get_logger(__name__)
+
+_CODE_FENCE_RE = re.compile(r"^```\w*\s*\n(.*?)```\s*$", re.DOTALL)
+
+# Maximum retries for empty/malformed classification responses
+_CLASSIFICATION_MAX_RETRIES = 1
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences from LLM output."""
+    stripped = text.strip()
+    match = _CODE_FENCE_RE.match(stripped)
+    if match:
+        return match.group(1).strip()
+    return stripped
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +84,11 @@ async def classify_question(
     Falls back to THEMATIC if classification fails (safest default
     for comprehensive retrieval).
 
+    Handles common LLM response issues:
+    - Empty responses (retried once, then falls back)
+    - Markdown code fences around JSON
+    - Malformed JSON
+
     Args:
         question: The user's natural-language question.
         settings: Application settings with API key and model config.
@@ -85,38 +105,62 @@ async def classify_question(
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
 
-    try:
-        response = await client.messages.create(
-            model=settings.llm.query_model,
-            max_tokens=256,
-            system=CLASSIFICATION_SYSTEM,
-            messages=[{"role": "user", "content": question}],
-        )
+    for attempt in range(_CLASSIFICATION_MAX_RETRIES + 1):
+        try:
+            response = await client.messages.create(
+                model=settings.llm.query_model,
+                max_tokens=256,
+                system=CLASSIFICATION_SYSTEM,
+                messages=[{"role": "user", "content": question}],
+            )
 
-        response_text = ""
-        for block in response.content:
-            if block.type == "text":
-                response_text = block.text
-                break
+            response_text = ""
+            for block in response.content:
+                if block.type == "text":
+                    response_text = block.text
+                    break
 
-        data = json.loads(response_text.strip())
-        q_type = data.get("question_type", "thematic")
-        classified = QuestionType(q_type)
+            # Handle empty response with retry
+            if not response_text.strip():
+                if attempt < _CLASSIFICATION_MAX_RETRIES:
+                    log.warning(
+                        "classification_empty_response_retrying",
+                        attempt=attempt + 1,
+                    )
+                    continue
+                log.warning(
+                    "classification_empty_response",
+                    fallback="thematic",
+                )
+                return QuestionType.THEMATIC
 
-        log.info(
-            "question_classified",
-            question_type=classified.value,
-            reasoning=data.get("reasoning", ""),
-        )
-        return classified
+            # Strip code fences before parsing
+            cleaned = _strip_code_fences(response_text)
+            data = json.loads(cleaned)
+            q_type = data.get("question_type", "thematic")
+            classified = QuestionType(q_type)
 
-    except (json.JSONDecodeError, ValueError, anthropic.APIError) as exc:
-        log.warning(
-            "classification_failed",
-            error=str(exc),
-            fallback="thematic",
-        )
-        return QuestionType.THEMATIC
+            log.info(
+                "question_classified",
+                question_type=classified.value,
+                reasoning=data.get("reasoning", ""),
+            )
+            return classified
+
+        except (json.JSONDecodeError, ValueError, anthropic.APIError) as exc:
+            log.warning(
+                "classification_failed",
+                error=str(exc),
+                attempt=attempt + 1,
+                response_preview=response_text[:200] if response_text else "(empty)",
+                fallback="thematic",
+            )
+            if attempt < _CLASSIFICATION_MAX_RETRIES:
+                continue
+            return QuestionType.THEMATIC
+
+    # Should not reach here, but fall back safely
+    return QuestionType.THEMATIC
 
 
 # ---------------------------------------------------------------------------

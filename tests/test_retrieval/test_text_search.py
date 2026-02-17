@@ -125,3 +125,42 @@ async def test_keyword_search_chunk_id_is_uuid() -> None:
 
     for r in results:
         assert isinstance(r.chunk_id, UUID)
+
+
+@pytest.mark.asyncio
+async def test_phrase_search_deduplicates_by_chunk_id() -> None:
+    """phrase_search deduplicates results with the same chunk_id."""
+    duplicate_id = uuid4()
+    rows_with_dupes = [
+        {
+            "chunk_id": duplicate_id,
+            "work_id": "lewis--mere-christianity",
+            "rank": 0.85,
+            "snippet": "In the neighborhood of faith...",
+            "granularity": "meso",
+            "source_class": "primary",
+        },
+        {
+            "chunk_id": duplicate_id,
+            "work_id": "lewis--mere-christianity",
+            "rank": 0.80,
+            "snippet": "In the neighborhood of faith...",
+            "granularity": "micro",
+            "source_class": "primary",
+        },
+        {
+            "chunk_id": uuid4(),
+            "work_id": "lewis--weight-of-glory",
+            "rank": 0.72,
+            "snippet": "The neighborhood of glory...",
+            "granularity": "meso",
+            "source_class": "primary",
+        },
+    ]
+    pool = FakePostgresPool(rows_with_dupes)  # type: ignore[arg-type]
+    results = await phrase_search(pool, "neighborhood")  # type: ignore[arg-type]
+
+    # Should have 2 results, not 3 (duplicate chunk_id removed)
+    assert len(results) == 2
+    # First result should be the higher-ranked one (order preserved from PG)
+    assert results[0].score == 0.85
