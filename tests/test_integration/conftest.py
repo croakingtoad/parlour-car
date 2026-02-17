@@ -8,13 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import AsyncIterator
+from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
 
 from author_library.config import DatabaseSettings, Settings
 from author_library.storage.manager import StorageManager
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import AsyncIterator
 
 
 def _db_available() -> bool:

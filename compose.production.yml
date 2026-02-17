@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: author-library-pg
+    environment:
+      POSTGRES_USER: author_library
+      POSTGRES_PASSWORD: ${DB_POSTGRES_PASSWORD:-author_library}
+      POSTGRES_DB: author_library
+    ports:
+      - "${DB_PG_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U author_library"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 512M
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: author-library-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/${DB_NEO4J_PASSWORD:-neo4j_dev}
+      NEO4J_PLUGINS: '[]'
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache_size: 512m
+    ports:
+      - "${DB_NEO4J_BOLT_PORT:-7687}:7687"
+      - "${DB_NEO4J_HTTP_PORT:-7474}:7474"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${DB_NEO4J_PASSWORD:-neo4j_dev}", "RETURN 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+        reservations:
+          memory: 1G
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  neo4j_data:
