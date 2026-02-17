@@ -88,9 +88,17 @@ class EpubParser(DocumentParser):
             if body is None:
                 body = soup
 
-            chapter_node = self._parse_body(body, raw_text_parts, warnings)
-            if chapter_node is not None:
-                root.children.append(chapter_node)
+            result_node = self._parse_body(body, raw_text_parts, warnings)
+            if result_node is not None:
+                if (
+                    result_node.node_type == NodeType.BOOK
+                    and result_node.metadata.get("synthetic")
+                ):
+                    # _parse_body found multiple chapters in one body;
+                    # graft them directly under root.
+                    root.children.extend(result_node.children)
+                else:
+                    root.children.append(result_node)
 
         raw_text = "\n".join(raw_text_parts)
         metadata.word_count = len(raw_text.split())
@@ -163,11 +171,21 @@ class EpubParser(DocumentParser):
         raw_text_parts: list[str],
         warnings: list[str],
     ) -> DocumentNode | None:
-        """Parse an HTML body element into a chapter DocumentNode."""
+        """Parse an HTML body element into one or more chapter DocumentNodes.
+
+        Returns a single chapter node if the body contains one chapter, or a
+        synthetic BOOK node wrapping multiple chapters when the body contains
+        multiple ``<h1>`` chapter boundaries (common in single-file EPUBs).
+        """
+        # Unwrap pure wrapper divs: if body's only meaningful child is a
+        # single <div> that itself contains headings, recurse into it.
+        effective_body = self._unwrap_container(body)
+
+        chapters: list[DocumentNode] = []
         chapter = DocumentNode(node_type=NodeType.CHAPTER)
         current_section: DocumentNode | None = None
 
-        for element in body.children:
+        for element in effective_body.children:
             if not isinstance(element, Tag):
                 text = str(element).strip()
                 if text:
@@ -188,6 +206,17 @@ class EpubParser(DocumentParser):
                 if level in ("h1", "h2") and not chapter.metadata.get("title"):
                     chapter.metadata["title"] = node.text
                     chapter.children.append(node)
+                elif level == "h1" and chapter.metadata.get("title"):
+                    # New h1 while we already have a titled chapter —
+                    # finalize the current chapter and start a new one.
+                    if chapter.children:
+                        chapters.append(chapter)
+                    chapter = DocumentNode(
+                        node_type=NodeType.CHAPTER,
+                        metadata={"title": node.text},
+                    )
+                    chapter.children.append(node)
+                    current_section = None
                 elif level in ("h2", "h3", "h4", "h5", "h6"):
                     current_section = DocumentNode(
                         node_type=NodeType.SECTION,
@@ -202,11 +231,51 @@ class EpubParser(DocumentParser):
                 target = current_section if current_section else chapter
                 target.children.append(node)
 
-        # Skip empty chapters
-        if not chapter.children:
-            return None
+        # Finalize the last chapter
+        if chapter.children:
+            chapters.append(chapter)
 
-        return chapter
+        if not chapters:
+            return None
+        if len(chapters) == 1:
+            return chapters[0]
+
+        # Multiple chapters found in a single body — return a wrapper node
+        # so the caller can attach all of them to the root.
+        wrapper = DocumentNode(node_type=NodeType.BOOK, metadata={"synthetic": True})
+        wrapper.children = chapters
+        return wrapper
+
+    # ------------------------------------------------------------------
+    # Container unwrapping
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unwrap_container(body: Tag) -> Tag:
+        """If *body* is a thin wrapper around a single structural div, return that div.
+
+        Many EPUBs (especially those converted from other formats) wrap the
+        entire content in ``<body><div>…</div></body>`` where the ``<div>``
+        contains headings and paragraphs.  In that case we want to iterate
+        over the div's children rather than treating the div as one opaque
+        element.
+        """
+        # Collect direct Tag children of body, skipping whitespace-only text
+        direct_tags = [c for c in body.children if isinstance(c, Tag)]
+
+        if len(direct_tags) != 1:
+            return body
+
+        wrapper = direct_tags[0]
+        if wrapper.name != "div":
+            return body
+
+        # Check if the wrapper div contains heading tags — a strong signal
+        # that it is structural content, not a styled container
+        if wrapper.find(["h1", "h2", "h3"]):
+            return wrapper
+
+        return body
 
     def _element_to_node(
         self,
@@ -284,11 +353,15 @@ class EpubParser(DocumentParser):
                     raw_text_parts.append(text)
                 return DocumentNode(node_type=NodeType.ENDNOTE, text=text if text else "")
 
-        # Check for poetry: a div/pre containing many <br> or line-structured content
+        # Check for poetry: a div/pre containing many <br> or line-structured content.
+        # Only treat as poem if the element does NOT contain heading tags — a div
+        # with headings is structural content, not a poem, even if it has <br> spacers.
         if tag in ("pre", "div"):
-            br_count = len(element.find_all("br"))
-            if br_count >= _POEM_LINE_BREAK_THRESHOLD:
-                return self._parse_poem(element, raw_text_parts)
+            has_headings = bool(element.find(["h1", "h2", "h3", "h4", "h5", "h6"]))
+            if not has_headings:
+                br_count = len(element.find_all("br"))
+                if br_count >= _POEM_LINE_BREAK_THRESHOLD:
+                    return self._parse_poem(element, raw_text_parts)
 
         # Fallback: extract text from any other element
         text = element.get_text(strip=True)
