@@ -34,6 +34,7 @@ class TestToolDefinitions:
         "author_bio",
         "list_works",
         "library_stats",
+        "health_check",
     })
 
     def test_all_tools_registered(self) -> None:
@@ -41,7 +42,7 @@ class TestToolDefinitions:
         assert tool_names == self.EXPECTED_TOOLS
 
     def test_tool_count(self) -> None:
-        assert len(TOOLS) == 10
+        assert len(TOOLS) == 11
 
     def test_all_tools_have_descriptions(self) -> None:
         for tool in TOOLS:

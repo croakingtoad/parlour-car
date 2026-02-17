@@ -351,21 +351,24 @@ async def handle_find_quotes(
     # Trim to limit
     quotes = quotes[:limit]
 
-    # Enrich with cross-resource links
-    graph_service = GraphQueryService(storage.neo4j)
-    for quote in quotes:
-        chunk_id = quote["chunk_id"]
-        chain = await graph_service.get_engagement_chain(chunk_id)
-        if chain and chain.links:
-            quote["cross_references"] = [
-                {
-                    "target_work_id": link.target_chunk.work_id,
-                    "link_type": link.link_type,
-                    "confidence": link.confidence,
-                    "text_preview": link.target_chunk.text_preview,
-                }
-                for link in chain.links[:3]
-            ]
+    # Enrich with cross-resource links (graceful degradation if Neo4j unavailable)
+    try:
+        graph_service = GraphQueryService(storage.neo4j)
+        for quote in quotes:
+            chunk_id = quote["chunk_id"]
+            chain = await graph_service.get_engagement_chain(chunk_id)
+            if chain and chain.links:
+                quote["cross_references"] = [
+                    {
+                        "target_work_id": link.target_chunk.work_id,
+                        "link_type": link.link_type,
+                        "confidence": link.confidence,
+                        "text_preview": link.target_chunk.text_preview,
+                    }
+                    for link in chain.links[:3]
+                ]
+    except Exception as exc:
+        log.warning("find_quotes_graph_enrichment_failed", error=str(exc), degraded=True)
 
     result = {
         "query": query,

@@ -315,3 +315,57 @@ async def handle_library_stats(
     }
 
     return json.dumps(stats, indent=2, default=str)
+
+
+async def handle_health_check(
+    arguments: dict[str, Any],
+    *,
+    storage: StorageManager,
+    embedding_provider: Any | None = None,
+) -> str:
+    """Handle the health_check MCP tool call.
+
+    Tests connectivity to PostgreSQL, Neo4j, and the embedding provider.
+
+    Returns:
+        JSON with health status for each backend.
+    """
+    from author_library.embeddings.base import EmbeddingProvider
+
+    health: dict[str, Any] = {}
+
+    # PostgreSQL health
+    pg_ok = await storage.pg.health_check()
+    health["postgres"] = {"status": "healthy" if pg_ok else "unhealthy"}
+
+    # Neo4j health
+    neo4j_ok = await storage.neo4j.health_check()
+    health["neo4j"] = {"status": "healthy" if neo4j_ok else "unhealthy"}
+
+    # Embedding provider health
+    if embedding_provider is not None and isinstance(embedding_provider, EmbeddingProvider):
+        try:
+            result = await embedding_provider.embed_text("health check")
+            health["embedding"] = {
+                "status": "healthy",
+                "provider": embedding_provider.provider_name,
+                "model": embedding_provider.model_name,
+                "dimensions": result.dimensions,
+            }
+        except Exception as exc:
+            health["embedding"] = {
+                "status": "unhealthy",
+                "provider": embedding_provider.provider_name,
+                "error": str(exc),
+            }
+    else:
+        health["embedding"] = {"status": "not_configured"}
+
+    all_healthy = all(
+        v.get("status") == "healthy"
+        for v in health.values()
+        if v.get("status") != "not_configured"
+    )
+    health["overall"] = "healthy" if all_healthy else "degraded"
+
+    return json.dumps(health, indent=2)
