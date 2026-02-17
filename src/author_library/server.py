@@ -11,6 +11,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from mcp.server import Server
+from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
@@ -20,6 +21,7 @@ from author_library.storage import StorageManager
 from author_library.tools.ingest import handle_ingest_book, handle_ingest_corpus
 from author_library.tools.meta import (
     handle_author_bio,
+    handle_health_check,
     handle_library_stats,
     handle_list_authors,
     handle_list_works,
@@ -274,6 +276,17 @@ TOOLS: list[Tool] = [
             "properties": {},
         },
     ),
+    Tool(
+        name="health_check",
+        description=(
+            "Check connectivity and health of all backends: PostgreSQL, Neo4j, "
+            "and the embedding provider. Returns per-backend status."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
 ]
 
 
@@ -361,6 +374,12 @@ def create_server(settings: Settings) -> Server:
                 result = await handle_list_works(args, storage=storage_mgr)
             elif name == "library_stats":
                 result = await handle_library_stats(args, storage=storage_mgr)
+            elif name == "health_check":
+                result = await handle_health_check(
+                    args,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                )
             else:
                 result = json.dumps({"error": f"Unknown tool: {name}"})
         except Exception as exc:
@@ -384,7 +403,7 @@ def create_server(settings: Settings) -> Server:
 
 
 async def run_server(settings: Settings) -> None:
-    """Start the MCP server with stdio transport.
+    """Start the MCP server with the configured transport (stdio or SSE).
 
     Handles full lifecycle: logging setup, storage/embedding initialization,
     server creation, and graceful shutdown of all connections.
@@ -418,15 +437,62 @@ async def run_server(settings: Settings) -> None:
     server._tool_state["embedding_provider"] = embedding_provider  # type: ignore[attr-defined]
 
     try:
-        async with stdio_server() as (read_stream, write_stream):
-            log.info("author_library.server_ready", transport="stdio")
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+        if settings.server.transport == "sse":
+            await _run_sse(server, settings)
+        else:
+            await _run_stdio(server)
     finally:
         # Graceful shutdown
         await embedding_provider.close()
         await storage.close()
         log.info("author_library.shutdown_complete")
+
+
+async def _run_stdio(server: Server) -> None:
+    """Run the server with stdio transport."""
+    async with stdio_server() as (read_stream, write_stream):
+        log.info("author_library.server_ready", transport="stdio")
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
+
+
+async def _run_sse(server: Server, settings: Settings) -> None:
+    """Run the server with SSE transport via Starlette + uvicorn.
+
+    Creates a Starlette ASGI app with:
+      - GET /sse — SSE stream for client connections
+      - POST /messages — message endpoint for client commands
+    """
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    sse_transport = SseServerTransport("/messages/")
+
+    async def handle_sse(request: Any) -> None:
+        async with sse_transport.connect_sse(
+            request.scope, request.receive, request._send
+        ) as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(),
+            )
+
+    app = Starlette(
+        routes=[
+            Route("/sse", endpoint=handle_sse),
+            Route("/messages/", endpoint=sse_transport.handle_post_message, methods=["POST"]),
+        ],
+    )
+
+    host = settings.server.host
+    port = settings.server.port
+    log.info("author_library.server_ready", transport="sse", host=host, port=port)
+
+    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    uvicorn_server = uvicorn.Server(config)
+    await uvicorn_server.serve()

@@ -192,7 +192,7 @@ class RetrievalOrchestrator:
             text_weight=strategy["text_weight"],
         )
 
-        # Pass 2: Graph expansion
+        # Pass 2: Graph expansion (graceful degradation if Neo4j is unavailable)
         pass2 = await self._pass2_graph_expansion(
             pass1,
             question_type=question_type,
@@ -294,8 +294,14 @@ class RetrievalOrchestrator:
                 theme_names=theme_names,
                 max_engagement_depth=3,
             )
-        except RetrievalError:
-            log.warning("pass2_graph_expansion_failed")
+        except Exception as exc:
+            # Graceful degradation: if Neo4j is down or graph expansion fails,
+            # proceed with vector-only retrieval
+            log.warning(
+                "pass2_graph_expansion_failed",
+                error=str(exc),
+                degraded=True,
+            )
             expansions = []
 
         log.info("pass2_complete", expanded=len(expansions))
