@@ -41,7 +41,7 @@ class WorkRepository(ABC):
 
     @abstractmethod
     async def list_by_author(self, author: str) -> list[dict[str, Any]]:
-        """List works for a given author."""
+        """List works for a given author slug or display name."""
 
     @abstractmethod
     async def update(self, work_id: str, fields: dict[str, Any]) -> bool:
@@ -236,8 +236,20 @@ class PgWorkRepository(WorkRepository):
         return dict(row) if row else None
 
     async def list_by_author(self, author: str) -> list[dict[str, Any]]:
+        # Query by author slug in source_metadata JSONB fields first, then
+        # fall back to direct author column match.  The source_metadata stores
+        # the author slug differently per source class:
+        #   primary   → subject_author_id
+        #   secondary → about_author_id
+        #   contextual→ referenced_by
         rows = await self._pool.fetch_all(
-            "SELECT * FROM works WHERE author = $1 ORDER BY publication_year", author
+            """SELECT * FROM works
+            WHERE source_metadata->>'subject_author_id' = $1
+               OR source_metadata->>'about_author_id' = $1
+               OR source_metadata->>'referenced_by' = $1
+               OR author ILIKE $1
+            ORDER BY publication_year""",
+            author,
         )
         return [dict(r) for r in rows]
 
