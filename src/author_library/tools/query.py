@@ -330,22 +330,33 @@ async def handle_find_quotes(
 
     phrase_results, vector_results = await asyncio.gather(phrase_task, vector_task)
 
-    # Merge and deduplicate results
+    # Merge and deduplicate results by chunk_id AND by text content.
+    # Text-based dedup prevents showing the same passage from overlapping
+    # granularity chunks (e.g., micro and meso containing identical text).
     seen_chunk_ids: set[str] = set()
+    seen_texts: set[str] = set()
     quotes: list[dict[str, Any]] = []
+
+    def _text_fingerprint(text: str) -> str:
+        """Normalize text for deduplication (strip, lowercase, collapse whitespace)."""
+        return " ".join(text.lower().split())
 
     # Phrase matches first (exact match is highest priority)
     for r in phrase_results:
         cid = str(r.chunk_id)
-        if cid not in seen_chunk_ids:
+        fp = _text_fingerprint(r.text)
+        if cid not in seen_chunk_ids and fp not in seen_texts:
             seen_chunk_ids.add(cid)
+            seen_texts.add(fp)
             quotes.append(_result_to_quote(r, match_type="phrase"))
 
     # Vector matches second (semantic similarity)
     for r in vector_results:
         cid = str(r.chunk_id)
-        if cid not in seen_chunk_ids:
+        fp = _text_fingerprint(r.text)
+        if cid not in seen_chunk_ids and fp not in seen_texts:
             seen_chunk_ids.add(cid)
+            seen_texts.add(fp)
             quotes.append(_result_to_quote(r, match_type="semantic"))
 
     # Trim to limit

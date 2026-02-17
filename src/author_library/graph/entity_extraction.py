@@ -14,6 +14,7 @@ Edge rules enforced by source classification:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +33,26 @@ log = structlog.get_logger(__name__)
 
 # Maximum chunks per LLM batch call
 _BATCH_SIZE = 10
+
+# Maximum retries for a batch when JSON parsing fails
+_MAX_BATCH_RETRIES = 2
+
+_CODE_FENCE_RE = re.compile(r"^```\w*\s*\n(.*?)```\s*$", re.DOTALL)
+
+
+def _strip_code_fences(text: str) -> str:
+    """Strip markdown code fences from LLM output.
+
+    Handles both ```json ... ``` and ``` ... ``` variants.
+    Returns the inner content if fences are found, otherwise
+    returns the stripped input.
+    """
+    stripped = text.strip()
+    match = _CODE_FENCE_RE.match(stripped)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
 
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are an entity extraction engine for an author-studies knowledge graph.
@@ -116,26 +137,29 @@ class EntityExtractor:
         """Extract entities from chunks and write nodes/edges to Neo4j.
 
         Chunks are processed in batches of _BATCH_SIZE for LLM efficiency.
+        On JSON parse failure, the batch is split in half and retried up to
+        _MAX_BATCH_RETRIES times.
         """
         result = ExtractionResult()
 
         for batch_start in range(0, len(chunks), _BATCH_SIZE):
             batch = chunks[batch_start : batch_start + _BATCH_SIZE]
-            try:
-                extractions = await self._extract_batch(batch, work_title=work_title, author=author)
-                result.extractions.extend(extractions)
+            extractions = await self._extract_batch_with_retry(
+                batch, work_title=work_title, author=author, result=result
+            )
 
-                for extraction in extractions:
-                    chunk = next((c for c in batch if c.id == extraction.chunk_id), None)
-                    if chunk is None:
-                        continue
+            for extraction in extractions:
+                chunk = next((c for c in batch if c.id == extraction.chunk_id), None)
+                if chunk is None:
+                    continue
+                try:
                     nodes, edges = await self._persist_extraction(extraction, chunk)
                     result.nodes_created += nodes
                     result.edges_created += edges
-            except Exception as exc:
-                error_msg = f"Batch extraction failed at offset {batch_start}: {exc}"
-                log.error("entity_extraction_batch_failed", offset=batch_start, error=str(exc))
-                result.errors.append(error_msg)
+                except Exception as exc:
+                    error_msg = f"Persist failed for chunk {extraction.chunk_id}: {exc}"
+                    log.error("entity_persist_failed", chunk_id=extraction.chunk_id, error=str(exc))
+                    result.errors.append(error_msg)
 
         log.info(
             "entity_extraction_complete",
@@ -146,6 +170,93 @@ class EntityExtractor:
         )
         return result
 
+    async def _extract_batch_with_retry(
+        self,
+        batch: list[Chunk],
+        *,
+        work_title: str,
+        author: str,
+        result: ExtractionResult,
+        _retry_depth: int = 0,
+    ) -> list[ChunkExtraction]:
+        """Extract entities from a batch, retrying with smaller sub-batches on JSON parse failure.
+
+        On json.JSONDecodeError, the batch is split in half and each half is
+        retried independently. This handles the case where the LLM produces
+        malformed JSON (unterminated strings, etc.) for large batches.
+
+        Args:
+            batch: List of chunks to extract from.
+            work_title: Title of the work being processed.
+            author: Author name.
+            result: Accumulator for errors.
+            _retry_depth: Current retry depth (max _MAX_BATCH_RETRIES).
+
+        Returns:
+            List of ChunkExtraction objects from successful parses.
+        """
+        try:
+            return await self._extract_batch(batch, work_title=work_title, author=author)
+        except json.JSONDecodeError as exc:
+            if _retry_depth >= _MAX_BATCH_RETRIES:
+                error_msg = (
+                    f"Batch JSON parse failed after {_retry_depth} retries "
+                    f"({len(batch)} chunks): {exc}"
+                )
+                log.error(
+                    "entity_extraction_json_failed_final",
+                    batch_size=len(batch),
+                    retry_depth=_retry_depth,
+                    error=str(exc),
+                )
+                result.errors.append(error_msg)
+                return []
+
+            if len(batch) <= 1:
+                # Single chunk batch still failing -- log and skip
+                error_msg = (
+                    f"Single-chunk extraction JSON parse failed "
+                    f"(chunk {batch[0].id}): {exc}"
+                )
+                log.error(
+                    "entity_extraction_single_chunk_json_failed",
+                    chunk_id=batch[0].id,
+                    error=str(exc),
+                )
+                result.errors.append(error_msg)
+                return []
+
+            # Split and retry each half
+            mid = len(batch) // 2
+            log.warning(
+                "entity_extraction_json_retry",
+                batch_size=len(batch),
+                retry_depth=_retry_depth + 1,
+                split_sizes=[mid, len(batch) - mid],
+                error=str(exc),
+            )
+
+            left = await self._extract_batch_with_retry(
+                batch[:mid],
+                work_title=work_title,
+                author=author,
+                result=result,
+                _retry_depth=_retry_depth + 1,
+            )
+            right = await self._extract_batch_with_retry(
+                batch[mid:],
+                work_title=work_title,
+                author=author,
+                result=result,
+                _retry_depth=_retry_depth + 1,
+            )
+            return left + right
+        except Exception as exc:
+            error_msg = f"Batch extraction failed ({len(batch)} chunks): {exc}"
+            log.error("entity_extraction_batch_failed", batch_size=len(batch), error=str(exc))
+            result.errors.append(error_msg)
+            return []
+
     async def _extract_batch(
         self,
         chunks: list[Chunk],
@@ -153,7 +264,11 @@ class EntityExtractor:
         work_title: str,
         author: str,
     ) -> list[ChunkExtraction]:
-        """Call Anthropic API to extract entities from a batch of chunks."""
+        """Call Anthropic API to extract entities from a batch of chunks.
+
+        Raises json.JSONDecodeError if the response is not valid JSON
+        (handled by _extract_batch_with_retry for splitting and retrying).
+        """
         chunks_payload = []
         for chunk in chunks:
             chunks_payload.append(
@@ -184,16 +299,28 @@ class EntityExtractor:
         return self._parse_extraction_response(response_text)
 
     def _parse_extraction_response(self, response_text: str) -> list[ChunkExtraction]:
-        """Parse the LLM JSON response into ChunkExtraction objects."""
-        # Strip markdown code fences if present
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first line (```json) and last line (```)
-            lines = [ln for ln in lines[1:] if not ln.strip().startswith("```")]
-            text = "\n".join(lines)
+        """Parse the LLM JSON response into ChunkExtraction objects.
 
-        raw_list: list[dict[str, Any]] = json.loads(text)
+        Handles common LLM output issues:
+        - Markdown code fences (```json ... ```)
+        - Leading/trailing whitespace
+        - Logs raw response text on parse failure for debugging
+
+        Raises:
+            json.JSONDecodeError: If the response cannot be parsed as JSON
+                after stripping code fences.
+        """
+        text = _strip_code_fences(response_text)
+
+        try:
+            raw_list: list[dict[str, Any]] = json.loads(text)
+        except json.JSONDecodeError:
+            log.error(
+                "entity_extraction_json_parse_failed",
+                response_length=len(response_text),
+                response_preview=response_text[:500],
+            )
+            raise
         extractions: list[ChunkExtraction] = []
 
         for raw in raw_list:

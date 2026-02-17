@@ -89,6 +89,10 @@ async def phrase_search(
 ) -> list[RetrievalResult]:
     """Run exact phrase search for quote lookups.
 
+    Results are deduplicated by chunk_id, keeping the highest-ranked
+    hit per chunk. This prevents duplicate results when the same chunk
+    matches a phrase search through overlapping index entries.
+
     Args:
         pool: PostgresPool instance.
         exact_phrase: Exact phrase to search for.
@@ -97,7 +101,7 @@ async def phrase_search(
         limit: Maximum number of results.
 
     Returns:
-        Ranked list of RetrievalResult objects.
+        Ranked, deduplicated list of RetrievalResult objects.
 
     Raises:
         RetrievalError: If the search operation fails.
@@ -117,22 +121,30 @@ async def phrase_search(
             cause=exc,
         ) from exc
 
-    results = [
-        RetrievalResult(
-            chunk_id=hit.chunk_id,
-            work_id=hit.work_id,
-            text=hit.snippet,
-            score=hit.rank,
-            granularity=hit.granularity,
-            source_class=hit.source_class,
-            source="phrase",
+    # Deduplicate by chunk_id, keeping the highest-ranked hit per chunk
+    seen_chunk_ids: set[str] = set()
+    results: list[RetrievalResult] = []
+    for hit in hits:
+        cid = str(hit.chunk_id)
+        if cid in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(cid)
+        results.append(
+            RetrievalResult(
+                chunk_id=hit.chunk_id,
+                work_id=hit.work_id,
+                text=hit.snippet,
+                score=hit.rank,
+                granularity=hit.granularity,
+                source_class=hit.source_class,
+                source="phrase",
+            )
         )
-        for hit in hits
-    ]
 
     log.info(
         "phrase_search_complete",
         phrase_length=len(exact_phrase),
-        results=len(results),
+        raw_hits=len(hits),
+        deduplicated_results=len(results),
     )
     return results
