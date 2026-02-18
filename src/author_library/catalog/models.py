@@ -168,10 +168,12 @@ class CatalogEntry(BaseModel):
     @field_validator("language")
     @classmethod
     def validate_language(cls, v: str) -> str:
-        if len(v) != 2:
+        # Normalize BCP-47 tags like "en-US" to ISO 639-1 "en"
+        code = v.split("-")[0].strip().lower()
+        if len(code) != 2:
             msg = f"language must be a 2-character ISO 639-1 code, got {v!r}"
             raise ValueError(msg)
-        return v.lower()
+        return code
 
 
 # ---------------------------------------------------------------------------

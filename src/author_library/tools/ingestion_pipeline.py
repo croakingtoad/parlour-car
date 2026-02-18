@@ -225,8 +225,21 @@ class IngestionPipeline:
         chunks = await annotator.annotate_chunks(chunks, annotation_ctx)
 
         # Step 6: Store chunks in PG
+        # Sort so parents (macro) are inserted before children (meso) before
+        # grandchildren (micro), satisfying the parent_chunk_id foreign key.
+        _gran_order = {"macro": 0, "meso": 1, "micro": 2}
+        sorted_chunks = sorted(
+            chunks,
+            key=lambda c: (_gran_order.get(str(c.granularity), 9), c.position),
+        )
+
         chunk_id_map: dict[str, UUID] = {}
-        for chunk in chunks:
+        for chunk in sorted_chunks:
+            # Translate in-memory parent_chunk_id to DB-generated UUID
+            resolved_parent: UUID | None = None
+            if chunk.parent_chunk_id is not None:
+                resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
+
             pg_id = await self._storage.chunks.create({
                 "work_id": chunk.work_id,
                 "text": chunk.text,
@@ -236,7 +249,7 @@ class IngestionPipeline:
                 "chapter": chunk.chapter,
                 "section": chunk.section,
                 "position": chunk.position,
-                "parent_chunk_id": chunk.parent_chunk_id,
+                "parent_chunk_id": resolved_parent,
                 "metadata": chunk.metadata,
             })
             chunk_id_map[chunk.id] = pg_id
