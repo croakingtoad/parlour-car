@@ -324,40 +324,49 @@ class EntityExtractor:
         extractions: list[ChunkExtraction] = []
 
         for raw in raw_list:
-            chunk_id = raw["chunk_id"]
+            chunk_id = raw.get("chunk_id", "")
+            if not chunk_id:
+                continue
             themes = [
                 ExtractedEntity(
                     entity_type="theme",
-                    name=t["name"],
-                    canonical_name=t["canonical_name"],
+                    name=t.get("name", ""),
+                    canonical_name=t.get("canonical_name", "")
+                    or t.get("name", "").lower().replace(" ", "-")[:80],
                 )
                 for t in raw.get("themes", [])
+                if t.get("name") or t.get("canonical_name")
             ]
             arguments = [
                 ExtractedEntity(
                     entity_type="argument",
-                    name=a["claim"],
-                    canonical_name=a["claim"][:80].lower().replace(" ", "-"),
+                    name=a.get("claim", ""),
+                    canonical_name=a.get("claim", "")[:80].lower().replace(" ", "-"),
                     properties={"evidence_summary": a.get("evidence_summary", "")},
                 )
                 for a in raw.get("arguments", [])
+                if a.get("claim")
             ]
             concepts = [
                 ExtractedEntity(
                     entity_type="concept",
-                    name=c["name"],
-                    canonical_name=c["canonical_name"],
+                    name=c.get("name", ""),
+                    canonical_name=c.get("canonical_name", "")
+                    or c.get("name", "").lower().replace(" ", "-")[:80],
                 )
                 for c in raw.get("concepts", [])
+                if c.get("name") or c.get("canonical_name")
             ]
             persons = [
                 ExtractedEntity(
                     entity_type="person",
-                    name=p["name"],
-                    canonical_name=p["canonical_name"],
+                    name=p.get("name", ""),
+                    canonical_name=p.get("canonical_name", "")
+                    or p.get("name", "").lower().replace(" ", "-")[:80],
                     properties={"role": p.get("role", "referenced")},
                 )
                 for p in raw.get("persons", [])
+                if p.get("name") or p.get("canonical_name")
             ]
             extractions.append(
                 ChunkExtraction(
