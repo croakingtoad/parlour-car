@@ -1,0 +1,39 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Bodleian-inspired PWA icon for The Author Library -->
+  <!-- Background: Oxford Blue -->
+  <rect width="512" height="512" fill="#002147"/>
+
+  <!-- Decorative border: Burgundy -->
+  <rect x="16" y="16" width="480" height="480" fill="none" stroke="#7c2529" stroke-width="12" rx="8"/>
+
+  <!-- Open book illustration -->
+  <g id="book">
+    <!-- Left page -->
+    <path d="M 140 180 L 250 190 L 250 350 L 140 340 Z" fill="#f4e8d0" stroke="#d4af37" stroke-width="4"/>
+
+    <!-- Right page -->
+    <path d="M 262 190 L 372 180 L 372 340 L 262 350 Z" fill="#f4e8d0" stroke="#d4af37" stroke-width="4"/>
+
+    <!-- Book spine (center) -->
+    <line x1="256" y1="190" x2="256" y2="350" stroke="#d4af37" stroke-width="6"/>
+
+    <!-- Text lines on left page -->
+    <line x1="160" y1="220" x2="240" y2="222" stroke="#002147" stroke-width="3"/>
+    <line x1="160" y1="245" x2="240" y2="247" stroke="#002147" stroke-width="3"/>
+    <line x1="160" y1="270" x2="240" y2="272" stroke="#002147" stroke-width="3"/>
+    <line x1="160" y1="295" x2="230" y2="297" stroke="#002147" stroke-width="3"/>
+
+    <!-- Text lines on right page -->
+    <line x1="272" y1="222" x2="352" y2="220" stroke="#002147" stroke-width="3"/>
+    <line x1="272" y1="247" x2="352" y2="245" stroke="#002147" stroke-width="3"/>
+    <line x1="272" y1="272" x2="352" y2="270" stroke="#002147" stroke-width="3"/>
+    <line x1="282" y1="297" x2="352" y2="295" stroke="#002147" stroke-width="3"/>
+  </g>
+
+  <!-- Ornamental flourish below book -->
+  <g id="flourish">
+    <circle cx="256" cy="380" r="8" fill="#d4af37"/>
+    <line x1="220" y1="380" x2="244" y2="380" stroke="#d4af37" stroke-width="2"/>
+    <line x1="268" y1="380" x2="292" y2="380" stroke="#d4af37" stroke-width="2"/>
+  </g>
+</svg>
