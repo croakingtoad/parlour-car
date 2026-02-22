@@ -2,6 +2,14 @@
 
 An MCP server for conversational author intelligence via enriched RAG. Ingest an author's corpus, build a knowledge graph with voice profiles and thematic indexes, then have voice-calibrated conversations grounded in the actual texts.
 
+## What It Does
+
+The Author Library turns a collection of an author's writings into a searchable, voice-aware knowledge base. You feed it books, essays, interviews, sermons, letters — anything the author wrote or said — and it builds a rich understanding of their ideas, language, and intellectual evolution. Then you can ask questions and get answers that draw from the actual texts, cited with sources, and calibrated to the author's own voice rather than generic AI paraphrase.
+
+The system distinguishes between what the author actually wrote (primary sources) and what others wrote about them (secondary sources), ensuring that the author's voice is never contaminated by critics' or scholars' language. It tracks how ideas develop across works, maps thematic connections, and extracts entities and relationships into a knowledge graph for deeper structural queries.
+
+Two interfaces are available: an **MCP server** (11 tools) for integration with Claude Desktop and other MCP clients, and a **Chainlit chat frontend** for direct browser-based conversation with author-profile switching.
+
 ## Quick Start
 
 ```bash
