@@ -39,16 +39,25 @@ _MAX_BATCH_RETRIES = 2
 
 _CODE_FENCE_RE = re.compile(r"^```\w*\s*\n(.*?)```\s*$", re.DOTALL)
 
+# Handles truncated responses where closing ``` is missing
+_CODE_FENCE_OPEN_RE = re.compile(r"^```\w*\s*\n(.*)$", re.DOTALL)
+
 
 def _strip_code_fences(text: str) -> str:
     """Strip markdown code fences from LLM output.
 
-    Handles both ```json ... ``` and ``` ... ``` variants.
+    Handles both ```json ... ``` and ``` ... ``` variants,
+    including truncated responses where the closing fence is
+    missing (e.g. due to max_tokens truncation).
     Returns the inner content if fences are found, otherwise
     returns the stripped input.
     """
     stripped = text.strip()
     match = _CODE_FENCE_RE.match(stripped)
+    if match:
+        return match.group(1).strip()
+    # Fallback: opening fence present but closing fence missing (truncated)
+    match = _CODE_FENCE_OPEN_RE.match(stripped)
     if match:
         return match.group(1).strip()
     return stripped
@@ -315,12 +324,33 @@ class EntityExtractor:
         try:
             raw_list: list[dict[str, Any]] = json.loads(text)
         except json.JSONDecodeError:
-            log.error(
-                "entity_extraction_json_parse_failed",
-                response_length=len(response_text),
-                response_preview=response_text[:500],
-            )
-            raise
+            # Attempt to salvage truncated JSON (e.g. max_tokens cut off
+            # the response mid-array).  Find the last complete object by
+            # locating the final '}' and closing the array.
+            last_brace = text.rfind("}")
+            if last_brace > 0:
+                candidate = text[: last_brace + 1].rstrip().rstrip(",") + "]"
+                try:
+                    raw_list = json.loads(candidate)
+                    log.warning(
+                        "entity_extraction_json_truncated_salvaged",
+                        original_length=len(response_text),
+                        salvaged_objects=len(raw_list),
+                    )
+                except json.JSONDecodeError:
+                    log.error(
+                        "entity_extraction_json_parse_failed",
+                        response_length=len(response_text),
+                        response_preview=response_text[:500],
+                    )
+                    raise
+            else:
+                log.error(
+                    "entity_extraction_json_parse_failed",
+                    response_length=len(response_text),
+                    response_preview=response_text[:500],
+                )
+                raise
         extractions: list[ChunkExtraction] = []
 
         for raw in raw_list:

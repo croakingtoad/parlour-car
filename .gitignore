@@ -47,3 +47,19 @@ docker-data/
 # Logs
 *.log
 logs/
+
+# Chainlit
+.chainlit/
+chainlit.md
+
+# Test / ingestion scripts (local only)
+run_*.py
+generate_*.py
+test-corpus/
+
+# Claude local config
+.claude/settings.json
+.claude/pwa-*
+
+# Sidecar
+.sidecar/
