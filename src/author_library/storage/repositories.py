@@ -77,6 +77,10 @@ class ChunkRepository(ABC):
     async def delete_by_work(self, work_id: str) -> int:
         """Delete all chunks for a work. Returns count deleted."""
 
+    @abstractmethod
+    async def get_max_pass_number(self, work_id: str) -> int:
+        """Get the maximum pass_number for a work's chunks."""
+
 
 class EmbeddingRepository(ABC):
     """Interface for chunk embedding storage/retrieval."""
@@ -149,6 +153,44 @@ class VoiceProfileRepository(ABC):
         """List all voice profile versions for an author."""
 
 
+class SessionRepository(ABC):
+    """Interface for session tracking operations."""
+
+    @abstractmethod
+    async def create(self, session: dict[str, Any]) -> UUID:
+        """Create a new session and return its id."""
+
+    @abstractmethod
+    async def get(self, session_id: UUID) -> dict[str, Any] | None:
+        """Get a session by id."""
+
+    @abstractmethod
+    async def get_active(self, user_id: str) -> dict[str, Any] | None:
+        """Get the currently active (open) session for a user."""
+
+    @abstractmethod
+    async def end_session(self, session_id: UUID) -> bool:
+        """End a session by setting date_end and calculating duration."""
+
+    @abstractmethod
+    async def add_capture(self, session_id: UUID, chunk_id: UUID, capture_order: int) -> UUID:
+        """Add a capture (chunk) to a session."""
+
+    @abstractmethod
+    async def add_source(self, session_id: UUID, work_id: str) -> None:
+        """Associate a work with a session."""
+
+    @abstractmethod
+    async def list_captures(self, session_id: UUID) -> list[dict[str, Any]]:
+        """List all captures in a session."""
+
+    @abstractmethod
+    async def list_sessions(
+        self, user_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """List recent sessions for a user."""
+
+
 class GraphRepository(ABC):
     """Interface for Neo4j graph operations."""
 
@@ -184,6 +226,25 @@ class GraphRepository(ABC):
     async def get_themes_for_chunk(self, chunk_id: str) -> list[dict[str, Any]]:
         """Get all themes explored by a chunk."""
 
+    @abstractmethod
+    async def create_user_reflects_on_edge(
+        self,
+        *,
+        reflection_chunk_id: str,
+        target_id: str,
+        target_type: str,
+        target_label: str,
+        target_key: str,
+        date_created: str | None = None,
+    ) -> None:
+        """Create a USER_REFLECTS_ON edge from a personal chunk to a target."""
+
+    @abstractmethod
+    async def get_reflections_for_target(
+        self, target_id: str, target_key: str, target_label: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get all personal reflection chunks for a target via USER_REFLECTS_ON."""
+
 
 # ---------------------------------------------------------------------------
 # Concrete PostgreSQL implementations
@@ -203,12 +264,16 @@ class PgWorkRepository(WorkRepository):
                 work_id, title, author, source_class, source_class_note,
                 publication_year, original_publication_year, edition, publisher, isbn,
                 format_ingested, language, word_count, genre_tags, subject_headings,
-                ocr_quality, notes, source_metadata
+                ocr_quality, notes, source_metadata,
+                url, duration, speakers, date_published, date_consumed,
+                transcript_cached, media
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15,
-                $16, $17, $18
+                $16, $17, $18,
+                $19, $20, $21, $22, $23,
+                $24, $25
             )""",
             work_id,
             work["title"],
@@ -228,6 +293,13 @@ class PgWorkRepository(WorkRepository):
             work.get("ocr_quality"),
             work.get("notes"),
             json.dumps(work.get("source_metadata", {})),
+            work.get("url"),
+            work.get("duration"),
+            work.get("speakers"),
+            work.get("date_published"),
+            work.get("date_consumed"),
+            work.get("transcript_cached", False),
+            work.get("media"),
         )
         return work_id
 
@@ -285,8 +357,9 @@ class PgChunkRepository(ChunkRepository):
         row = await self._pool.fetch_one(
             """INSERT INTO chunks (
                 work_id, text, annotation, granularity, source_class,
-                chapter, section, position, parent_chunk_id, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                chapter, section, position, parent_chunk_id, metadata,
+                raw_content, raw_content_window, pass_number
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id""",
             chunk["work_id"],
             chunk["text"],
@@ -298,10 +371,24 @@ class PgChunkRepository(ChunkRepository):
             chunk["position"],
             chunk.get("parent_chunk_id"),
             json.dumps(chunk.get("metadata", {})),
+            chunk.get("raw_content"),
+            chunk.get("raw_content_window"),
+            chunk.get("pass_number", 1),
         )
         if row is None:
             raise StorageError("Failed to insert chunk — no id returned")
         return row["id"]  # type: ignore[no-any-return]
+
+    async def get_max_pass_number(self, work_id: str) -> int:
+        """Get the maximum pass_number for a work's chunks.
+
+        Returns 0 if no chunks exist for the work.
+        """
+        result = await self._pool.fetch_val(
+            "SELECT COALESCE(MAX(pass_number), 0) FROM chunks WHERE work_id = $1",
+            work_id,
+        )
+        return int(result)
 
     async def get(self, chunk_id: UUID) -> dict[str, Any] | None:
         row = await self._pool.fetch_one("SELECT * FROM chunks WHERE id = $1", chunk_id)
@@ -524,6 +611,99 @@ class PgVoiceProfileRepository(VoiceProfileRepository):
         return [dict(r) for r in rows]
 
 
+class PgSessionRepository(SessionRepository):
+    """PostgreSQL-backed session repository."""
+
+    def __init__(self, pool: PostgresPool) -> None:
+        self._pool = pool
+
+    async def create(self, session: dict[str, Any]) -> UUID:
+        row = await self._pool.fetch_one(
+            """INSERT INTO sessions (title, user_id)
+            VALUES ($1, $2)
+            RETURNING id""",
+            session.get("title"),
+            session.get("user_id", "marty"),
+        )
+        if row is None:
+            raise StorageError("Failed to create session — no id returned")
+        return row["id"]  # type: ignore[no-any-return]
+
+    async def get(self, session_id: UUID) -> dict[str, Any] | None:
+        row = await self._pool.fetch_one(
+            "SELECT * FROM sessions WHERE id = $1", session_id
+        )
+        return dict(row) if row else None
+
+    async def get_active(self, user_id: str) -> dict[str, Any] | None:
+        row = await self._pool.fetch_one(
+            """SELECT * FROM sessions
+            WHERE user_id = $1 AND date_end IS NULL
+            ORDER BY date_start DESC LIMIT 1""",
+            user_id,
+        )
+        return dict(row) if row else None
+
+    async def end_session(self, session_id: UUID) -> bool:
+        result = await self._pool.execute(
+            """UPDATE sessions
+            SET date_end = NOW(),
+                duration_minutes = EXTRACT(EPOCH FROM (NOW() - date_start))::INT / 60,
+                updated_at = NOW()
+            WHERE id = $1 AND date_end IS NULL""",
+            session_id,
+        )
+        return result.endswith("1")
+
+    async def add_capture(self, session_id: UUID, chunk_id: UUID, capture_order: int) -> UUID:
+        row = await self._pool.fetch_one(
+            """INSERT INTO session_captures (session_id, chunk_id, capture_order)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (session_id, chunk_id) DO UPDATE
+                SET capture_order = EXCLUDED.capture_order
+            RETURNING id""",
+            session_id,
+            chunk_id,
+            capture_order,
+        )
+        if row is None:
+            raise StorageError("Failed to add capture to session")
+        return row["id"]  # type: ignore[no-any-return]
+
+    async def add_source(self, session_id: UUID, work_id: str) -> None:
+        await self._pool.execute(
+            """INSERT INTO session_sources (session_id, work_id)
+            VALUES ($1, $2)
+            ON CONFLICT (session_id, work_id) DO NOTHING""",
+            session_id,
+            work_id,
+        )
+
+    async def list_captures(self, session_id: UUID) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch_all(
+            """SELECT sc.*, c.text, c.work_id, c.granularity, c.source_class
+            FROM session_captures sc
+            JOIN chunks c ON c.id = sc.chunk_id
+            WHERE sc.session_id = $1
+            ORDER BY sc.capture_order""",
+            session_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def list_sessions(
+        self, user_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch_all(
+            """SELECT * FROM sessions
+            WHERE user_id = $1
+            ORDER BY date_start DESC
+            LIMIT $2""",
+            user_id,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Concrete Neo4j implementation
 # ---------------------------------------------------------------------------
@@ -552,19 +732,27 @@ class Neo4jGraphRepository(GraphRepository):
         )
 
     async def upsert_chunk_node(self, chunk: dict[str, Any]) -> None:
-        await self._neo4j.execute_write(
-            """MERGE (c:Chunk {chunk_id: $chunk_id})
-            SET c.work_id = $work_id,
+        # Build SET clause dynamically to include user_id for personal chunks
+        params = {
+            "chunk_id": chunk["chunk_id"],
+            "work_id": chunk["work_id"],
+            "text_preview": chunk.get("text_preview", chunk.get("text", "")[:200]),
+            "granularity": chunk["granularity"],
+            "source_class": chunk["source_class"],
+        }
+        set_clause = """SET c.work_id = $work_id,
                 c.text_preview = $text_preview,
                 c.granularity = $granularity,
-                c.source_class = $source_class""",
-            {
-                "chunk_id": chunk["chunk_id"],
-                "work_id": chunk["work_id"],
-                "text_preview": chunk.get("text_preview", chunk.get("text", "")[:200]),
-                "granularity": chunk["granularity"],
-                "source_class": chunk["source_class"],
-            },
+                c.source_class = $source_class"""
+
+        if "user_id" in chunk:
+            set_clause += ",\n                c.user_id = $user_id"
+            params["user_id"] = chunk["user_id"]
+
+        await self._neo4j.execute_write(
+            f"""MERGE (c:Chunk {{chunk_id: $chunk_id}})
+            {set_clause}""",
+            params,
         )
 
     async def create_edge(
@@ -617,5 +805,69 @@ class Neo4jGraphRepository(GraphRepository):
             """MATCH (c:Chunk {chunk_id: $chunk_id})-[:EXPLORES_THEME]->(t:Theme)
             RETURN t.name AS name, t.canonical_name AS canonical_name""",
             {"chunk_id": chunk_id},
+        )
+        return results
+
+    async def create_user_reflects_on_edge(
+        self,
+        *,
+        reflection_chunk_id: str,
+        target_id: str,
+        target_type: str,
+        target_label: str,
+        target_key: str,
+        date_created: str | None = None,
+    ) -> None:
+        """Create a USER_REFLECTS_ON edge from a personal chunk to a target.
+
+        Personal chunks (source_class='personal') connect to captures or themes
+        via USER_REFLECTS_ON edges. This relationship represents the user's
+        reflection on the target content.
+
+        Args:
+            reflection_chunk_id: The chunk_id of the personal reflection chunk.
+            target_id: The identifier of the target node.
+            target_type: The type of target ('capture' or 'theme').
+            target_label: The Neo4j label of the target node (e.g., 'Chunk', 'Theme').
+            target_key: The property key on the target node (e.g., 'chunk_id', 'canonical_name').
+            date_created: ISO date string for when the reflection was created.
+        """
+        props: dict[str, Any] = {"target_type": target_type}
+        if date_created:
+            props["date_created"] = date_created
+
+        await self.create_edge(
+            from_label="Chunk",
+            from_key="chunk_id",
+            from_value=reflection_chunk_id,
+            rel_type="USER_REFLECTS_ON",
+            to_label=target_label,
+            to_key=target_key,
+            to_value=target_id,
+            properties=props,
+        )
+
+    async def get_reflections_for_target(
+        self, target_id: str, target_key: str, target_label: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get all personal reflection chunks connected to a target via USER_REFLECTS_ON.
+
+        Args:
+            target_id: The identifier of the target node.
+            target_key: The property key on the target node.
+            target_label: The Neo4j label of the target node.
+            limit: Maximum number of results.
+
+        Returns:
+            List of reflection chunk data with edge properties.
+        """
+        results = await self._neo4j.execute_read(
+            f"""MATCH (c:Chunk)-[r:USER_REFLECTS_ON]->(t:{target_label} {{{target_key}: $target_id}})
+            RETURN c.chunk_id AS chunk_id, c.work_id AS work_id,
+                   c.text_preview AS text_preview, c.granularity AS granularity,
+                   c.source_class AS source_class, c.user_id AS user_id,
+                   r.target_type AS target_type, r.date_created AS date_created
+            LIMIT $limit""",
+            {"target_id": target_id, "limit": limit},
         )
         return results
