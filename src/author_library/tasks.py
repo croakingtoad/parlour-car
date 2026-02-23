@@ -8,6 +8,7 @@ startup via worker.py).
 Tasks:
   - task_ingest_book: Full single-work ingestion (all pipeline stages)
   - task_ingest_corpus: Bulk ingestion of multiple works with cross-work analysis
+  - task_process_capture: Chrome extension capture event processing
 
 The existing synchronous pipeline (IngestionPipeline.ingest) remains
 available for direct invocation when immediate results are needed
@@ -201,3 +202,54 @@ async def task_ingest_corpus(
     )
 
     return corpus_summary
+
+
+async def task_process_capture(
+    ctx: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """arq task: process a capture event from the Chrome extension.
+
+    Deserializes the capture payload, delegates to the capture processor,
+    and returns the result as a serializable dict.
+
+    Args:
+        ctx: arq worker context with 'settings', 'storage', 'embedding_provider'.
+        payload: Serialized CapturePayload dict.
+
+    Returns:
+        dict with capture result data.
+    """
+    settings = ctx["settings"]
+    storage = ctx["storage"]
+    embedding_provider = ctx["embedding_provider"]
+
+    from author_library.captures.models import CapturePayload
+    from author_library.captures.processor import process_capture
+
+    capture_payload = CapturePayload(**payload)
+
+    log.info(
+        "task_process_capture_starting",
+        source_url=capture_payload.source_url,
+        mode=capture_payload.mode.value,
+        timestamp=capture_payload.timestamp_seconds,
+    )
+
+    result = await process_capture(
+        capture_payload,
+        settings=settings,
+        storage=storage,
+        embedding_provider=embedding_provider,
+    )
+
+    result_dict = result.to_dict()
+    log.info(
+        "task_process_capture_complete",
+        capture_id=result.capture_id,
+        chunk_id=result.chunk_id,
+        errors=len(result.errors),
+    )
+
+    return result_dict

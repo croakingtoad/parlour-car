@@ -121,6 +121,40 @@ class TaskQueue:
         )
         return job.job_id
 
+    async def enqueue_capture(
+        self,
+        *,
+        payload: dict[str, Any],
+    ) -> str | None:
+        """Enqueue a capture event for background processing.
+
+        Args:
+            payload: Serialized CapturePayload dict.
+
+        Returns:
+            The arq job ID if enqueued, or None if the queue is unavailable.
+        """
+        if not self._pool:
+            return None
+
+        job = await self._pool.enqueue_job(
+            "task_process_capture",
+            payload=payload,
+        )
+
+        if job is None:
+            log.warning("task_enqueue_failed", task="process_capture")
+            return None
+
+        log.info(
+            "task_enqueued",
+            task="process_capture",
+            job_id=job.job_id,
+            source_url=payload.get("source_url"),
+            mode=payload.get("mode"),
+        )
+        return job.job_id
+
     async def get_job_status(self, job_id: str) -> dict[str, Any]:
         """Get the status of a queued job.
 

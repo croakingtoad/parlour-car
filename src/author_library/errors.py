@@ -55,3 +55,7 @@ class ParsingError(AuthorLibraryError):
 
 class IntelligenceError(AuthorLibraryError):
     """Raised when intelligence extraction operations fail."""
+
+
+class CaptureError(AuthorLibraryError):
+    """Raised when capture processing fails."""

@@ -14,7 +14,7 @@ import structlog
 from arq.connections import RedisSettings as ArqRedisSettings
 
 from author_library.config import get_settings
-from author_library.tasks import task_ingest_book, task_ingest_corpus
+from author_library.tasks import task_ingest_book, task_ingest_corpus, task_process_capture
 
 log = structlog.get_logger(__name__)
 
@@ -86,7 +86,7 @@ class WorkerSettings:
     ingestion tasks are implemented (D2).
     """
 
-    functions = [task_ingest_book, task_ingest_corpus]
+    functions = [task_ingest_book, task_ingest_corpus, task_process_capture]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = get_redis_settings()

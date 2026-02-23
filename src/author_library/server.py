@@ -594,10 +594,14 @@ async def _run_sse(server: Server, settings: Settings) -> None:
     Creates a Starlette ASGI app with:
       - GET /sse — SSE stream for client connections
       - POST /messages — message endpoint for client commands
+      - POST /api/v1/captures — Chrome extension capture endpoint
+      - GET /api/v1/captures/status/{job_id} — capture job status
     """
     import uvicorn
     from starlette.applications import Starlette
     from starlette.routing import Route
+
+    from author_library.captures.endpoint import handle_capture, handle_capture_status
 
     sse_transport = SseServerTransport("/messages/")
 
@@ -615,8 +619,24 @@ async def _run_sse(server: Server, settings: Settings) -> None:
         routes=[
             Route("/sse", endpoint=handle_sse),
             Route("/messages/", endpoint=sse_transport.handle_post_message, methods=["POST"]),
+            Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
+            Route(
+                "/api/v1/captures/status/{job_id:str}",
+                endpoint=handle_capture_status,
+                methods=["GET"],
+            ),
         ],
     )
+
+    # Inject shared state for capture endpoint
+    api_key_secret = settings.api_keys.parlour_api_key
+    api_key = api_key_secret.get_secret_value() if api_key_secret else ""
+    app.state._state = {  # type: ignore[union-attr]
+        "api_key": api_key,
+        "task_queue": server._tool_state.get("task_queue"),  # type: ignore[attr-defined]
+        "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]
+        "settings": settings,
+    }
 
     host = settings.server.host
     port = settings.server.port
