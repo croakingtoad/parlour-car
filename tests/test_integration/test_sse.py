@@ -43,7 +43,7 @@ class TestSSETransportConfiguration:
         settings.server.transport = "sse"
         server = create_server(settings)
         assert server is not None
-        assert len(TOOLS) == 11
+        assert len(TOOLS) == 13
 
     def test_starlette_available(self) -> None:
         """Verify Starlette is available for SSE transport."""

@@ -23,6 +23,7 @@ from author_library.retrieval.text_search import phrase_search
 from author_library.retrieval.vector_search import vector_search
 
 if TYPE_CHECKING:
+    from author_library.cache import CacheManager
     from author_library.config import Settings
     from author_library.embeddings.base import EmbeddingProvider
     from author_library.storage.manager import StorageManager
@@ -41,6 +42,7 @@ async def handle_ask_author(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the ask_author MCP tool call.
 
@@ -63,8 +65,8 @@ async def handle_ask_author(
 
     response_style = arguments.get("response_style", "conversational")
 
-    # Build graph query service
-    graph_service = GraphQueryService(storage.neo4j)
+    # Build graph query service (with cache if available)
+    graph_service = GraphQueryService(storage.neo4j, cache=cache_manager)
 
     # Step 1: Multi-pass retrieval
     orchestrator = RetrievalOrchestrator(
@@ -80,25 +82,43 @@ async def handle_ask_author(
         author_id=author_id,
     )
 
-    # Step 2: Get voice profile for calibration
-    voice_manager = VoiceProfileManager(settings)
-    voice_profile = await voice_manager.get_current(
-        author_id=author_id,
-        voice_repo=storage.voice_profiles,
-    )
+    # Step 2: Get voice profile for calibration (with cache)
+    voice_profile = None
+    if cache_manager:
+        v_key = cache_manager.voice_key(author_id)
+        voice_profile = await cache_manager.voice_cache.get(v_key)
 
-    # Step 3: Get thematic entries for context
-    thematic_entries_raw = await storage.thematic.list_entries(author_id)
+    if voice_profile is None:
+        voice_manager = VoiceProfileManager(settings)
+        voice_profile = await voice_manager.get_current(
+            author_id=author_id,
+            voice_repo=storage.voice_profiles,
+        )
+        if cache_manager and voice_profile is not None:
+            v_key = cache_manager.voice_key(author_id)
+            await cache_manager.voice_cache.put(v_key, voice_profile)
+
+    # Step 3: Get thematic entries for context (with cache)
     from author_library.intelligence.thematic_index import ThematicEntry
 
-    thematic_entries = [
-        ThematicEntry(
-            theme=e.get("theme", ""),
-            author_stance=e.get("author_stance", ""),
-            related_themes=e.get("related_themes", []),
-        )
-        for e in thematic_entries_raw
-    ]
+    thematic_entries: list[ThematicEntry] | None = None
+    if cache_manager:
+        t_key = cache_manager.thematic_key(author_id)
+        thematic_entries = await cache_manager.thematic_cache.get(t_key)
+
+    if thematic_entries is None:
+        thematic_entries_raw = await storage.thematic.list_entries(author_id)
+        thematic_entries = [
+            ThematicEntry(
+                theme=e.get("theme", ""),
+                author_stance=e.get("author_stance", ""),
+                related_themes=e.get("related_themes", []),
+            )
+            for e in thematic_entries_raw
+        ]
+        if cache_manager:
+            t_key = cache_manager.thematic_key(author_id)
+            await cache_manager.thematic_cache.put(t_key, thematic_entries)
 
     # Step 4: Assemble context window
     context_window = assemble_context(
@@ -180,6 +200,7 @@ async def handle_trace_theme(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the trace_theme MCP tool call.
 
@@ -196,7 +217,7 @@ async def handle_trace_theme(
 
     author_id = arguments.get("author_id")
 
-    graph_service = GraphQueryService(storage.neo4j)
+    graph_service = GraphQueryService(storage.neo4j, cache=cache_manager)
 
     # Get theme subgraph from Neo4j
     subgraph = await graph_service.get_theme_subgraph(theme_name)
@@ -287,6 +308,7 @@ async def handle_find_quotes(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the find_quotes MCP tool call.
 
@@ -364,7 +386,7 @@ async def handle_find_quotes(
 
     # Enrich with cross-resource links (graceful degradation if Neo4j unavailable)
     try:
-        graph_service = GraphQueryService(storage.neo4j)
+        graph_service = GraphQueryService(storage.neo4j, cache=cache_manager)
         for quote in quotes:
             chunk_id = quote["chunk_id"]
             chain = await graph_service.get_engagement_chain(chunk_id)
@@ -401,6 +423,7 @@ async def handle_compare_ideas(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the compare_ideas MCP tool call.
 
@@ -422,7 +445,7 @@ async def handle_compare_ideas(
             context={"arguments": arguments},
         )
 
-    graph_service = GraphQueryService(storage.neo4j)
+    graph_service = GraphQueryService(storage.neo4j, cache=cache_manager)
     comparisons: list[dict[str, Any]] = []
 
     for author_id in author_ids:

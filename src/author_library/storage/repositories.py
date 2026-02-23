@@ -191,6 +191,26 @@ class SessionRepository(ABC):
         """List recent sessions for a user."""
 
 
+class TranscriptCacheRepository(ABC):
+    """Interface for transcript cache operations."""
+
+    @abstractmethod
+    async def get_cached(self, source_url: str) -> str | None:
+        """Return cached transcript text if not expired, or None."""
+
+    @abstractmethod
+    async def cache(self, source_url: str, transcript_text: str, ttl_seconds: int = 86400) -> None:
+        """Store or replace a transcript in the cache."""
+
+    @abstractmethod
+    async def invalidate(self, source_url: str) -> bool:
+        """Remove a cached transcript. Returns True if a row was deleted."""
+
+    @abstractmethod
+    async def invalidate_expired(self) -> int:
+        """Remove all expired cache entries. Returns count deleted."""
+
+
 class GraphRepository(ABC):
     """Interface for Neo4j graph operations."""
 
@@ -702,6 +722,51 @@ class PgSessionRepository(SessionRepository):
             limit,
         )
         return [dict(r) for r in rows]
+
+
+class PgTranscriptCacheRepository(TranscriptCacheRepository):
+    """PostgreSQL-backed transcript cache repository."""
+
+    def __init__(self, pool: PostgresPool) -> None:
+        self._pool = pool
+
+    async def get_cached(self, source_url: str) -> str | None:
+        row = await self._pool.fetch_one(
+            """SELECT transcript_text FROM transcript_cache
+            WHERE source_url = $1
+              AND cached_at + make_interval(secs => ttl_seconds) > NOW()""",
+            source_url,
+        )
+        return row["transcript_text"] if row else None
+
+    async def cache(self, source_url: str, transcript_text: str, ttl_seconds: int = 86400) -> None:
+        await self._pool.execute(
+            """INSERT INTO transcript_cache (source_url, transcript_text, ttl_seconds, cached_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (source_url) DO UPDATE
+                SET transcript_text = EXCLUDED.transcript_text,
+                    ttl_seconds = EXCLUDED.ttl_seconds,
+                    cached_at = NOW()""",
+            source_url,
+            transcript_text,
+            ttl_seconds,
+        )
+
+    async def invalidate(self, source_url: str) -> bool:
+        result = await self._pool.execute(
+            "DELETE FROM transcript_cache WHERE source_url = $1",
+            source_url,
+        )
+        return result.endswith("1")
+
+    async def invalidate_expired(self) -> int:
+        result = await self._pool.execute(
+            "DELETE FROM transcript_cache WHERE cached_at + make_interval(secs => ttl_seconds) <= NOW()"
+        )
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
 
 # ---------------------------------------------------------------------------

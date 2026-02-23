@@ -6,6 +6,7 @@ on import.
 """
 
 from .base import BatchEmbeddingResult, EmbeddingProvider, EmbeddingResult
+from .cached import CachedEmbeddingProvider
 from .ollama import OllamaEmbeddingProvider
 from .openai import OpenAIEmbeddingProvider
 from .registry import ProviderRegistry
@@ -18,6 +19,7 @@ ProviderRegistry.register("ollama", OllamaEmbeddingProvider)
 
 __all__ = [
     "BatchEmbeddingResult",
+    "CachedEmbeddingProvider",
     "EmbeddingProvider",
     "EmbeddingResult",
     "OllamaEmbeddingProvider",

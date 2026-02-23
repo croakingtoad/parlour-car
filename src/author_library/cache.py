@@ -140,8 +140,8 @@ def _make_cache_key(*parts: str) -> str:
 class CacheManager:
     """Manages multiple TTL caches for the application.
 
-    Provides typed access to query, embedding, and graph caches,
-    and bulk invalidation when new content is ingested.
+    Provides typed access to query, embedding, graph, voice profile,
+    and thematic index caches, with targeted invalidation strategies.
     """
 
     def __init__(
@@ -153,12 +153,22 @@ class CacheManager:
         embedding_ttl: float = 3600.0,
         graph_max_size: int = 500,
         graph_ttl: float = 600.0,
+        voice_max_size: int = 50,
+        voice_ttl: float = 1800.0,
+        thematic_max_size: int = 50,
+        thematic_ttl: float = 1800.0,
     ) -> None:
         self.query_cache = TTLCache("query", max_size=query_max_size, ttl_seconds=query_ttl)
         self.embedding_cache = TTLCache(
             "embedding", max_size=embedding_max_size, ttl_seconds=embedding_ttl
         )
         self.graph_cache = TTLCache("graph", max_size=graph_max_size, ttl_seconds=graph_ttl)
+        self.voice_cache = TTLCache(
+            "voice_profile", max_size=voice_max_size, ttl_seconds=voice_ttl
+        )
+        self.thematic_cache = TTLCache(
+            "thematic_index", max_size=thematic_max_size, ttl_seconds=thematic_ttl
+        )
 
     def query_key(self, question: str, **params: Any) -> str:
         """Build a cache key for a query result."""
@@ -174,21 +184,61 @@ class CacheManager:
         param_parts = [f"{k}={v}" for k, v in sorted(params.items()) if v is not None]
         return _make_cache_key("graph", query_name, *param_parts)
 
-    async def invalidate_on_ingestion(self) -> dict[str, int]:
-        """Invalidate all caches after new content is ingested.
+    def voice_key(self, author_id: str) -> str:
+        """Build a cache key for a voice profile."""
+        return _make_cache_key("voice", author_id)
 
-        New content means query and graph caches are stale.
+    def thematic_key(self, author_id: str) -> str:
+        """Build a cache key for a thematic index."""
+        return _make_cache_key("thematic", author_id)
+
+    async def invalidate_on_ingestion(self, *, author_id: str | None = None) -> dict[str, int]:
+        """Invalidate caches after new content is ingested.
+
+        Query and graph caches are always cleared (stale results).
+        Voice profile and thematic index caches are cleared for the
+        specific author if provided, or entirely if not.
         Embedding cache is preserved since embeddings for identical
         text + provider + model will not change.
         """
         query_cleared = await self.query_cache.clear()
         graph_cleared = await self.graph_cache.clear()
+
+        voice_cleared = 0
+        thematic_cleared = 0
+        if author_id:
+            v_key = self.voice_key(author_id)
+            if await self.voice_cache.invalidate(v_key):
+                voice_cleared = 1
+            t_key = self.thematic_key(author_id)
+            if await self.thematic_cache.invalidate(t_key):
+                thematic_cleared = 1
+        else:
+            voice_cleared = await self.voice_cache.clear()
+            thematic_cleared = await self.thematic_cache.clear()
+
         log.info(
             "cache_invalidated_on_ingestion",
+            author_id=author_id,
             query_cleared=query_cleared,
             graph_cleared=graph_cleared,
+            voice_cleared=voice_cleared,
+            thematic_cleared=thematic_cleared,
         )
-        return {"query_cleared": query_cleared, "graph_cleared": graph_cleared}
+        return {
+            "query_cleared": query_cleared,
+            "graph_cleared": graph_cleared,
+            "voice_cleared": voice_cleared,
+            "thematic_cleared": thematic_cleared,
+        }
+
+    async def invalidate_voice_profile(self, author_id: str) -> bool:
+        """Invalidate a specific author's cached voice profile."""
+        return await self.voice_cache.invalidate(self.voice_key(author_id))
+
+    async def invalidate_thematic_index(self, author_id: str) -> bool:
+        """Invalidate a specific author's cached thematic index."""
+        return await self.thematic_cache.invalidate(self.thematic_key(author_id))
 
     def all_stats(self) -> dict[str, dict[str, Any]]:
         """Return statistics for all caches."""
@@ -196,4 +246,6 @@ class CacheManager:
             "query": self.query_cache.stats(),
             "embedding": self.embedding_cache.stats(),
             "graph": self.graph_cache.stats(),
+            "voice_profile": self.voice_cache.stats(),
+            "thematic_index": self.thematic_cache.stats(),
         }

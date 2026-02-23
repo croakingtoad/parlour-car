@@ -20,6 +20,7 @@ from author_library.storage.repositories import (
     PgEmbeddingRepository,
     PgSessionRepository,
     PgThematicRepository,
+    PgTranscriptCacheRepository,
     PgVoiceProfileRepository,
     PgWorkRepository,
 )
@@ -112,6 +113,11 @@ class StorageManager:
     def sessions(self) -> PgSessionRepository:
         """Session repository."""
         return PgSessionRepository(self._pg)
+
+    @property
+    def transcript_cache(self) -> PgTranscriptCacheRepository:
+        """Transcript cache repository."""
+        return PgTranscriptCacheRepository(self._pg)
 
     @property
     def graph(self) -> Neo4jGraphRepository:

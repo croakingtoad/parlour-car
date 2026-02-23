@@ -71,6 +71,7 @@ make dev-down    # Stop Docker services
 | `SERVER_PORT` | `8080` | SSE bind port |
 | `SERVER_LOG_LEVEL` | `INFO` | Logging level |
 | `SERVER_LOG_FORMAT` | `console` | Log format: console or json |
+| `REDIS_URL` | `redis://localhost:6379` | Redis URL for task queue (arq) |
 
 ## MCP Tools (11)
 

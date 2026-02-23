@@ -59,6 +59,14 @@ class SessionSettings(BaseSettings):
     theme_change_gap_minutes: int = 30  # Gap threshold for theme-change auto-end
 
 
+class RedisSettings(BaseSettings):
+    """Redis connection settings for task queue and caching."""
+
+    model_config = SettingsConfigDict(env_prefix="")
+
+    redis_url: str = "redis://localhost:6379"
+
+
 class ServerSettings(BaseSettings):
     """MCP server transport and runtime settings."""
 
@@ -86,6 +94,7 @@ class Settings(BaseSettings):
     llm: LLMSettings = LLMSettings()
     server: ServerSettings = ServerSettings()
     session: SessionSettings = SessionSettings()
+    redis: RedisSettings = RedisSettings()
 
 
 def get_settings() -> Settings:
