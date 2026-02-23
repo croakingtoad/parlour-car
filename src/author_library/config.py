@@ -50,6 +50,14 @@ class LLMSettings(BaseSettings):
     query_model: str = "claude-sonnet-4-5-20250929"
 
 
+class RedisSettings(BaseSettings):
+    """Redis connection settings for task queue and caching."""
+
+    model_config = SettingsConfigDict(env_prefix="")
+
+    redis_url: str = "redis://localhost:6379"
+
+
 class ServerSettings(BaseSettings):
     """MCP server transport and runtime settings."""
 
@@ -76,6 +84,7 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
     server: ServerSettings = ServerSettings()
+    redis: RedisSettings = RedisSettings()
 
 
 def get_settings() -> Settings:
