@@ -51,6 +51,55 @@ class TestHandleIngestBookValidation:
             )
 
 
+class TestHandleIngestBookAutoConfirm:
+    """Validate auto_confirm parameter for B6."""
+
+    async def test_auto_confirm_defaults_to_true(self) -> None:
+        """With auto_confirm absent, nonexistent file raises normally (pipeline path)."""
+        with pytest.raises(IngestionError, match="File not found"):
+            await handle_ingest_book(
+                {
+                    "file_path": "/tmp/nonexistent_auto_confirm.epub",
+                    "subject_author_id": "cs-lewis",
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=None,  # type: ignore[arg-type]
+                embedding_provider=None,  # type: ignore[arg-type]
+            )
+
+    async def test_auto_confirm_false_still_validates_file(self) -> None:
+        """Even with auto_confirm=false, missing file is caught before classification."""
+        with pytest.raises(IngestionError, match="File not found"):
+            await handle_ingest_book(
+                {
+                    "file_path": "/tmp/nonexistent_auto_confirm.epub",
+                    "subject_author_id": "cs-lewis",
+                    "auto_confirm": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=None,  # type: ignore[arg-type]
+                embedding_provider=None,  # type: ignore[arg-type]
+            )
+
+    async def test_auto_confirm_false_still_requires_file_path(self) -> None:
+        with pytest.raises(IngestionError, match="file_path is required"):
+            await handle_ingest_book(
+                {"subject_author_id": "cs-lewis", "auto_confirm": False},
+                settings=None,  # type: ignore[arg-type]
+                storage=None,  # type: ignore[arg-type]
+                embedding_provider=None,  # type: ignore[arg-type]
+            )
+
+    async def test_auto_confirm_false_still_requires_author(self) -> None:
+        with pytest.raises(IngestionError, match="subject_author_id is required"):
+            await handle_ingest_book(
+                {"file_path": "/tmp/test.epub", "auto_confirm": False},
+                settings=None,  # type: ignore[arg-type]
+                storage=None,  # type: ignore[arg-type]
+                embedding_provider=None,  # type: ignore[arg-type]
+            )
+
+
 class TestHandleIngestCorpusValidation:
     """Validate required argument checks for ingest_corpus."""
 
