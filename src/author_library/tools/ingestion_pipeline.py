@@ -8,6 +8,7 @@ Routes processing by source class:
   - SECONDARY: embeddings + attributed graph edges only
   - CONTEXTUAL: embeddings + cross-resource link targets
   - TERTIARY: metadata only, no content processing
+  - PERSONAL: embeddings + USER_REFLECTS_ON graph edges, NO voice profile
 
 Supports idempotent re-ingestion: deletes old chunks/embeddings for a
 work before re-processing.
@@ -227,7 +228,7 @@ class IngestionPipeline:
         # Step 6: Store chunks in PG
         # Sort so parents (macro) are inserted before children (meso) before
         # grandchildren (micro), satisfying the parent_chunk_id foreign key.
-        _gran_order = {"macro": 0, "meso": 1, "micro": 2}
+        _gran_order = {"macro": 0, "meso": 1, "micro": 2, "nano": 3}
         sorted_chunks = sorted(
             chunks,
             key=lambda c: (_gran_order.get(str(c.granularity), 9), c.position),
@@ -240,7 +241,7 @@ class IngestionPipeline:
             if chunk.parent_chunk_id is not None:
                 resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
 
-            pg_id = await self._storage.chunks.create({
+            chunk_data: dict[str, Any] = {
                 "work_id": chunk.work_id,
                 "text": chunk.text,
                 "annotation": chunk.annotation,
@@ -251,7 +252,11 @@ class IngestionPipeline:
                 "position": chunk.position,
                 "parent_chunk_id": resolved_parent,
                 "metadata": chunk.metadata,
-            })
+                "raw_content": chunk.raw_content,
+                "raw_content_window": chunk.raw_content_window,
+            }
+
+            pg_id = await self._storage.chunks.create(chunk_data)
             chunk_id_map[chunk.id] = pg_id
 
         log.info("ingestion_chunks_stored", work_id=work_id, count=len(chunk_id_map))
@@ -286,15 +291,19 @@ class IngestionPipeline:
 
         # Step 8: Upsert chunk nodes in Neo4j
         for chunk in chunks:
-            await self._storage.graph.upsert_chunk_node({
+            chunk_node: dict[str, Any] = {
                 "chunk_id": chunk.id,
                 "work_id": chunk.work_id,
                 "text_preview": chunk.text[:200],
                 "granularity": str(chunk.granularity),
                 "source_class": chunk.source_class,
-            })
+            }
+            # Personal chunks carry user_id for USER_REFLECTS_ON edges
+            if source_class == SourceClass.PERSONAL:
+                chunk_node["user_id"] = getattr(catalog_entry, "user_id", "marty")
+            await self._storage.graph.upsert_chunk_node(chunk_node)
 
-        # Step 9: Entity extraction (PRIMARY and SECONDARY only)
+        # Step 9: Entity extraction (PRIMARY and SECONDARY only — NOT personal)
         entity_count = 0
         edge_count = 0
         if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_GRAPH):
@@ -327,6 +336,19 @@ class IngestionPipeline:
                 error_msg = f"Passage linking failed: {exc}"
                 log.error("ingestion_passage_linking_failed", error=error_msg)
                 errors.append(error_msg)
+
+        # Step 11: Personal source — create USER_REFLECTS_ON edges
+        # Personal chunks are stored with embeddings but do NOT get entity
+        # extraction or passage linking. Instead they create USER_REFLECTS_ON
+        # edges to targets (captures/themes) they reference.
+        if route == ProcessingRoute.PERSONAL_ENRICHMENT:
+            log.info(
+                "ingestion_personal_route",
+                work_id=work_id,
+                chunks=len(chunks),
+                note="Personal source: embeddings + graph nodes created, "
+                "voice profile skipped, entity extraction skipped",
+            )
 
         log.info(
             "ingestion_complete",
