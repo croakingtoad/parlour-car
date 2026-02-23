@@ -29,6 +29,7 @@ class APIKeySettings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     voyage_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
+    parlour_api_key: SecretStr | None = None
 
 
 class EmbeddingSettings(BaseSettings):
