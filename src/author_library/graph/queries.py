@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 if TYPE_CHECKING:
+    from author_library.cache import CacheManager
     from author_library.storage.neo4j import Neo4jConnection
 
 log = structlog.get_logger(__name__)
@@ -109,16 +110,29 @@ class PassageLink:
 
 
 class GraphQueryService:
-    """Provides structured graph queries over the knowledge graph."""
+    """Provides structured graph queries over the knowledge graph.
 
-    def __init__(self, neo4j: Neo4jConnection) -> None:
+    Optionally accepts a CacheManager for LRU+TTL caching of graph
+    query results. Cached results are invalidated when new content
+    is ingested via CacheManager.invalidate_on_ingestion().
+    """
+
+    def __init__(self, neo4j: Neo4jConnection, cache: CacheManager | None = None) -> None:
         self._neo4j = neo4j
+        self._cache = cache
 
     async def get_theme_subgraph(self, theme_name: str) -> ThemeSubgraph | None:
         """Get all chunks exploring a theme and their associated works.
 
         Uses canonical_name for theme lookup (leveraging Theme uniqueness constraint).
+        Results are cached by theme_name when a CacheManager is available.
         """
+        if self._cache:
+            key = self._cache.graph_key("theme_subgraph", theme_name=theme_name)
+            cached = await self._cache.graph_cache.get(key)
+            if cached is not None:
+                return cached
+
         canonical = theme_name.lower().replace(" ", "-")
 
         # Get theme node
@@ -163,12 +177,18 @@ class GraphQueryService:
             )
             works.extend(work_records)
 
-        return ThemeSubgraph(
+        result = ThemeSubgraph(
             theme_name=theme_record["name"],
             canonical_name=theme_record["canonical_name"],
             chunks=chunks,
             works=works,
         )
+
+        if self._cache:
+            key = self._cache.graph_key("theme_subgraph", theme_name=theme_name)
+            await self._cache.graph_cache.put(key, result)
+
+        return result
 
     async def get_engagement_chain(
         self, chunk_id: str, *, max_depth: int = 5
@@ -176,7 +196,16 @@ class GraphQueryService:
         """Follow ENGAGES_WITH from a chunk to contextual sources.
 
         Traverses up to max_depth hops to find the full engagement chain.
+        Results are cached by chunk_id + max_depth.
         """
+        if self._cache:
+            key = self._cache.graph_key(
+                "engagement_chain", chunk_id=chunk_id, max_depth=str(max_depth)
+            )
+            cached = await self._cache.graph_cache.get(key)
+            if cached is not None:
+                return cached
+
         # Get source chunk
         source_records = await self._neo4j.execute_read(
             """MATCH (c:Chunk {chunk_id: $chunk_id})
@@ -232,14 +261,29 @@ class GraphQueryService:
                 )
             )
 
-        return EngagementChain(source_chunk=source_chunk, links=links)
+        chain = EngagementChain(source_chunk=source_chunk, links=links)
+
+        if self._cache:
+            key = self._cache.graph_key(
+                "engagement_chain", chunk_id=chunk_id, max_depth=str(max_depth)
+            )
+            await self._cache.graph_cache.put(key, chain)
+
+        return chain
 
     async def get_argument_evolution(self, theme_name: str) -> ArgumentEvolution:
         """Get DEVELOPS_FROM chains for arguments about a theme.
 
         Finds all arguments connected to chunks that explore the given theme,
         then follows DEVELOPS_FROM relationships.
+        Results are cached by theme_name.
         """
+        if self._cache:
+            key = self._cache.graph_key("argument_evolution", theme_name=theme_name)
+            cached = await self._cache.graph_cache.get(key)
+            if cached is not None:
+                return cached
+
         canonical = theme_name.lower().replace(" ", "-")
 
         # Get arguments connected to theme-exploring chunks
@@ -292,11 +336,17 @@ class GraphQueryService:
         )
         development_links = [(r["from_arg"], r["to_arg"]) for r in dev_records]
 
-        return ArgumentEvolution(
+        evolution = ArgumentEvolution(
             theme_name=theme_name,
             arguments=arguments,
             development_links=development_links,
         )
+
+        if self._cache:
+            key = self._cache.graph_key("argument_evolution", theme_name=theme_name)
+            await self._cache.graph_cache.put(key, evolution)
+
+        return evolution
 
     async def get_author_network(self, author_id: str) -> AuthorNetwork:
         """Get the network of persons referenced and themes explored by an author.

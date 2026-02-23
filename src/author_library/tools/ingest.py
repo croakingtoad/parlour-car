@@ -17,6 +17,7 @@ from author_library.errors import IngestionError
 from author_library.tools.ingestion_pipeline import IngestionPipeline, IngestionResult
 
 if TYPE_CHECKING:
+    from author_library.cache import CacheManager
     from author_library.config import Settings
     from author_library.embeddings.base import EmbeddingProvider
     from author_library.storage.manager import StorageManager
@@ -30,6 +31,7 @@ async def handle_ingest_book(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the ingest_book MCP tool call.
 
@@ -76,6 +78,10 @@ async def handle_ingest_book(
         metadata_hints=metadata_hints,
     )
 
+    # Invalidate caches — new content may affect query/graph/voice/thematic results
+    if cache_manager is not None:
+        await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
+
     return json.dumps(result.to_dict(), indent=2)
 
 
@@ -85,6 +91,7 @@ async def handle_ingest_corpus(
     settings: Settings,
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
+    cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the ingest_corpus MCP tool call.
 
@@ -205,6 +212,10 @@ async def handle_ingest_corpus(
         "cross_work_analysis": cross_work_summary,
         "errors": per_work_errors,
     }
+
+    # Invalidate caches — new content affects query/graph/voice/thematic results
+    if cache_manager is not None:
+        await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
 
     return json.dumps(corpus_summary, indent=2)
 

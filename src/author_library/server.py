@@ -15,7 +15,8 @@ from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from author_library.embeddings import ProviderRegistry
+from author_library.cache import CacheManager
+from author_library.embeddings import CachedEmbeddingProvider, ProviderRegistry
 from author_library.logging import get_logger, new_correlation_id, setup_logging
 from author_library.storage import StorageManager
 from author_library.tools.ingest import handle_ingest_book, handle_ingest_corpus
@@ -320,6 +321,7 @@ def create_server(settings: Settings) -> Server:
         args = arguments or {}
         storage_mgr: StorageManager = _state["storage"]
         embed_provider: EmbeddingProvider = _state["embedding_provider"]
+        cache_mgr: CacheManager | None = _state.get("cache_manager")
 
         try:
             if name == "ingest_book":
@@ -328,6 +330,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "ingest_corpus":
                 result = await handle_ingest_corpus(
@@ -335,6 +338,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "ask_author":
                 result = await handle_ask_author(
@@ -342,6 +346,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "trace_theme":
                 result = await handle_trace_theme(
@@ -349,6 +354,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "find_quotes":
                 result = await handle_find_quotes(
@@ -356,6 +362,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "compare_ideas":
                 result = await handle_compare_ideas(
@@ -363,6 +370,7 @@ def create_server(settings: Settings) -> Server:
                     settings=settings,
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
                 )
             elif name == "list_authors":
                 result = await handle_list_authors(args, storage=storage_mgr)
@@ -428,13 +436,18 @@ async def run_server(settings: Settings) -> None:
     storage = StorageManager(settings.database)
     await storage.connect()
 
-    # Initialize embedding provider
-    embedding_provider = ProviderRegistry.create(settings)
+    # Initialize caching layer
+    cache_manager = CacheManager()
+
+    # Initialize embedding provider with cache wrapper
+    raw_provider = ProviderRegistry.create(settings)
+    embedding_provider = CachedEmbeddingProvider(raw_provider, cache_manager)
 
     # Create server and inject dependencies
     server = create_server(settings)
     server._tool_state["storage"] = storage  # type: ignore[attr-defined]
     server._tool_state["embedding_provider"] = embedding_provider  # type: ignore[attr-defined]
+    server._tool_state["cache_manager"] = cache_manager  # type: ignore[attr-defined]
 
     try:
         if settings.server.transport == "sse":
