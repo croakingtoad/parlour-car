@@ -16,6 +16,7 @@ from author_library.chunking.correspondence import (
 from author_library.chunking.poetry import PoetryStrategy
 from author_library.chunking.scholarly import ScholarlyProseStrategy
 from author_library.chunking.sermon import SermonStrategy
+from author_library.chunking.transcript import TranscriptChunkingStrategy
 from author_library.errors import IngestionError
 
 
@@ -79,6 +80,7 @@ class TestListStrategies:
         strategies = list_strategies()
         types = {type(s) for s in strategies}
         assert PoetryStrategy in types
+        assert TranscriptChunkingStrategy in types
         assert InterviewStrategy in types
         assert LetterStrategy in types
         assert BlogStrategy in types
@@ -86,4 +88,4 @@ class TestListStrategies:
         assert ScholarlyProseStrategy in types
 
     def test_strategy_count(self) -> None:
-        assert len(list_strategies()) == 6
+        assert len(list_strategies()) == 7

@@ -20,6 +20,7 @@ from author_library.chunking.models import Chunk, ChunkGranularity
 from author_library.chunking.poetry import PoetryStrategy
 from author_library.chunking.scholarly import ScholarlyProseStrategy
 from author_library.chunking.sermon import SermonStrategy
+from author_library.chunking.transcript import TranscriptChunkingStrategy
 from author_library.errors import IngestionError
 
 # All registered strategies, in priority order.
@@ -27,6 +28,7 @@ from author_library.errors import IngestionError
 # work's genre_tags wins.
 _STRATEGIES: list[ChunkingStrategy] = [
     PoetryStrategy(),
+    TranscriptChunkingStrategy(),  # before interview (more specific)
     InterviewStrategy(),
     LetterStrategy(),
     BlogStrategy(),
@@ -86,6 +88,7 @@ __all__ = [
     "PoetryStrategy",
     "ScholarlyProseStrategy",
     "SermonStrategy",
+    "TranscriptChunkingStrategy",
     "get_chunking_strategy",
     "list_strategies",
 ]
