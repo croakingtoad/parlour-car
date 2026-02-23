@@ -203,12 +203,16 @@ class PgWorkRepository(WorkRepository):
                 work_id, title, author, source_class, source_class_note,
                 publication_year, original_publication_year, edition, publisher, isbn,
                 format_ingested, language, word_count, genre_tags, subject_headings,
-                ocr_quality, notes, source_metadata
+                ocr_quality, notes, source_metadata,
+                url, duration, speakers, date_published, date_consumed,
+                transcript_cached, media
             ) VALUES (
                 $1, $2, $3, $4, $5,
                 $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15,
-                $16, $17, $18
+                $16, $17, $18,
+                $19, $20, $21, $22, $23,
+                $24, $25
             )""",
             work_id,
             work["title"],
@@ -228,6 +232,13 @@ class PgWorkRepository(WorkRepository):
             work.get("ocr_quality"),
             work.get("notes"),
             json.dumps(work.get("source_metadata", {})),
+            work.get("url"),
+            work.get("duration"),
+            work.get("speakers"),
+            work.get("date_published"),
+            work.get("date_consumed"),
+            work.get("transcript_cached", False),
+            work.get("media"),
         )
         return work_id
 
@@ -285,8 +296,9 @@ class PgChunkRepository(ChunkRepository):
         row = await self._pool.fetch_one(
             """INSERT INTO chunks (
                 work_id, text, annotation, granularity, source_class,
-                chapter, section, position, parent_chunk_id, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                chapter, section, position, parent_chunk_id, metadata,
+                raw_content, raw_content_window
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING id""",
             chunk["work_id"],
             chunk["text"],
@@ -298,6 +310,8 @@ class PgChunkRepository(ChunkRepository):
             chunk["position"],
             chunk.get("parent_chunk_id"),
             json.dumps(chunk.get("metadata", {})),
+            chunk.get("raw_content"),
+            chunk.get("raw_content_window"),
         )
         if row is None:
             raise StorageError("Failed to insert chunk — no id returned")

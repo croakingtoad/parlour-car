@@ -9,11 +9,12 @@ from pydantic import BaseModel, Field
 
 
 class ChunkGranularity(StrEnum):
-    """Three-tier granularity for document chunks."""
+    """Four-tier granularity for document chunks."""
 
     MACRO = "macro"  # 500-1500 words: chapter summaries, high-level overviews
     MESO = "meso"  # 150-500 words: section/argument-level, primary retrieval unit
     MICRO = "micro"  # 30-200 words: paragraph/passage-level, fine-grained matching
+    NANO = "nano"  # 1-50 words: raw captures, timestamps, moments (internal pipeline only)
 
 
 # Word count boundaries per granularity tier.
@@ -21,6 +22,7 @@ GRANULARITY_BOUNDS: dict[ChunkGranularity, tuple[int, int]] = {
     ChunkGranularity.MACRO: (500, 1500),
     ChunkGranularity.MESO: (150, 500),
     ChunkGranularity.MICRO: (30, 200),
+    ChunkGranularity.NANO: (1, 50),
 }
 
 
@@ -36,11 +38,13 @@ class Chunk(BaseModel):
     annotation: str | None = None
     granularity: ChunkGranularity
     work_id: str
-    source_class: str  # primary, secondary, contextual, tertiary
+    source_class: str  # primary, secondary, contextual, tertiary, personal
     chapter: str | None = None
     section: str | None = None
     position: int  # ordering within the work at this granularity
     parent_chunk_id: str | None = None  # parent in granularity hierarchy
+    raw_content: str | None = None  # original unprocessed content (for nano chunks)
+    raw_content_window: str | None = None  # surrounding context window identifier
     metadata: dict[str, str | int | bool | list[str]] = Field(default_factory=dict)
 
     @property

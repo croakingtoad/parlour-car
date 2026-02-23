@@ -29,6 +29,7 @@ class SourceClass(StrEnum):
     SECONDARY = "secondary"
     CONTEXTUAL = "contextual"
     TERTIARY = "tertiary"
+    PERSONAL = "personal"
 
 
 class FormatIngested(StrEnum):
@@ -39,6 +40,10 @@ class FormatIngested(StrEnum):
     TXT = "txt"
     HTML = "html"
     DOCX = "docx"
+    VIDEO = "video"
+    AUDIO = "audio"
+    TRANSCRIPT = "transcript"
+    YOUTUBE_CAPTIONS = "youtube_captions"
 
 
 class OcrQuality(StrEnum):
@@ -111,6 +116,16 @@ class ReferenceType(StrEnum):
     INDEX = "index"
 
 
+class MediaType(StrEnum):
+    """Media format classification for catalog records."""
+
+    BOOK = "book"
+    VIDEO = "video"
+    AUDIO = "audio"
+    PODCAST = "podcast"
+    ARTICLE = "article"
+
+
 # ---------------------------------------------------------------------------
 # Core catalog entry (shared across all source classes)
 # ---------------------------------------------------------------------------
@@ -144,6 +159,14 @@ class CatalogEntry(BaseModel):
     ocr_quality: OcrQuality | None = None
     ingestion_date: date = Field(default_factory=date.today)
     notes: str | None = None
+    # Media/source fields (A5)
+    url: str | None = None
+    duration: int | None = None  # duration in seconds
+    speakers: list[str] = Field(default_factory=list)
+    date_published: date | None = None
+    date_consumed: date | None = None
+    transcript_cached: bool = False
+    media: MediaType | None = None
 
     @field_validator("work_id")
     @classmethod
@@ -274,6 +297,29 @@ class TertiaryCatalogEntry(CatalogEntry):
         return self
 
 
+class PersonalCatalogEntry(CatalogEntry):
+    """Catalog entry for personal sources (user reflections/notes).
+
+    Personal sources are the user's own writing — reflections, journal entries,
+    annotations, responses. They are NEVER attributed to the subject author and
+    NEVER contribute to voice profiles. They receive embeddings and graph edges
+    (USER_REFLECTS_ON) but skip voice profile extraction entirely.
+    """
+
+    source_class: SourceClass = SourceClass.PERSONAL
+    user_id: str = "marty"  # Single-user V1, schema-ready for multi-user
+
+    @model_validator(mode="after")
+    def enforce_source_class(self) -> PersonalCatalogEntry:
+        if self.source_class != SourceClass.PERSONAL:
+            msg = (
+                f"PersonalCatalogEntry must have source_class='personal', "
+                f"got {self.source_class!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 # ---------------------------------------------------------------------------
 # Classification result (produced by the classification engine)
 # ---------------------------------------------------------------------------
@@ -320,6 +366,7 @@ class ProcessingRoute(StrEnum):
     EMBEDDINGS_AND_GRAPH = "embeddings_and_graph"
     EMBEDDINGS_AND_LINKS = "embeddings_and_links"
     METADATA_ONLY = "metadata_only"
+    PERSONAL_ENRICHMENT = "personal_enrichment"
 
 
 def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
@@ -329,10 +376,12 @@ def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
     - Secondary → embeddings + attributed graph edges only
     - Contextual → embeddings + cross-resource link targets
     - Tertiary → metadata only, no content ingestion
+    - Personal → embeddings + USER_REFLECTS_ON graph edges, NO voice profile
     """
     return {
         SourceClass.PRIMARY: ProcessingRoute.FULL_ENRICHMENT,
         SourceClass.SECONDARY: ProcessingRoute.EMBEDDINGS_AND_GRAPH,
         SourceClass.CONTEXTUAL: ProcessingRoute.EMBEDDINGS_AND_LINKS,
         SourceClass.TERTIARY: ProcessingRoute.METADATA_ONLY,
+        SourceClass.PERSONAL: ProcessingRoute.PERSONAL_ENRICHMENT,
     }[source_class]
