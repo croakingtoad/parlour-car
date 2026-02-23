@@ -153,6 +153,44 @@ class VoiceProfileRepository(ABC):
         """List all voice profile versions for an author."""
 
 
+class SessionRepository(ABC):
+    """Interface for session tracking operations."""
+
+    @abstractmethod
+    async def create(self, session: dict[str, Any]) -> UUID:
+        """Create a new session and return its id."""
+
+    @abstractmethod
+    async def get(self, session_id: UUID) -> dict[str, Any] | None:
+        """Get a session by id."""
+
+    @abstractmethod
+    async def get_active(self, user_id: str) -> dict[str, Any] | None:
+        """Get the currently active (open) session for a user."""
+
+    @abstractmethod
+    async def end_session(self, session_id: UUID) -> bool:
+        """End a session by setting date_end and calculating duration."""
+
+    @abstractmethod
+    async def add_capture(self, session_id: UUID, chunk_id: UUID, capture_order: int) -> UUID:
+        """Add a capture (chunk) to a session."""
+
+    @abstractmethod
+    async def add_source(self, session_id: UUID, work_id: str) -> None:
+        """Associate a work with a session."""
+
+    @abstractmethod
+    async def list_captures(self, session_id: UUID) -> list[dict[str, Any]]:
+        """List all captures in a session."""
+
+    @abstractmethod
+    async def list_sessions(
+        self, user_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """List recent sessions for a user."""
+
+
 class GraphRepository(ABC):
     """Interface for Neo4j graph operations."""
 
@@ -569,6 +607,99 @@ class PgVoiceProfileRepository(VoiceProfileRepository):
         rows = await self._pool.fetch_all(
             "SELECT * FROM voice_profiles WHERE author_id = $1 ORDER BY version",
             author_id,
+        )
+        return [dict(r) for r in rows]
+
+
+class PgSessionRepository(SessionRepository):
+    """PostgreSQL-backed session repository."""
+
+    def __init__(self, pool: PostgresPool) -> None:
+        self._pool = pool
+
+    async def create(self, session: dict[str, Any]) -> UUID:
+        row = await self._pool.fetch_one(
+            """INSERT INTO sessions (title, user_id)
+            VALUES ($1, $2)
+            RETURNING id""",
+            session.get("title"),
+            session.get("user_id", "marty"),
+        )
+        if row is None:
+            raise StorageError("Failed to create session — no id returned")
+        return row["id"]  # type: ignore[no-any-return]
+
+    async def get(self, session_id: UUID) -> dict[str, Any] | None:
+        row = await self._pool.fetch_one(
+            "SELECT * FROM sessions WHERE id = $1", session_id
+        )
+        return dict(row) if row else None
+
+    async def get_active(self, user_id: str) -> dict[str, Any] | None:
+        row = await self._pool.fetch_one(
+            """SELECT * FROM sessions
+            WHERE user_id = $1 AND date_end IS NULL
+            ORDER BY date_start DESC LIMIT 1""",
+            user_id,
+        )
+        return dict(row) if row else None
+
+    async def end_session(self, session_id: UUID) -> bool:
+        result = await self._pool.execute(
+            """UPDATE sessions
+            SET date_end = NOW(),
+                duration_minutes = EXTRACT(EPOCH FROM (NOW() - date_start))::INT / 60,
+                updated_at = NOW()
+            WHERE id = $1 AND date_end IS NULL""",
+            session_id,
+        )
+        return result.endswith("1")
+
+    async def add_capture(self, session_id: UUID, chunk_id: UUID, capture_order: int) -> UUID:
+        row = await self._pool.fetch_one(
+            """INSERT INTO session_captures (session_id, chunk_id, capture_order)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (session_id, chunk_id) DO UPDATE
+                SET capture_order = EXCLUDED.capture_order
+            RETURNING id""",
+            session_id,
+            chunk_id,
+            capture_order,
+        )
+        if row is None:
+            raise StorageError("Failed to add capture to session")
+        return row["id"]  # type: ignore[no-any-return]
+
+    async def add_source(self, session_id: UUID, work_id: str) -> None:
+        await self._pool.execute(
+            """INSERT INTO session_sources (session_id, work_id)
+            VALUES ($1, $2)
+            ON CONFLICT (session_id, work_id) DO NOTHING""",
+            session_id,
+            work_id,
+        )
+
+    async def list_captures(self, session_id: UUID) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch_all(
+            """SELECT sc.*, c.text, c.work_id, c.granularity, c.source_class
+            FROM session_captures sc
+            JOIN chunks c ON c.id = sc.chunk_id
+            WHERE sc.session_id = $1
+            ORDER BY sc.capture_order""",
+            session_id,
+        )
+        return [dict(r) for r in rows]
+
+    async def list_sessions(
+        self, user_id: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        rows = await self._pool.fetch_all(
+            """SELECT * FROM sessions
+            WHERE user_id = $1
+            ORDER BY date_start DESC
+            LIMIT $2""",
+            user_id,
+            limit,
         )
         return [dict(r) for r in rows]
 

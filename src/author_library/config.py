@@ -50,6 +50,15 @@ class LLMSettings(BaseSettings):
     query_model: str = "claude-sonnet-4-5-20250929"
 
 
+class SessionSettings(BaseSettings):
+    """Session tracking configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="SESSION_")
+
+    timeout_minutes: int = 60  # Inactivity timeout before auto-ending session
+    theme_change_gap_minutes: int = 30  # Gap threshold for theme-change auto-end
+
+
 class ServerSettings(BaseSettings):
     """MCP server transport and runtime settings."""
 
@@ -76,6 +85,7 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
     server: ServerSettings = ServerSettings()
+    session: SessionSettings = SessionSettings()
 
 
 def get_settings() -> Settings:
