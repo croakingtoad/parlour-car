@@ -39,9 +39,13 @@ async def handle_ingest_book(
         file_path (str): Path to the document file.
         subject_author_id (str): The subject author's slug identifier.
         metadata_hints (dict, optional): Overrides for classification and catalog fields.
+        auto_confirm (bool, optional): When True (default), runs the full pipeline.
+            When False, pauses after classification and returns the suggested
+            source class for human review.
 
     Returns:
-        JSON string with ingestion summary.
+        JSON string with ingestion summary (or classification preview if
+        auto_confirm is False).
     """
     file_path = arguments.get("file_path")
     if not file_path:
@@ -65,6 +69,17 @@ async def handle_ingest_book(
         )
 
     metadata_hints = arguments.get("metadata_hints") or {}
+    auto_confirm = arguments.get("auto_confirm", True)
+
+    # When auto_confirm is False, only run classification and return for review
+    if not auto_confirm:
+        return await _classify_only(
+            path,
+            subject_author=subject_author_id,
+            metadata_hints=metadata_hints,
+            settings=settings,
+            storage=storage,
+        )
 
     pipeline = IngestionPipeline(
         settings=settings,
@@ -83,6 +98,67 @@ async def handle_ingest_book(
         await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
 
     return json.dumps(result.to_dict(), indent=2)
+
+
+async def _classify_only(
+    path: Path,
+    *,
+    subject_author: str,
+    metadata_hints: dict[str, Any],
+    settings: Settings,
+    storage: StorageManager,
+) -> str:
+    """Run only the classification step and return a preview for human review.
+
+    The user can then proceed with the composable tools (catalog_source,
+    chunk_source, etc.) using the suggested classification or an override.
+    """
+    from author_library.catalog.classifier import SourceClassifier
+    from author_library.catalog.mixed_authorship import MixedAuthorshipAnalyzer
+    from author_library.parsing import parse_document
+
+    document = parse_document(path, metadata_hints=metadata_hints)
+
+    classifier = SourceClassifier(settings)
+    classification = await classifier.classify(
+        document,
+        subject_author=subject_author,
+        metadata_hints=metadata_hints,
+    )
+
+    result: dict[str, Any] = {
+        "status": "awaiting_confirmation",
+        "file_path": str(path),
+        "subject_author": subject_author,
+        "suggested_class": classification.source_class.value,
+        "confidence": classification.confidence,
+        "signals": classification.signals,
+        "requires_human_judgment": classification.requires_human_judgment,
+        "next_steps": [
+            f"Review the suggested source class: {classification.source_class.value}",
+            "Use catalog_source to confirm (or override) the classification and catalog the work",
+            "Then use chunk_source, detect_passage_links, and flag_acquisition to complete ingestion",
+        ],
+    }
+
+    # Check for mixed authorship
+    if classification.source_class.value in ("primary", "contextual"):
+        try:
+            analyzer = MixedAuthorshipAnalyzer(settings)
+            mixed_result = await analyzer.analyze(
+                document,
+                document_source_class=classification.source_class.value,
+            )
+            if mixed_result.is_mixed:
+                result["mixed_authorship"] = {
+                    "is_mixed": True,
+                    "segments": len(mixed_result.segments),
+                    "recommendation": mixed_result.recommendation,
+                }
+        except Exception:
+            log.warning("classify_only_mixed_authorship_failed", path=str(path))
+
+    return json.dumps(result, indent=2)
 
 
 async def handle_ingest_corpus(
