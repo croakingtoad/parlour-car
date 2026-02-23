@@ -48,6 +48,9 @@ class TestToolDefinitions:
         "search_chunks",
         "get_passage_links",
         "manage_vocabulary",
+        # Epic N: Surfacing & Synthesis (2)
+        "surface_related",
+        "synthesize_my_thinking",
     })
 
     def test_all_tools_registered(self) -> None:
@@ -55,7 +58,7 @@ class TestToolDefinitions:
         assert tool_names == self.EXPECTED_TOOLS
 
     def test_tool_count(self) -> None:
-        assert len(TOOLS) == 21
+        assert len(TOOLS) == 23
 
     def test_all_tools_have_descriptions(self) -> None:
         for tool in TOOLS:

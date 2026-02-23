@@ -46,6 +46,8 @@ from author_library.tools.query import (
     handle_find_quotes,
     handle_trace_theme,
 )
+from author_library.tools.surfacing import handle_surface_related
+from author_library.tools.synthesis import handle_synthesize_my_thinking
 
 if TYPE_CHECKING:
     from author_library.config import Settings
@@ -671,6 +673,103 @@ TOOLS: list[Tool] = [
             "required": ["action"],
         },
     ),
+    # -------------------------------------------------------------------
+    # Epic M: Passive Surfacing
+    # -------------------------------------------------------------------
+    Tool(
+        name="surface_related",
+        description=(
+            "Find forgotten connections for a given chunk, work, or text context. "
+            "Uses 5 parallel strategies: passage links, thematic parallels, personal "
+            "reflections, vector similarity, and temporal proximity. Blends personal "
+            "reflections with author content, guaranteeing minimum personal items. "
+            "Results grouped by confidence level (high/medium/low) with presentation labels."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "string",
+                    "description": "A specific chunk to find related content for.",
+                },
+                "work_id": {
+                    "type": "string",
+                    "description": "A work to find related content for.",
+                },
+                "text_context": {
+                    "type": "string",
+                    "description": "Freeform text to find related content for.",
+                },
+                "themes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Theme tags to focus the surfacing on.",
+                },
+                "include_personal": {
+                    "type": "boolean",
+                    "description": "Include Personal source class results (default true).",
+                    "default": True,
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default 20).",
+                    "default": 20,
+                },
+                "max_per_level": {
+                    "type": "integer",
+                    "description": "Maximum results per confidence level.",
+                },
+            },
+        },
+    ),
+    # -------------------------------------------------------------------
+    # Epic O: Synthesis
+    # -------------------------------------------------------------------
+    Tool(
+        name="synthesize_my_thinking",
+        description=(
+            "Synthesize the user's evolving thinking on a theme, speaker, or time "
+            "period. Gathers Personal reflections, drafts a position statement, "
+            "enriches citations with provenance, and detects open tensions. "
+            "CRITICAL: Only user's words become Personal data. AI/LLM dialogue is "
+            "NEVER stored as Personal source class. Synthesis is delivered as a "
+            "proposal for user review."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "theme": {
+                    "type": "string",
+                    "description": "Focus on a specific theme.",
+                },
+                "speaker": {
+                    "type": "string",
+                    "description": "Focus on reflections about a specific speaker.",
+                },
+                "date_range": {
+                    "type": "object",
+                    "properties": {
+                        "after": {
+                            "type": "string",
+                            "description": "ISO date — only reflections after this date.",
+                        },
+                        "before": {
+                            "type": "string",
+                            "description": "ISO date — only reflections before this date.",
+                        },
+                    },
+                    "description": "Limit to reflections within a date range.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "User's framing question, e.g. 'What do I actually think "
+                        "about imagination as prayer?'"
+                    ),
+                },
+            },
+        },
+    ),
 ]
 
 
@@ -835,6 +934,24 @@ def create_server(settings: Settings) -> Server:
                 )
             elif name == "manage_vocabulary":
                 result = await handle_manage_vocabulary(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            # Epic M: Passive Surfacing
+            elif name == "surface_related":
+                result = await handle_surface_related(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            # Epic O: Synthesis
+            elif name == "synthesize_my_thinking":
+                result = await handle_synthesize_my_thinking(
                     args,
                     settings=settings,
                     storage=storage_mgr,
