@@ -19,6 +19,7 @@ from author_library.storage.repositories import (
     PgChunkRepository,
     PgEmbeddingRepository,
     PgThematicRepository,
+    PgTranscriptCacheRepository,
     PgVoiceProfileRepository,
     PgWorkRepository,
 )
@@ -106,6 +107,11 @@ class StorageManager:
     def voice_profiles(self) -> PgVoiceProfileRepository:
         """Voice profile repository."""
         return PgVoiceProfileRepository(self._pg)
+
+    @property
+    def transcript_cache(self) -> PgTranscriptCacheRepository:
+        """Transcript cache repository."""
+        return PgTranscriptCacheRepository(self._pg)
 
     @property
     def graph(self) -> Neo4jGraphRepository:
