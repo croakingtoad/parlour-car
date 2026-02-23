@@ -45,6 +45,7 @@ class Chunk(BaseModel):
     parent_chunk_id: str | None = None  # parent in granularity hierarchy
     raw_content: str | None = None  # original unprocessed content (for nano chunks)
     raw_content_window: str | None = None  # surrounding context window identifier
+    pass_number: int = 1  # engagement pass (incremented on re-ingestion)
     metadata: dict[str, str | int | bool | list[str]] = Field(default_factory=dict)
 
     @property

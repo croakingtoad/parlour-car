@@ -77,6 +77,10 @@ class ChunkRepository(ABC):
     async def delete_by_work(self, work_id: str) -> int:
         """Delete all chunks for a work. Returns count deleted."""
 
+    @abstractmethod
+    async def get_max_pass_number(self, work_id: str) -> int:
+        """Get the maximum pass_number for a work's chunks."""
+
 
 class EmbeddingRepository(ABC):
     """Interface for chunk embedding storage/retrieval."""
@@ -316,8 +320,8 @@ class PgChunkRepository(ChunkRepository):
             """INSERT INTO chunks (
                 work_id, text, annotation, granularity, source_class,
                 chapter, section, position, parent_chunk_id, metadata,
-                raw_content, raw_content_window
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                raw_content, raw_content_window, pass_number
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id""",
             chunk["work_id"],
             chunk["text"],
@@ -331,10 +335,22 @@ class PgChunkRepository(ChunkRepository):
             json.dumps(chunk.get("metadata", {})),
             chunk.get("raw_content"),
             chunk.get("raw_content_window"),
+            chunk.get("pass_number", 1),
         )
         if row is None:
             raise StorageError("Failed to insert chunk — no id returned")
         return row["id"]  # type: ignore[no-any-return]
+
+    async def get_max_pass_number(self, work_id: str) -> int:
+        """Get the maximum pass_number for a work's chunks.
+
+        Returns 0 if no chunks exist for the work.
+        """
+        result = await self._pool.fetch_val(
+            "SELECT COALESCE(MAX(pass_number), 0) FROM chunks WHERE work_id = $1",
+            work_id,
+        )
+        return int(result)
 
     async def get(self, chunk_id: UUID) -> dict[str, Any] | None:
         row = await self._pool.fetch_one("SELECT * FROM chunks WHERE id = $1", chunk_id)

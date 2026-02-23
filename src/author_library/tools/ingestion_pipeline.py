@@ -175,10 +175,19 @@ class IngestionPipeline:
             route=route.value,
         )
 
+        # Determine pass number: detect if source already has chunks
+        current_max_pass = await self._storage.chunks.get_max_pass_number(work_id)
+        pass_number = current_max_pass + 1 if current_max_pass > 0 else 1
+
         # Idempotent: delete existing chunks/embeddings for re-ingestion
         deleted_chunks = await self._storage.chunks.delete_by_work(work_id)
         if deleted_chunks > 0:
-            log.info("ingestion_cleared_old_data", work_id=work_id, deleted_chunks=deleted_chunks)
+            log.info(
+                "ingestion_cleared_old_data",
+                work_id=work_id,
+                deleted_chunks=deleted_chunks,
+                new_pass_number=pass_number,
+            )
 
         # Upsert work node in Neo4j
         await self._storage.graph.upsert_work_node({
@@ -254,12 +263,16 @@ class IngestionPipeline:
                 "metadata": chunk.metadata,
                 "raw_content": chunk.raw_content,
                 "raw_content_window": chunk.raw_content_window,
+                "pass_number": pass_number,
             }
 
             pg_id = await self._storage.chunks.create(chunk_data)
             chunk_id_map[chunk.id] = pg_id
 
         log.info("ingestion_chunks_stored", work_id=work_id, count=len(chunk_id_map))
+
+        # Update engagement_passes on the work record
+        await self._storage.works.update(work_id, {"engagement_passes": pass_number})
 
         # Step 7: Embed chunks (use annotated_text for embedding)
         embeddings_stored = 0
