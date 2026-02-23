@@ -20,6 +20,18 @@ from author_library.embeddings import CachedEmbeddingProvider, ProviderRegistry
 from author_library.logging import get_logger, new_correlation_id, setup_logging
 from author_library.queue import TaskQueue
 from author_library.storage import StorageManager
+from author_library.tools.composable_ingestion import (
+    handle_catalog_source,
+    handle_chunk_source,
+    handle_classify_source,
+    handle_detect_passage_links,
+    handle_flag_acquisition,
+)
+from author_library.tools.composable_query import (
+    handle_get_passage_links,
+    handle_manage_vocabulary,
+    handle_search_chunks,
+)
 from author_library.tools.ingest import handle_ingest_book, handle_ingest_corpus
 from author_library.tools.meta import (
     handle_author_bio,
@@ -52,7 +64,9 @@ TOOLS: list[Tool] = [
         description=(
             "Ingest a single work into the author library. Parses the document, "
             "classifies its source type, chunks it by genre, generates embeddings, "
-            "extracts entities, and creates passage links."
+            "extracts entities, and creates passage links. "
+            "Set auto_confirm=false to pause after classification for human review "
+            "before proceeding with the composable ingestion tools."
         ),
         inputSchema={
             "type": "object",
@@ -72,6 +86,17 @@ TOOLS: list[Tool] = [
                         "Keys may include: source_class, genre_tags, work_type, "
                         "publication_year, publisher, etc."
                     ),
+                },
+                "auto_confirm": {
+                    "type": "boolean",
+                    "description": (
+                        "When true (default), runs the full pipeline automatically. "
+                        "When false, pauses after classification and returns the "
+                        "suggested source class for human review. Use the composable "
+                        "ingestion tools (catalog_source, chunk_source, etc.) to "
+                        "continue after review."
+                    ),
+                    "default": True,
                 },
             },
             "required": ["file_path", "subject_author_id"],
@@ -333,6 +358,319 @@ TOOLS: list[Tool] = [
             "required": ["file_path", "subject_author_id"],
         },
     ),
+    # -------------------------------------------------------------------
+    # Epic B: Composable Ingestion Tools
+    # -------------------------------------------------------------------
+    Tool(
+        name="classify_source",
+        description=(
+            "Classify a document's relationship to the subject author without "
+            "storing anything. Returns suggested source class, confidence, "
+            "signals, and whether human judgment is needed."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the file to classify.",
+                },
+                "subject_author": {
+                    "type": "string",
+                    "description": (
+                        "The library's subject author slug (e.g. 'malcolm-guite')."
+                    ),
+                },
+                "hints": {
+                    "type": "object",
+                    "description": (
+                        "Optional user-provided hints (e.g. {author: 'Holly Ordway', "
+                        "relationship: 'critical-study'})."
+                    ),
+                },
+            },
+            "required": ["file_path", "subject_author"],
+        },
+    ),
+    Tool(
+        name="catalog_source",
+        description=(
+            "Create a catalog entry for a document with a confirmed source class. "
+            "Parses the document, builds the catalog record, stores it in the "
+            "works table, and returns the work_id and full record."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the document file.",
+                },
+                "source_class": {
+                    "type": "string",
+                    "enum": ["primary", "secondary", "contextual", "tertiary", "personal"],
+                    "description": "Confirmed source classification.",
+                },
+                "work_type": {
+                    "type": "string",
+                    "description": "Confirmed or overridden work type (e.g. monograph, poetry-collection).",
+                },
+                "metadata_overrides": {
+                    "type": "object",
+                    "description": "User corrections to auto-detected metadata.",
+                },
+            },
+            "required": ["file_path", "source_class"],
+        },
+    ),
+    Tool(
+        name="chunk_source",
+        description=(
+            "Chunk a previously cataloged work using genre-aware strategies. "
+            "Annotates chunks, stores in database, generates embeddings, "
+            "and upserts chunk nodes in the knowledge graph."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "work_id": {
+                    "type": "string",
+                    "description": "The work ID returned by catalog_source.",
+                },
+                "chunking_strategy_override": {
+                    "type": "string",
+                    "description": "Override auto-detected genre strategy (e.g. 'poetry', 'sermon').",
+                },
+            },
+            "required": ["work_id"],
+        },
+    ),
+    Tool(
+        name="detect_passage_links",
+        description=(
+            "Detect cross-resource passage links for a work's chunks using "
+            "the 3-tier linking system: explicit citations, implicit engagement, "
+            "and thematic parallels. Optionally runs retroactive scan against "
+            "existing works."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "work_id": {
+                    "type": "string",
+                    "description": "The work to detect links for.",
+                },
+                "scan_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "explicit_citation",
+                            "implicit_engagement",
+                            "thematic_parallel",
+                        ],
+                    },
+                    "description": "Types of passage links to scan for.",
+                },
+                "confidence_threshold": {
+                    "type": "number",
+                    "description": "Minimum confidence to create link (default 0.5).",
+                },
+                "retroactive_scan": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, also scans existing works' chunks against "
+                        "this work's chunks."
+                    ),
+                },
+            },
+            "required": ["work_id"],
+        },
+    ),
+    Tool(
+        name="flag_acquisition",
+        description=(
+            "Flag unresolved citations as acquisition candidates for the library. "
+            "Tracks works referenced in the corpus but not yet ingested."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "citations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "citation_text": {
+                                "type": "string",
+                                "description": "The reference as it appears in the text.",
+                            },
+                            "probable_work": {
+                                "type": "string",
+                                "description": "Best guess at what's being cited.",
+                            },
+                            "priority": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                                "description": "Acquisition priority.",
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": "Why this would be valuable.",
+                            },
+                        },
+                        "required": ["citation_text"],
+                    },
+                    "description": "Citations to flag for acquisition.",
+                },
+            },
+            "required": ["citations"],
+        },
+    ),
+    # -------------------------------------------------------------------
+    # Epic C: Query Tools + Vocabulary
+    # -------------------------------------------------------------------
+    Tool(
+        name="search_chunks",
+        description=(
+            "Search chunks using combined vector + full-text retrieval with "
+            "source-class filtering and provenance rules. Returns results with "
+            "attribution guidance and passage links."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query.",
+                },
+                "filters": {
+                    "type": "object",
+                    "properties": {
+                        "source_class": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "primary",
+                                    "secondary",
+                                    "contextual",
+                                    "tertiary",
+                                    "personal",
+                                ],
+                            },
+                            "description": "Filter by source classification.",
+                        },
+                        "work_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Limit to specific works.",
+                        },
+                        "speaker": {
+                            "type": "string",
+                            "description": "Filter by speaker.",
+                        },
+                        "granularity": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["macro", "meso", "micro"],
+                            },
+                            "description": "Filter by chunk granularity.",
+                        },
+                        "themes": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Filter by theme tags.",
+                        },
+                        "pass_number": {
+                            "type": "integer",
+                            "description": "Filter by engagement pass.",
+                        },
+                    },
+                    "description": "Search filters.",
+                },
+                "include_personal": {
+                    "type": "boolean",
+                    "description": "Include Personal source class results (default true).",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum results (default 10).",
+                },
+                "include_passage_links": {
+                    "type": "boolean",
+                    "description": "Include passage links in results (default true).",
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="get_passage_links",
+        description=(
+            "Get passage links from a specific chunk via direct Neo4j traversal. "
+            "Supports multi-hop traversal and filtering by link type."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "chunk_id": {
+                    "type": "string",
+                    "description": "The chunk to get links for.",
+                },
+                "link_types": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "explicit_citation",
+                            "implicit_engagement",
+                            "thematic_parallel",
+                        ],
+                    },
+                    "description": "Filter by link type.",
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 3,
+                    "description": "How many hops to follow (default 1, max 3).",
+                },
+            },
+            "required": ["chunk_id"],
+        },
+    ),
+    Tool(
+        name="manage_vocabulary",
+        description=(
+            "Manage canonical vocabulary terms for the library's thematic tagging. "
+            "Supports listing, proposing, promoting, merging, and deprecating terms."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "propose", "promote", "merge", "deprecate"],
+                    "description": "Action to perform on vocabulary terms.",
+                },
+                "term": {
+                    "type": "string",
+                    "description": "The vocabulary term to act on.",
+                },
+                "merge_into": {
+                    "type": "string",
+                    "description": "Target term for merge action.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Note or reason for the action.",
+                },
+            },
+            "required": ["action"],
+        },
+    ),
 ]
 
 
@@ -437,6 +775,72 @@ def create_server(settings: Settings) -> Server:
                 result = await _handle_job_status(args, state=_state)
             elif name == "ingest_book_async":
                 result = await _handle_ingest_book_async(args, state=_state)
+            # Epic B: Composable Ingestion Tools
+            elif name == "classify_source":
+                result = await handle_classify_source(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "catalog_source":
+                result = await handle_catalog_source(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "chunk_source":
+                result = await handle_chunk_source(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "detect_passage_links":
+                result = await handle_detect_passage_links(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "flag_acquisition":
+                result = await handle_flag_acquisition(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            # Epic C: Query Tools + Vocabulary
+            elif name == "search_chunks":
+                result = await handle_search_chunks(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "get_passage_links":
+                result = await handle_get_passage_links(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
+            elif name == "manage_vocabulary":
+                result = await handle_manage_vocabulary(
+                    args,
+                    settings=settings,
+                    storage=storage_mgr,
+                    embedding_provider=embed_provider,
+                    cache_manager=cache_mgr,
+                )
             else:
                 result = json.dumps({"error": f"Unknown tool: {name}"})
         except Exception as exc:
