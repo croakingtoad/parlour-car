@@ -184,6 +184,25 @@ class GraphRepository(ABC):
     async def get_themes_for_chunk(self, chunk_id: str) -> list[dict[str, Any]]:
         """Get all themes explored by a chunk."""
 
+    @abstractmethod
+    async def create_user_reflects_on_edge(
+        self,
+        *,
+        reflection_chunk_id: str,
+        target_id: str,
+        target_type: str,
+        target_label: str,
+        target_key: str,
+        date_created: str | None = None,
+    ) -> None:
+        """Create a USER_REFLECTS_ON edge from a personal chunk to a target."""
+
+    @abstractmethod
+    async def get_reflections_for_target(
+        self, target_id: str, target_key: str, target_label: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get all personal reflection chunks for a target via USER_REFLECTS_ON."""
+
 
 # ---------------------------------------------------------------------------
 # Concrete PostgreSQL implementations
@@ -566,19 +585,27 @@ class Neo4jGraphRepository(GraphRepository):
         )
 
     async def upsert_chunk_node(self, chunk: dict[str, Any]) -> None:
-        await self._neo4j.execute_write(
-            """MERGE (c:Chunk {chunk_id: $chunk_id})
-            SET c.work_id = $work_id,
+        # Build SET clause dynamically to include user_id for personal chunks
+        params = {
+            "chunk_id": chunk["chunk_id"],
+            "work_id": chunk["work_id"],
+            "text_preview": chunk.get("text_preview", chunk.get("text", "")[:200]),
+            "granularity": chunk["granularity"],
+            "source_class": chunk["source_class"],
+        }
+        set_clause = """SET c.work_id = $work_id,
                 c.text_preview = $text_preview,
                 c.granularity = $granularity,
-                c.source_class = $source_class""",
-            {
-                "chunk_id": chunk["chunk_id"],
-                "work_id": chunk["work_id"],
-                "text_preview": chunk.get("text_preview", chunk.get("text", "")[:200]),
-                "granularity": chunk["granularity"],
-                "source_class": chunk["source_class"],
-            },
+                c.source_class = $source_class"""
+
+        if "user_id" in chunk:
+            set_clause += ",\n                c.user_id = $user_id"
+            params["user_id"] = chunk["user_id"]
+
+        await self._neo4j.execute_write(
+            f"""MERGE (c:Chunk {{chunk_id: $chunk_id}})
+            {set_clause}""",
+            params,
         )
 
     async def create_edge(
@@ -631,5 +658,69 @@ class Neo4jGraphRepository(GraphRepository):
             """MATCH (c:Chunk {chunk_id: $chunk_id})-[:EXPLORES_THEME]->(t:Theme)
             RETURN t.name AS name, t.canonical_name AS canonical_name""",
             {"chunk_id": chunk_id},
+        )
+        return results
+
+    async def create_user_reflects_on_edge(
+        self,
+        *,
+        reflection_chunk_id: str,
+        target_id: str,
+        target_type: str,
+        target_label: str,
+        target_key: str,
+        date_created: str | None = None,
+    ) -> None:
+        """Create a USER_REFLECTS_ON edge from a personal chunk to a target.
+
+        Personal chunks (source_class='personal') connect to captures or themes
+        via USER_REFLECTS_ON edges. This relationship represents the user's
+        reflection on the target content.
+
+        Args:
+            reflection_chunk_id: The chunk_id of the personal reflection chunk.
+            target_id: The identifier of the target node.
+            target_type: The type of target ('capture' or 'theme').
+            target_label: The Neo4j label of the target node (e.g., 'Chunk', 'Theme').
+            target_key: The property key on the target node (e.g., 'chunk_id', 'canonical_name').
+            date_created: ISO date string for when the reflection was created.
+        """
+        props: dict[str, Any] = {"target_type": target_type}
+        if date_created:
+            props["date_created"] = date_created
+
+        await self.create_edge(
+            from_label="Chunk",
+            from_key="chunk_id",
+            from_value=reflection_chunk_id,
+            rel_type="USER_REFLECTS_ON",
+            to_label=target_label,
+            to_key=target_key,
+            to_value=target_id,
+            properties=props,
+        )
+
+    async def get_reflections_for_target(
+        self, target_id: str, target_key: str, target_label: str, *, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Get all personal reflection chunks connected to a target via USER_REFLECTS_ON.
+
+        Args:
+            target_id: The identifier of the target node.
+            target_key: The property key on the target node.
+            target_label: The Neo4j label of the target node.
+            limit: Maximum number of results.
+
+        Returns:
+            List of reflection chunk data with edge properties.
+        """
+        results = await self._neo4j.execute_read(
+            f"""MATCH (c:Chunk)-[r:USER_REFLECTS_ON]->(t:{target_label} {{{target_key}: $target_id}})
+            RETURN c.chunk_id AS chunk_id, c.work_id AS work_id,
+                   c.text_preview AS text_preview, c.granularity AS granularity,
+                   c.source_class AS source_class, c.user_id AS user_id,
+                   r.target_type AS target_type, r.date_created AS date_created
+            LIMIT $limit""",
+            {"target_id": target_id, "limit": limit},
         )
         return results

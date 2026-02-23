@@ -33,6 +33,9 @@ _INDEXES = [
     "CREATE INDEX chunk_source_class IF NOT EXISTS FOR (c:Chunk) ON (c.source_class)",
     "CREATE INDEX chunk_work_id IF NOT EXISTS FOR (c:Chunk) ON (c.work_id)",
     "CREATE FULLTEXT INDEX chunk_text IF NOT EXISTS FOR (c:Chunk) ON EACH [c.text_preview]",
+    # USER_REFLECTS_ON edge indexes for personal source reflections
+    # These enable efficient traversal from personal chunks to their reflection targets
+    "CREATE INDEX chunk_user_id IF NOT EXISTS FOR (c:Chunk) ON (c.user_id)",
 ]
 
 
