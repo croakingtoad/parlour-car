@@ -18,6 +18,7 @@ from mcp.types import TextContent, Tool
 from author_library.cache import CacheManager
 from author_library.embeddings import CachedEmbeddingProvider, ProviderRegistry
 from author_library.logging import get_logger, new_correlation_id, setup_logging
+from author_library.queue import TaskQueue
 from author_library.storage import StorageManager
 from author_library.tools.ingest import handle_ingest_book, handle_ingest_corpus
 from author_library.tools.meta import (
@@ -288,6 +289,50 @@ TOOLS: list[Tool] = [
             "properties": {},
         },
     ),
+    Tool(
+        name="job_status",
+        description=(
+            "Check the status of a background job. Returns the current state "
+            "(queued, in_progress, complete, failed, not_found) and the result "
+            "if the job has completed."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job ID returned by an async ingestion operation.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    ),
+    Tool(
+        name="ingest_book_async",
+        description=(
+            "Queue a book ingestion for background processing. Returns a job ID "
+            "immediately that can be polled via job_status. Use this for "
+            "non-blocking ingestion when you don't need immediate results."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the document file (epub, pdf, txt, html, docx).",
+                },
+                "subject_author_id": {
+                    "type": "string",
+                    "description": "Slug identifier for the subject author.",
+                },
+                "metadata_hints": {
+                    "type": "object",
+                    "description": "Optional overrides for classification and catalog fields.",
+                },
+            },
+            "required": ["file_path", "subject_author_id"],
+        },
+    ),
 ]
 
 
@@ -388,6 +433,10 @@ def create_server(settings: Settings) -> Server:
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
                 )
+            elif name == "job_status":
+                result = await _handle_job_status(args, state=_state)
+            elif name == "ingest_book_async":
+                result = await _handle_ingest_book_async(args, state=_state)
             else:
                 result = json.dumps({"error": f"Unknown tool: {name}"})
         except Exception as exc:
@@ -403,6 +452,67 @@ def create_server(settings: Settings) -> Server:
     server._tool_state = _state  # type: ignore[attr-defined]
 
     return server
+
+
+# ---------------------------------------------------------------------------
+# Async job handlers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_job_status(args: dict[str, Any], *, state: dict[str, Any]) -> str:
+    """Handle the job_status MCP tool call."""
+    job_id = args.get("job_id")
+    if not job_id:
+        return json.dumps({"error": "job_id is required"})
+
+    task_queue = state.get("task_queue")
+    if task_queue is None or not task_queue.available:
+        return json.dumps({
+            "error": "Task queue is not available. Background jobs require Redis.",
+            "job_id": job_id,
+        })
+
+    from author_library.jobs import get_job_info
+
+    info = await get_job_info(task_queue._pool, job_id)
+    return json.dumps(info.to_dict(), indent=2)
+
+
+async def _handle_ingest_book_async(args: dict[str, Any], *, state: dict[str, Any]) -> str:
+    """Handle the ingest_book_async MCP tool call."""
+    file_path = args.get("file_path")
+    if not file_path:
+        return json.dumps({"error": "file_path is required"})
+
+    subject_author_id = args.get("subject_author_id")
+    if not subject_author_id:
+        return json.dumps({"error": "subject_author_id is required"})
+
+    task_queue = state.get("task_queue")
+    if task_queue is None or not task_queue.available:
+        return json.dumps({
+            "error": (
+                "Task queue is not available. Use ingest_book for synchronous "
+                "ingestion, or ensure Redis is running."
+            ),
+        })
+
+    metadata_hints = args.get("metadata_hints") or {}
+
+    job_id = await task_queue.enqueue_ingest_book(
+        file_path=file_path,
+        subject_author_id=subject_author_id,
+        metadata_hints=metadata_hints,
+    )
+
+    if job_id is None:
+        return json.dumps({"error": "Failed to enqueue job"})
+
+    return json.dumps({
+        "job_id": job_id,
+        "status": "queued",
+        "message": f"Ingestion queued for {file_path}. Poll with job_status tool.",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -443,11 +553,16 @@ async def run_server(settings: Settings) -> None:
     raw_provider = ProviderRegistry.create(settings)
     embedding_provider = CachedEmbeddingProvider(raw_provider, cache_manager)
 
+    # Initialize task queue (optional — gracefully degrades if Redis unavailable)
+    task_queue = TaskQueue()
+    await task_queue.connect()
+
     # Create server and inject dependencies
     server = create_server(settings)
     server._tool_state["storage"] = storage  # type: ignore[attr-defined]
     server._tool_state["embedding_provider"] = embedding_provider  # type: ignore[attr-defined]
     server._tool_state["cache_manager"] = cache_manager  # type: ignore[attr-defined]
+    server._tool_state["task_queue"] = task_queue  # type: ignore[attr-defined]
 
     try:
         if settings.server.transport == "sse":
@@ -456,6 +571,7 @@ async def run_server(settings: Settings) -> None:
             await _run_stdio(server)
     finally:
         # Graceful shutdown
+        await task_queue.close()
         await embedding_provider.close()
         await storage.close()
         log.info("author_library.shutdown_complete")
