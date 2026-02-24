@@ -13,8 +13,8 @@ from author_library.server import TOOLS
 
 class TestToolRegistrations:
     def test_total_tool_count(self) -> None:
-        """21 tools: 11 original + 2 Epic D + 5 Epic B + 3 Epic C."""
-        assert len(TOOLS) == 21
+        """23 tools: 11 original + 2 Epic D + 5 Epic B + 3 Epic C + 2 Epic N."""
+        assert len(TOOLS) == 23
 
     def test_job_status_tool_registered(self) -> None:
         names = [t.name for t in TOOLS]
