@@ -47,8 +47,8 @@ class LLMSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LLM_")
 
-    ingestion_model: str = "claude-sonnet-4-5-20250929"
-    query_model: str = "claude-sonnet-4-5-20250929"
+    ingestion_model: str = "claude-sonnet-4-6"
+    query_model: str = "claude-sonnet-4-6"
 
 
 class SessionSettings(BaseSettings):
