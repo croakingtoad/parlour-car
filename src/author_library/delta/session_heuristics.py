@@ -52,6 +52,12 @@ class SessionHeuristics:
     Implements the PRD §6.1 heuristic table with source-switching awareness.
     Works alongside the existing SessionManager, providing decision logic
     that the manager can use to determine session boundaries.
+
+    Manual start/stop always wins: calling ``manual_start`` forces the session
+    to stay open regardless of timeout or theme-change heuristics; calling
+    ``manual_stop`` forces the session to end regardless of how recent the
+    last activity was.  Use ``clear_override`` to revert a session back to
+    automatic heuristic control.
     """
 
     def __init__(
@@ -64,15 +70,70 @@ class SessionHeuristics:
         self._timeout_minutes = timeout_minutes
         self._theme_gap_minutes = theme_gap_minutes
         self._source_switch_gap_minutes = source_switch_gap_minutes
+        # Manual overrides keyed by session_id.
+        # Values: "started" (keep open) or "stopped" (force end).
+        self._manual_overrides: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Manual override API
+    # ------------------------------------------------------------------
+
+    def manual_start(self, session_id: str) -> None:
+        """Pin *session_id* as manually started.
+
+        While a session is manually started, ``evaluate`` will always return
+        ``"continue"`` and ``should_end_session`` will always return ``False``
+        for that session, regardless of inactivity or theme-change signals.
+        """
+        self._manual_overrides[session_id] = "started"
+        log.info(
+            "session_manual_start",
+            session_id=session_id,
+        )
+
+    def manual_stop(self, session_id: str) -> None:
+        """Pin *session_id* as manually stopped.
+
+        While a session is manually stopped, ``evaluate`` will always return
+        ``"new_session"`` and ``should_end_session`` will always return
+        ``True`` for that session, regardless of timing heuristics.
+        """
+        self._manual_overrides[session_id] = "stopped"
+        log.info(
+            "session_manual_stop",
+            session_id=session_id,
+        )
+
+    def clear_override(self, session_id: str) -> bool:
+        """Remove any manual override for *session_id*.
+
+        Returns ``True`` if an override was present and removed, ``False`` if
+        there was nothing to clear.
+        """
+        removed = self._manual_overrides.pop(session_id, None) is not None
+        if removed:
+            log.info("session_override_cleared", session_id=session_id)
+        return removed
+
+    def has_override(self, session_id: str) -> bool:
+        """Return ``True`` if a manual override exists for *session_id*."""
+        return session_id in self._manual_overrides
+
+    def get_override(self, session_id: str) -> str | None:
+        """Return the override state for *session_id*, or ``None``."""
+        return self._manual_overrides.get(session_id)
 
     def evaluate(
         self,
         current: CaptureContext,
         previous: CaptureContext | None,
+        *,
+        session_id: str | None = None,
     ) -> SessionDecision:
         """Evaluate whether a new capture belongs to the current session.
 
         Implements the heuristic table from PRD §6.1:
+        0. Manual start/stop → always wins
         1. Same source, <60min → continue session
         2. Different source, <30min → continue session (source switching)
         3. >60min gap → new session
@@ -81,10 +142,30 @@ class SessionHeuristics:
         Args:
             current: The current capture context.
             previous: The previous capture context (None if first capture).
+            session_id: Optional session id; when provided, manual overrides
+                for that session take precedence over all heuristic rules.
 
         Returns:
             SessionDecision with action and reasoning.
         """
+        # Rule 0: Manual override always wins
+        if session_id is not None:
+            override = self._manual_overrides.get(session_id)
+            if override == "started":
+                return SessionDecision(
+                    action="continue",
+                    reason="Manual start override — session kept open.",
+                    confidence=1.0,
+                    metadata={"manual_override": "started", "session_id": session_id},
+                )
+            if override == "stopped":
+                return SessionDecision(
+                    action="new_session",
+                    reason="Manual stop override — session ended.",
+                    confidence=1.0,
+                    metadata={"manual_override": "stopped", "session_id": session_id},
+                )
+
         if previous is None:
             return SessionDecision(
                 action="new_session",
@@ -176,16 +257,35 @@ class SessionHeuristics:
         last_activity: datetime,
         *,
         current_time: datetime | None = None,
+        session_id: str | None = None,
     ) -> bool:
-        """Check if a session should be auto-ended based on inactivity.
+        """Check if a session should be ended.
+
+        When *session_id* is provided and has a manual override, that override
+        takes absolute precedence:
+
+        * ``manual_start`` → always returns ``False`` (do not end).
+        * ``manual_stop``  → always returns ``True``  (end immediately).
+
+        Without a manual override the method falls back to the inactivity
+        timeout heuristic.
 
         Args:
             last_activity: Timestamp of last activity.
             current_time: Current time (defaults to now).
+            session_id: Optional session id for manual-override lookup.
 
         Returns:
             True if the session should be ended.
         """
+        # Manual override takes precedence
+        if session_id is not None:
+            override = self._manual_overrides.get(session_id)
+            if override == "stopped":
+                return True
+            if override == "started":
+                return False
+
         now = current_time or datetime.now(timezone.utc)
         gap = _compute_gap_minutes(last_activity, now)
         return gap > self._timeout_minutes

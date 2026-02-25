@@ -14,6 +14,10 @@ from author_library.delta.session_heuristics import (
     _themes_significantly_changed,
 )
 
+# Session ID constants used across manual-override tests
+_SID_A = "session-aaa-111"
+_SID_B = "session-bbb-222"
+
 
 # ---------------------------------------------------------------------------
 # Data model tests
@@ -310,3 +314,246 @@ class TestShouldEndSession:
         last = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
         now = datetime(2026, 1, 15, 10, 16, tzinfo=timezone.utc)
         assert h.should_end_session(last, current_time=now) is True
+
+
+# ---------------------------------------------------------------------------
+# Manual override API tests
+# ---------------------------------------------------------------------------
+
+
+class TestManualOverrideAPI:
+    """Test the manual_start / manual_stop / clear_override / query helpers."""
+
+    @pytest.fixture()
+    def heuristics(self):
+        return SessionHeuristics(timeout_minutes=60)
+
+    def test_manual_start_sets_override(self, heuristics):
+        heuristics.manual_start(_SID_A)
+        assert heuristics.has_override(_SID_A) is True
+        assert heuristics.get_override(_SID_A) == "started"
+
+    def test_manual_stop_sets_override(self, heuristics):
+        heuristics.manual_stop(_SID_A)
+        assert heuristics.has_override(_SID_A) is True
+        assert heuristics.get_override(_SID_A) == "stopped"
+
+    def test_manual_stop_overwrites_start(self, heuristics):
+        heuristics.manual_start(_SID_A)
+        heuristics.manual_stop(_SID_A)
+        assert heuristics.get_override(_SID_A) == "stopped"
+
+    def test_manual_start_overwrites_stop(self, heuristics):
+        heuristics.manual_stop(_SID_A)
+        heuristics.manual_start(_SID_A)
+        assert heuristics.get_override(_SID_A) == "started"
+
+    def test_clear_override_returns_true_when_present(self, heuristics):
+        heuristics.manual_start(_SID_A)
+        assert heuristics.clear_override(_SID_A) is True
+        assert heuristics.has_override(_SID_A) is False
+
+    def test_clear_override_returns_false_when_absent(self, heuristics):
+        assert heuristics.clear_override(_SID_A) is False
+
+    def test_has_override_false_when_empty(self, heuristics):
+        assert heuristics.has_override(_SID_A) is False
+
+    def test_get_override_none_when_absent(self, heuristics):
+        assert heuristics.get_override(_SID_A) is None
+
+    def test_independent_sessions(self, heuristics):
+        heuristics.manual_start(_SID_A)
+        heuristics.manual_stop(_SID_B)
+        assert heuristics.get_override(_SID_A) == "started"
+        assert heuristics.get_override(_SID_B) == "stopped"
+
+
+# ---------------------------------------------------------------------------
+# Manual override ← evaluate() integration
+# ---------------------------------------------------------------------------
+
+
+class TestEvaluateManualOverride:
+    """Manual overrides must beat every heuristic rule in evaluate()."""
+
+    @pytest.fixture()
+    def heuristics(self):
+        return SessionHeuristics(
+            timeout_minutes=60,
+            theme_gap_minutes=30,
+            source_switch_gap_minutes=30,
+        )
+
+    def _ctx(
+        self,
+        *,
+        work_id: str = "w-1",
+        themes: list[str] | None = None,
+        minutes_offset: int = 0,
+    ) -> CaptureContext:
+        base = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
+        return CaptureContext(
+            work_id=work_id,
+            themes=themes or ["imagination"],
+            timestamp=base + timedelta(minutes=minutes_offset),
+        )
+
+    # --- manual_start overrides ---
+
+    def test_manual_start_beats_timeout(self, heuristics):
+        """Even with a 3-hour gap, manual_start keeps the session alive."""
+        heuristics.manual_start(_SID_A)
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=180)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "continue"
+        assert decision.confidence == 1.0
+        assert decision.metadata["manual_override"] == "started"
+
+    def test_manual_start_beats_theme_change(self, heuristics):
+        """Manual start overrides theme-change + gap heuristic."""
+        heuristics.manual_start(_SID_A)
+        prev = self._ctx(
+            work_id="w-1", themes=["coleridge", "romanticism"], minutes_offset=0,
+        )
+        curr = self._ctx(
+            work_id="w-2", themes=["liturgy", "prayer"], minutes_offset=45,
+        )
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "continue"
+        assert decision.metadata["manual_override"] == "started"
+
+    def test_manual_start_beats_first_capture(self, heuristics):
+        """Even with no previous context, manual start says continue."""
+        heuristics.manual_start(_SID_A)
+        decision = heuristics.evaluate(self._ctx(), None, session_id=_SID_A)
+        assert decision.action == "continue"
+        assert decision.confidence == 1.0
+
+    # --- manual_stop overrides ---
+
+    def test_manual_stop_beats_same_source_within_timeout(self, heuristics):
+        """Same source, 5 min gap would normally continue — stop overrides."""
+        heuristics.manual_stop(_SID_A)
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=5)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "new_session"
+        assert decision.confidence == 1.0
+        assert decision.metadata["manual_override"] == "stopped"
+
+    def test_manual_stop_beats_source_switch(self, heuristics):
+        """Source switch within gap would normally continue — stop overrides."""
+        heuristics.manual_stop(_SID_A)
+        prev = self._ctx(work_id="w-1", minutes_offset=0)
+        curr = self._ctx(work_id="w-2", minutes_offset=10)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "new_session"
+        assert decision.metadata["manual_override"] == "stopped"
+
+    # --- no override → falls through to heuristics ---
+
+    def test_no_override_falls_through(self, heuristics):
+        """Without an override, evaluate behaves normally."""
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=30)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "continue"
+        assert "manual_override" not in decision.metadata
+
+    def test_no_session_id_ignores_overrides(self, heuristics):
+        """When session_id is not passed, overrides are not consulted."""
+        heuristics.manual_stop(_SID_A)
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=5)
+        # session_id omitted — should continue normally
+        decision = heuristics.evaluate(curr, prev)
+        assert decision.action == "continue"
+        assert "manual_override" not in decision.metadata
+
+    def test_cleared_override_falls_through(self, heuristics):
+        """After clearing, evaluate returns to heuristic behavior."""
+        heuristics.manual_stop(_SID_A)
+        heuristics.clear_override(_SID_A)
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=5)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_A)
+        assert decision.action == "continue"
+        assert "manual_override" not in decision.metadata
+
+    def test_override_scoped_to_session(self, heuristics):
+        """Override on session A does not affect session B."""
+        heuristics.manual_stop(_SID_A)
+        prev = self._ctx(minutes_offset=0)
+        curr = self._ctx(minutes_offset=5)
+        decision = heuristics.evaluate(curr, prev, session_id=_SID_B)
+        assert decision.action == "continue"
+        assert "manual_override" not in decision.metadata
+
+
+# ---------------------------------------------------------------------------
+# Manual override ← should_end_session() integration
+# ---------------------------------------------------------------------------
+
+
+class TestShouldEndSessionManualOverride:
+    """Manual overrides must beat the inactivity heuristic."""
+
+    @pytest.fixture()
+    def heuristics(self):
+        return SessionHeuristics(timeout_minutes=60)
+
+    def test_manual_start_prevents_auto_end(self, heuristics):
+        """manual_start keeps the session alive even after 2 hours of inactivity."""
+        heuristics.manual_start(_SID_A)
+        long_ago = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)
+        assert heuristics.should_end_session(
+            long_ago, current_time=now, session_id=_SID_A,
+        ) is False
+
+    def test_manual_stop_forces_end_despite_recent_activity(self, heuristics):
+        """manual_stop ends the session even with activity 1 minute ago."""
+        heuristics.manual_stop(_SID_A)
+        recent = datetime(2026, 1, 15, 10, 59, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)
+        assert heuristics.should_end_session(
+            recent, current_time=now, session_id=_SID_A,
+        ) is True
+
+    def test_no_override_uses_heuristic(self, heuristics):
+        """Without override, should_end_session uses the timeout heuristic."""
+        last = datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 10, 30, tzinfo=timezone.utc)
+        assert heuristics.should_end_session(
+            last, current_time=now, session_id=_SID_A,
+        ) is False
+
+    def test_no_session_id_ignores_override(self, heuristics):
+        """Without session_id, manual_stop has no effect."""
+        heuristics.manual_stop(_SID_A)
+        recent = datetime(2026, 1, 15, 10, 59, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)
+        # No session_id — uses heuristic (1 min gap < 60 min timeout)
+        assert heuristics.should_end_session(recent, current_time=now) is False
+
+    def test_cleared_override_reverts_to_heuristic(self, heuristics):
+        """After clearing, should_end_session returns to heuristic behavior."""
+        heuristics.manual_start(_SID_A)
+        heuristics.clear_override(_SID_A)
+        long_ago = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)
+        assert heuristics.should_end_session(
+            long_ago, current_time=now, session_id=_SID_A,
+        ) is True
+
+    def test_override_scoped_to_session(self, heuristics):
+        """Override on session A does not affect session B."""
+        heuristics.manual_start(_SID_A)
+        long_ago = datetime(2026, 1, 15, 8, 0, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 15, 11, 0, tzinfo=timezone.utc)
+        # Session B has no override — heuristic says end
+        assert heuristics.should_end_session(
+            long_ago, current_time=now, session_id=_SID_B,
+        ) is True
