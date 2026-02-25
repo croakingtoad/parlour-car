@@ -1120,7 +1120,7 @@ async def _run_sse(server: Server, settings: Settings) -> None:
     """
     import uvicorn
     from starlette.applications import Starlette
-    from starlette.routing import Route
+    from starlette.routing import Mount, Route
 
     from author_library.captures.endpoint import handle_capture, handle_capture_status
 
@@ -1139,7 +1139,7 @@ async def _run_sse(server: Server, settings: Settings) -> None:
     app = Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
-            Route("/messages/", endpoint=sse_transport.handle_post_message, methods=["POST"]),
+            Mount("/messages", app=sse_transport.handle_post_message),
             Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
             Route(
                 "/api/v1/captures/status/{job_id:str}",
