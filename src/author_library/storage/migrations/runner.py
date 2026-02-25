@@ -21,6 +21,37 @@ log = structlog.get_logger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).parent
 
+# Historical renames: old filename -> new filename.
+# When upgrading a database that already applied the old name, the tracker
+# is updated in-place so the renamed file is not re-applied.
+_RENAMES: dict[str, str] = {
+    "004_transcript_cache.sql": "009_transcript_cache.sql",
+}
+
+
+async def _apply_renames(pool: PostgresPool) -> None:
+    """Update _migrations rows for any historically renamed migration files.
+
+    Three possible states per rename entry:
+    1. Only old name present  -> UPDATE old row to new name.
+    2. Both names present     -> DELETE old row (new row is canonical).
+    3. Only new name / neither -> no-op.
+    """
+    for old_name, new_name in _RENAMES.items():
+        # If both rows exist, just drop the stale old-name row.
+        await pool.execute(
+            "DELETE FROM _migrations WHERE filename = $1 "
+            "AND EXISTS (SELECT 1 FROM _migrations WHERE filename = $2)",
+            old_name,
+            new_name,
+        )
+        # If only the old name remains, rename it in place.
+        await pool.execute(
+            "UPDATE _migrations SET filename = $1 WHERE filename = $2",
+            new_name,
+            old_name,
+        )
+
 
 async def _ensure_migrations_table(pool: PostgresPool) -> None:
     """Create the migrations tracking table if it does not exist."""
@@ -50,6 +81,7 @@ async def run_migrations(pool: PostgresPool) -> list[str]:
     Returns the list of newly-applied migration filenames.
     """
     await _ensure_migrations_table(pool)
+    await _apply_renames(pool)
     applied = await _applied_migrations(pool)
     pending = [m for m in _discover_migrations() if m.name not in applied]
 

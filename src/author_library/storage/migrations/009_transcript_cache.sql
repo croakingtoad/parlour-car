@@ -1,4 +1,4 @@
--- 004_transcript_cache.sql
+-- 009_transcript_cache.sql  (renamed from 004_transcript_cache.sql)
 -- Transcript cache for Parlour Chrome video/audio sources.
 -- Stores fetched transcripts keyed by source URL with TTL-based invalidation.
 -- Uses IF NOT EXISTS for compatibility with parallel epic branches.
