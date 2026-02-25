@@ -517,6 +517,8 @@ class PgEmbeddingRepository(EmbeddingRepository):
                 c.text,
                 c.granularity,
                 c.source_class,
+                c.pass_number,
+                c.metadata->>'speaker' AS speaker,
                 (ce.embedding <=> $1::vector) AS distance
             FROM chunk_embeddings ce
             JOIN chunks c ON c.id = ce.chunk_id

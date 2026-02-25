@@ -30,6 +30,9 @@ class FakeRow:
     def __getitem__(self, key: str) -> Any:
         return self.data[key]
 
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.data.get(key, default)
+
 
 class FakePostgresPool:
     """A fake pool that returns pre-configured search results."""
@@ -52,6 +55,8 @@ SAMPLE_ROWS = [
         "snippet": "In **Mere Christianity** Lewis argues that the **moral law**...",
         "granularity": "meso",
         "source_class": "primary",
+        "pass_number": 1,
+        "speaker": None,
     },
     {
         "chunk_id": uuid4(),
@@ -60,6 +65,8 @@ SAMPLE_ROWS = [
         "snippet": "The **Weight** of **Glory** is perhaps Lewis's most eloquent sermon...",
         "granularity": "meso",
         "source_class": "primary",
+        "pass_number": 1,
+        "speaker": None,
     },
 ]
 
@@ -139,6 +146,8 @@ async def test_phrase_search_deduplicates_by_chunk_id() -> None:
             "snippet": "In the neighborhood of faith...",
             "granularity": "meso",
             "source_class": "primary",
+            "pass_number": 1,
+            "speaker": None,
         },
         {
             "chunk_id": duplicate_id,
@@ -147,6 +156,8 @@ async def test_phrase_search_deduplicates_by_chunk_id() -> None:
             "snippet": "In the neighborhood of faith...",
             "granularity": "micro",
             "source_class": "primary",
+            "pass_number": 1,
+            "speaker": None,
         },
         {
             "chunk_id": uuid4(),
@@ -155,6 +166,8 @@ async def test_phrase_search_deduplicates_by_chunk_id() -> None:
             "snippet": "The neighborhood of glory...",
             "granularity": "meso",
             "source_class": "primary",
+            "pass_number": 1,
+            "speaker": None,
         },
     ]
     pool = FakePostgresPool(rows_with_dupes)  # type: ignore[arg-type]

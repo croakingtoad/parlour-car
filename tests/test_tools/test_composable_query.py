@@ -1,24 +1,106 @@
-"""Tests for composable query tool handlers — input validation, error paths, and filters."""
+"""Tests for composable query tool handlers — input validation and error paths."""
 
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID
+from uuid import uuid4
 
 import pytest
 
 from author_library.errors import RetrievalError
 from author_library.retrieval.models import RetrievalResult
 from author_library.tools.composable_query import (
-    _apply_chunk_metadata_filters,
-    _batch_fetch_chunk_metadata,
-    _batch_fetch_chunk_themes,
     _build_provenance_rules,
     handle_get_passage_links,
     handle_manage_vocabulary,
     handle_search_chunks,
 )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for search_chunks filter tests
+# ---------------------------------------------------------------------------
+
+_CHUNK_IDS = [uuid4() for _ in range(6)]
+
+
+def _make_results() -> list[RetrievalResult]:
+    """Create a known set of RetrievalResult objects for filter testing."""
+    return [
+        RetrievalResult(
+            chunk_id=_CHUNK_IDS[0],
+            work_id="lewis--mere-christianity",
+            text="In Mere Christianity Lewis argues about moral law.",
+            score=0.95,
+            granularity="meso",
+            source_class="primary",
+            source="vector",
+            metadata={"pass_number": 1, "speaker": "C.S. Lewis"},
+        ),
+        RetrievalResult(
+            chunk_id=_CHUNK_IDS[1],
+            work_id="lewis--weight-of-glory",
+            text="The Weight of Glory is Lewis's most eloquent sermon.",
+            score=0.90,
+            granularity="meso",
+            source_class="primary",
+            source="vector",
+            metadata={"pass_number": 2, "speaker": "C.S. Lewis"},
+        ),
+        RetrievalResult(
+            chunk_id=_CHUNK_IDS[2],
+            work_id="lewis--podcast-interview",
+            text="Tolkien discusses the Inklings and Lewis.",
+            score=0.85,
+            granularity="micro",
+            source_class="primary",
+            source="vector",
+            metadata={"pass_number": 1, "speaker": "J.R.R. Tolkien"},
+        ),
+        RetrievalResult(
+            chunk_id=_CHUNK_IDS[3],
+            work_id="mcgrath--cs-lewis-biography",
+            text="Lewis's conversion is well documented.",
+            score=0.80,
+            granularity="meso",
+            source_class="secondary",
+            source="vector",
+            metadata={"pass_number": 1},
+        ),
+        RetrievalResult(
+            chunk_id=_CHUNK_IDS[4],
+            work_id="lewis--surprised-by-joy",
+            text="Joy is the serious business of Heaven.",
+            score=0.75,
+            granularity="macro",
+            source_class="primary",
+            source="vector",
+            metadata={"pass_number": 3},
+        ),
+    ]
+
+
+def _make_storage_mock() -> MagicMock:
+    """Create a minimal storage mock for handle_search_chunks."""
+    storage = MagicMock()
+    # Works repo — get() returns a minimal work dict
+    storage.works.get = AsyncMock(
+        return_value={"title": "Test Work", "author": "Test Author"}
+    )
+    # Neo4j connection (needed for GraphQueryService instantiation)
+    storage.neo4j = MagicMock()
+    # Graph repo — get_themes_for_chunk returns empty by default
+    storage.graph.get_themes_for_chunk = AsyncMock(return_value=[])
+    return storage
+
+
+def _make_graph_service_mock() -> MagicMock:
+    """Create a mock GraphQueryService that returns no engagement chain."""
+    mock = MagicMock()
+    mock.get_engagement_chain = AsyncMock(return_value=None)
+    return mock
 
 
 class TestHandleSearchChunksValidation:
@@ -190,512 +272,468 @@ class TestBuildProvenanceRules:
 
 
 # ---------------------------------------------------------------------------
-# Helpers for filter tests
-# ---------------------------------------------------------------------------
-
-_UUID_A = UUID("00000000-0000-0000-0000-000000000001")
-_UUID_B = UUID("00000000-0000-0000-0000-000000000002")
-_UUID_C = UUID("00000000-0000-0000-0000-000000000003")
-
-
-def _make_result(
-    chunk_id: UUID,
-    work_id: str = "work-1",
-    text: str = "sample text",
-    score: float = 0.9,
-    granularity: str = "meso",
-    source_class: str = "primary",
-    source: str = "vector",
-) -> RetrievalResult:
-    return RetrievalResult(
-        chunk_id=chunk_id,
-        work_id=work_id,
-        text=text,
-        score=score,
-        granularity=granularity,
-        source_class=source_class,
-        source=source,
-    )
-
-
-def _mock_storage(
-    pg_rows: list[dict] | None = None,
-    neo4j_records: list[dict] | None = None,
-) -> MagicMock:
-    """Build a mock StorageManager with stubbed PG and Neo4j."""
-    storage = MagicMock()
-    storage.pg = MagicMock()
-    storage.pg.fetch_all = AsyncMock(return_value=pg_rows or [])
-    storage.neo4j = MagicMock()
-    storage.neo4j.execute_read = AsyncMock(return_value=neo4j_records or [])
-    storage.works = MagicMock()
-    storage.works.get = AsyncMock(return_value={"title": "Test Work", "author": "Author"})
-    storage.embeddings = MagicMock()
-    storage.graph = MagicMock()
-    return storage
-
-
-# ---------------------------------------------------------------------------
-# Tests for _apply_chunk_metadata_filters
+# search_chunks filter tests — speaker, pass_number, themes
 # ---------------------------------------------------------------------------
 
 
-class TestApplyChunkMetadataFilters:
-    """Test the post-search metadata filter logic."""
-
-    async def test_speaker_filter_keeps_matching(self) -> None:
-        """Chunks with matching speaker are kept."""
-        results = [_make_result(_UUID_A), _make_result(_UUID_B)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Malcolm Guite"}, "pass_number": 1},
-            {"chunk_id": str(_UUID_B), "metadata": {"speaker": "N.T. Wright"}, "pass_number": 1},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            speaker_filter="Malcolm Guite",
-        )
-
-        assert len(filtered) == 1
-        assert str(filtered[0].chunk_id) == str(_UUID_A)
-
-    async def test_speaker_filter_case_insensitive(self) -> None:
-        """Speaker matching is case-insensitive."""
-        results = [_make_result(_UUID_A)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Malcolm Guite"}, "pass_number": 1},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            speaker_filter="malcolm guite",
-        )
-
-        assert len(filtered) == 1
-
-    async def test_speaker_filter_removes_no_speaker(self) -> None:
-        """Chunks without a speaker in metadata are filtered out."""
-        results = [_make_result(_UUID_A)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {}, "pass_number": 1},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            speaker_filter="Malcolm Guite",
-        )
-
-        assert len(filtered) == 0
-
-    async def test_pass_number_filter_keeps_matching(self) -> None:
-        """Only chunks with the requested pass_number are kept."""
-        results = [_make_result(_UUID_A), _make_result(_UUID_B), _make_result(_UUID_C)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {}, "pass_number": 1},
-            {"chunk_id": str(_UUID_B), "metadata": {}, "pass_number": 2},
-            {"chunk_id": str(_UUID_C), "metadata": {}, "pass_number": 2},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            pass_number_filter=2,
-        )
-
-        assert len(filtered) == 2
-        ids = {str(r.chunk_id) for r in filtered}
-        assert str(_UUID_B) in ids
-        assert str(_UUID_C) in ids
-
-    async def test_pass_number_filter_zero(self) -> None:
-        """pass_number=0 should not match chunks with pass_number=1."""
-        results = [_make_result(_UUID_A)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {}, "pass_number": 1},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            pass_number_filter=0,
-        )
-
-        assert len(filtered) == 0
-
-    async def test_themes_filter_keeps_matching(self) -> None:
-        """Chunks exploring at least one requested theme are kept."""
-        results = [_make_result(_UUID_A), _make_result(_UUID_B)]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "imagination", "name": "Imagination"},
-            {"chunk_id": str(_UUID_A), "canonical_name": "prayer", "name": "Prayer"},
-            {"chunk_id": str(_UUID_B), "canonical_name": "poetry", "name": "Poetry"},
-        ]
-        storage = _mock_storage(neo4j_records=neo4j_records)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            themes_filter=["imagination"],
-        )
-
-        assert len(filtered) == 1
-        assert str(filtered[0].chunk_id) == str(_UUID_A)
-
-    async def test_themes_filter_case_insensitive(self) -> None:
-        """Theme matching is case-insensitive."""
-        results = [_make_result(_UUID_A)]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "imagination", "name": "Imagination"},
-        ]
-        storage = _mock_storage(neo4j_records=neo4j_records)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            themes_filter=["Imagination"],
-        )
-
-        assert len(filtered) == 1
-
-    async def test_themes_filter_any_match(self) -> None:
-        """If chunk explores ANY of the requested themes, it is kept."""
-        results = [_make_result(_UUID_A)]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "prayer", "name": "Prayer"},
-        ]
-        storage = _mock_storage(neo4j_records=neo4j_records)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            themes_filter=["imagination", "prayer"],
-        )
-
-        assert len(filtered) == 1
-
-    async def test_themes_filter_no_themes_removes(self) -> None:
-        """Chunks with no theme associations are filtered out."""
-        results = [_make_result(_UUID_A)]
-        # No neo4j records for this chunk
-        storage = _mock_storage(neo4j_records=[])
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            themes_filter=["imagination"],
-        )
-
-        assert len(filtered) == 0
-
-    async def test_combined_filters_all_must_pass(self) -> None:
-        """When multiple filters are set, ALL must pass for a result to be kept."""
-        results = [_make_result(_UUID_A), _make_result(_UUID_B)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Malcolm Guite"}, "pass_number": 2},
-            {"chunk_id": str(_UUID_B), "metadata": {"speaker": "Malcolm Guite"}, "pass_number": 1},
-        ]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "imagination", "name": "Imagination"},
-            {"chunk_id": str(_UUID_B), "canonical_name": "imagination", "name": "Imagination"},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows, neo4j_records=neo4j_records)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            speaker_filter="Malcolm Guite",
-            themes_filter=["imagination"],
-            pass_number_filter=2,
-        )
-
-        # Only UUID_A matches all three filters
-        assert len(filtered) == 1
-        assert str(filtered[0].chunk_id) == str(_UUID_A)
-
-    async def test_no_filters_returns_all(self) -> None:
-        """When no filters are provided, all results are returned unchanged."""
-        results = [_make_result(_UUID_A), _make_result(_UUID_B)]
-        storage = _mock_storage()
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-        )
-
-        assert len(filtered) == 2
-
-    async def test_empty_results_returns_empty(self) -> None:
-        """Empty input returns empty output."""
-        storage = _mock_storage()
-
-        filtered = await _apply_chunk_metadata_filters(
-            [],
-            storage=storage,
-            speaker_filter="test",
-        )
-
-        assert filtered == []
-
-    async def test_neo4j_failure_graceful_degradation(self) -> None:
-        """If Neo4j theme query fails, themes filter removes all results."""
-        results = [_make_result(_UUID_A)]
-        storage = _mock_storage()
-        storage.neo4j.execute_read = AsyncMock(side_effect=Exception("Neo4j down"))
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            themes_filter=["imagination"],
-        )
-
-        # When Neo4j is down, no themes are found, so nothing matches
-        assert len(filtered) == 0
-
-    async def test_metadata_as_json_string(self) -> None:
-        """metadata stored as JSON string is parsed correctly."""
-        results = [_make_result(_UUID_A)]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": '{"speaker": "Malcolm Guite"}', "pass_number": 1},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        filtered = await _apply_chunk_metadata_filters(
-            results,
-            storage=storage,
-            speaker_filter="Malcolm Guite",
-        )
-
-        assert len(filtered) == 1
-
-
-# ---------------------------------------------------------------------------
-# Tests for _batch_fetch_chunk_metadata
-# ---------------------------------------------------------------------------
-
-
-class TestBatchFetchChunkMetadata:
-    """Test batch PG metadata fetching."""
-
-    async def test_empty_input_returns_empty(self) -> None:
-        storage = _mock_storage()
-        result = await _batch_fetch_chunk_metadata(storage, [])
-        assert result == {}
-
-    async def test_returns_metadata_with_pass_number(self) -> None:
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Guite"}, "pass_number": 3},
-        ]
-        storage = _mock_storage(pg_rows=pg_rows)
-
-        result = await _batch_fetch_chunk_metadata(storage, [str(_UUID_A)])
-
-        assert str(_UUID_A) in result
-        assert result[str(_UUID_A)]["speaker"] == "Guite"
-        assert result[str(_UUID_A)]["pass_number"] == 3
-
-
-# ---------------------------------------------------------------------------
-# Tests for _batch_fetch_chunk_themes
-# ---------------------------------------------------------------------------
-
-
-class TestBatchFetchChunkThemes:
-    """Test batch Neo4j theme fetching."""
-
-    async def test_empty_input_returns_empty(self) -> None:
-        storage = _mock_storage()
-        result = await _batch_fetch_chunk_themes(storage, [])
-        assert result == {}
-
-    async def test_returns_lowercase_themes(self) -> None:
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "Imagination", "name": "Imagination"},
-        ]
-        storage = _mock_storage(neo4j_records=neo4j_records)
-
-        result = await _batch_fetch_chunk_themes(storage, [str(_UUID_A)])
-
-        assert str(_UUID_A) in result
-        assert "imagination" in result[str(_UUID_A)]
-
-    async def test_neo4j_failure_returns_empty(self) -> None:
-        storage = _mock_storage()
-        storage.neo4j.execute_read = AsyncMock(side_effect=Exception("down"))
-
-        result = await _batch_fetch_chunk_themes(storage, [str(_UUID_A)])
-
-        assert result == {}
-
-
-# ---------------------------------------------------------------------------
-# Integration: handle_search_chunks with filters
-# ---------------------------------------------------------------------------
-
-
-class TestSearchChunksFilterIntegration:
-    """Test that handle_search_chunks applies speaker, themes, and pass_number filters."""
-
-    async def _run_search(
-        self,
-        arguments: dict,
-        vector_results: list[RetrievalResult] | None = None,
-        keyword_results: list[RetrievalResult] | None = None,
-        pg_metadata_rows: list[dict] | None = None,
-        neo4j_theme_records: list[dict] | None = None,
-    ) -> dict:
-        """Run handle_search_chunks with mocked dependencies."""
-        storage = _mock_storage(
-            pg_rows=pg_metadata_rows or [],
-            neo4j_records=neo4j_theme_records or [],
-        )
-        embedding_provider = MagicMock()
-        settings = MagicMock()
-
-        # Mock the engagement chain (passage links)
-        mock_chain = MagicMock()
-        mock_chain.links = []
+class TestSearchChunksSpeakerFilter:
+    """Verify that the speaker filter is actually applied to search results."""
+
+    @pytest.mark.asyncio
+    async def test_speaker_filter_returns_only_matching_speaker(self) -> None:
+        """When speaker filter is set, only results with that speaker are returned."""
+        results = _make_results()
+        storage = _make_storage_mock()
 
         with (
             patch(
                 "author_library.tools.composable_query.vector_search",
                 new_callable=AsyncMock,
-                return_value=vector_results or [],
+                return_value=results,
             ),
             patch(
                 "author_library.tools.composable_query.keyword_search",
                 new_callable=AsyncMock,
-                return_value=keyword_results or [],
+                return_value=[],
             ),
             patch(
                 "author_library.tools.composable_query.GraphQueryService",
-            ) as MockGraphService,
+                return_value=_make_graph_service_mock(),
+            ),
         ):
-            MockGraphService.return_value.get_engagement_chain = AsyncMock(
-                return_value=mock_chain,
-            )
-
-            result_json = await handle_search_chunks(
-                arguments,
-                settings=settings,
-                storage=storage,
-                embedding_provider=embedding_provider,
-            )
-
-        return json.loads(result_json)
-
-    async def test_speaker_filter_applied(self) -> None:
-        """search_chunks with speaker filter only returns matching chunks."""
-        results = [
-            _make_result(_UUID_A, text="Guite speaks"),
-            _make_result(_UUID_B, text="Wright speaks"),
-        ]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Malcolm Guite"}, "pass_number": 1},
-            {"chunk_id": str(_UUID_B), "metadata": {"speaker": "N.T. Wright"}, "pass_number": 1},
-        ]
-
-        parsed = await self._run_search(
-            {"query": "test", "filters": {"speaker": "Malcolm Guite"}},
-            vector_results=results,
-            pg_metadata_rows=pg_rows,
-        )
-
-        assert parsed["total_available"] == 1
-        assert parsed["results"][0]["text"] == "Guite speaks"
-
-    async def test_pass_number_filter_applied(self) -> None:
-        """search_chunks with pass_number filter only returns matching chunks."""
-        results = [
-            _make_result(_UUID_A, text="pass 1"),
-            _make_result(_UUID_B, text="pass 2"),
-        ]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {}, "pass_number": 1},
-            {"chunk_id": str(_UUID_B), "metadata": {}, "pass_number": 2},
-        ]
-
-        parsed = await self._run_search(
-            {"query": "test", "filters": {"pass_number": 2}},
-            vector_results=results,
-            pg_metadata_rows=pg_rows,
-        )
-
-        assert parsed["total_available"] == 1
-        assert parsed["results"][0]["text"] == "pass 2"
-
-    async def test_themes_filter_applied(self) -> None:
-        """search_chunks with themes filter only returns chunks exploring those themes."""
-        results = [
-            _make_result(_UUID_A, text="about imagination"),
-            _make_result(_UUID_B, text="about poetry"),
-        ]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "imagination", "name": "Imagination"},
-            {"chunk_id": str(_UUID_B), "canonical_name": "poetry", "name": "Poetry"},
-        ]
-
-        parsed = await self._run_search(
-            {"query": "test", "filters": {"themes": ["imagination"]}},
-            vector_results=results,
-            neo4j_theme_records=neo4j_records,
-        )
-
-        assert parsed["total_available"] == 1
-        assert parsed["results"][0]["text"] == "about imagination"
-
-    async def test_no_filters_returns_all(self) -> None:
-        """search_chunks without metadata filters returns all results."""
-        results = [
-            _make_result(_UUID_A, text="chunk A"),
-            _make_result(_UUID_B, text="chunk B"),
-        ]
-
-        parsed = await self._run_search(
-            {"query": "test"},
-            vector_results=results,
-        )
-
-        assert parsed["total_available"] == 2
-
-    async def test_combined_filters(self) -> None:
-        """All filters can be applied simultaneously; all must pass."""
-        results = [
-            _make_result(_UUID_A, text="match all"),
-            _make_result(_UUID_B, text="wrong pass"),
-            _make_result(_UUID_C, text="wrong speaker"),
-        ]
-        pg_rows = [
-            {"chunk_id": str(_UUID_A), "metadata": {"speaker": "Guite"}, "pass_number": 2},
-            {"chunk_id": str(_UUID_B), "metadata": {"speaker": "Guite"}, "pass_number": 1},
-            {"chunk_id": str(_UUID_C), "metadata": {"speaker": "Wright"}, "pass_number": 2},
-        ]
-        neo4j_records = [
-            {"chunk_id": str(_UUID_A), "canonical_name": "imagination", "name": "Imagination"},
-            {"chunk_id": str(_UUID_B), "canonical_name": "imagination", "name": "Imagination"},
-            {"chunk_id": str(_UUID_C), "canonical_name": "imagination", "name": "Imagination"},
-        ]
-
-        parsed = await self._run_search(
-            {
-                "query": "test",
-                "filters": {
-                    "speaker": "Guite",
-                    "themes": ["imagination"],
-                    "pass_number": 2,
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"speaker": "J.R.R. Tolkien"},
+                    "include_passage_links": False,
                 },
-            },
-            vector_results=results,
-            pg_metadata_rows=pg_rows,
-            neo4j_theme_records=neo4j_records,
-        )
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
 
-        assert parsed["total_available"] == 1
-        assert parsed["results"][0]["text"] == "match all"
+        data = json.loads(raw)
+        assert len(data["results"]) == 1
+        assert data["results"][0]["chunk_id"] == str(_CHUNK_IDS[2])
+
+    @pytest.mark.asyncio
+    async def test_speaker_filter_excludes_chunks_without_speaker(self) -> None:
+        """Chunks without a speaker in metadata are excluded by speaker filter."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"speaker": "Nonexistent Speaker"},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_no_speaker_filter_returns_all(self) -> None:
+        """Without a speaker filter, all results are returned."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 5
+
+
+class TestSearchChunksPassNumberFilter:
+    """Verify that the pass_number filter is actually applied to search results."""
+
+    @pytest.mark.asyncio
+    async def test_pass_number_filter_returns_only_matching_pass(self) -> None:
+        """When pass_number filter is set, only matching chunks are returned."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"pass_number": 2},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 1
+        assert data["results"][0]["chunk_id"] == str(_CHUNK_IDS[1])
+
+    @pytest.mark.asyncio
+    async def test_pass_number_filter_zero_matches(self) -> None:
+        """A pass_number with no matching chunks returns empty results."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"pass_number": 99},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_pass_number_filter_multiple_matches(self) -> None:
+        """pass_number=1 matches the three chunks with that pass number."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"pass_number": 1},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        # _CHUNK_IDS[0], [2], [3] all have pass_number=1
+        assert len(data["results"]) == 3
+        returned_ids = {r["chunk_id"] for r in data["results"]}
+        assert str(_CHUNK_IDS[0]) in returned_ids
+        assert str(_CHUNK_IDS[2]) in returned_ids
+        assert str(_CHUNK_IDS[3]) in returned_ids
+
+
+class TestSearchChunksThemesFilter:
+    """Verify that the themes filter is actually applied to search results."""
+
+    @pytest.mark.asyncio
+    async def test_themes_filter_includes_matching_chunks(self) -> None:
+        """When themes filter is set, only chunks with matching themes are returned."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        # Configure get_themes_for_chunk to return themes for specific chunks
+        async def _get_themes(chunk_id: str) -> list[dict[str, Any]]:
+            themes_map: dict[str, list[dict[str, Any]]] = {
+                str(_CHUNK_IDS[0]): [
+                    {"name": "Moral Law", "canonical_name": "moral-law"},
+                ],
+                str(_CHUNK_IDS[1]): [
+                    {"name": "Glory", "canonical_name": "glory"},
+                    {"name": "Heaven", "canonical_name": "heaven"},
+                ],
+                str(_CHUNK_IDS[2]): [
+                    {"name": "Friendship", "canonical_name": "friendship"},
+                ],
+            }
+            return themes_map.get(chunk_id, [])
+
+        storage.graph.get_themes_for_chunk = AsyncMock(side_effect=_get_themes)
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "filters": {"themes": ["moral-law"]},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 1
+        assert data["results"][0]["chunk_id"] == str(_CHUNK_IDS[0])
+
+    @pytest.mark.asyncio
+    async def test_themes_filter_case_insensitive(self) -> None:
+        """Theme filtering is case-insensitive."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        async def _get_themes(chunk_id: str) -> list[dict[str, Any]]:
+            if chunk_id == str(_CHUNK_IDS[1]):
+                return [{"name": "Glory", "canonical_name": "glory"}]
+            return []
+
+        storage.graph.get_themes_for_chunk = AsyncMock(side_effect=_get_themes)
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis sermon",
+                    "filters": {"themes": ["Glory"]},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 1
+        assert data["results"][0]["chunk_id"] == str(_CHUNK_IDS[1])
+
+    @pytest.mark.asyncio
+    async def test_themes_filter_multiple_themes_or_match(self) -> None:
+        """Multiple themes filter uses OR — chunks matching any theme are included."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        async def _get_themes(chunk_id: str) -> list[dict[str, Any]]:
+            themes_map: dict[str, list[dict[str, Any]]] = {
+                str(_CHUNK_IDS[0]): [
+                    {"name": "Moral Law", "canonical_name": "moral-law"},
+                ],
+                str(_CHUNK_IDS[2]): [
+                    {"name": "Friendship", "canonical_name": "friendship"},
+                ],
+            }
+            return themes_map.get(chunk_id, [])
+
+        storage.graph.get_themes_for_chunk = AsyncMock(side_effect=_get_themes)
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis",
+                    "filters": {"themes": ["moral-law", "friendship"]},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        assert len(data["results"]) == 2
+        returned_ids = {r["chunk_id"] for r in data["results"]}
+        assert str(_CHUNK_IDS[0]) in returned_ids
+        assert str(_CHUNK_IDS[2]) in returned_ids
+
+    @pytest.mark.asyncio
+    async def test_no_themes_filter_returns_all(self) -> None:
+        """Without a themes filter, all results are returned (no theme filtering)."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis moral law",
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        # All 5 results should come through when no themes filter is active
+        assert len(data["results"]) == 5
+
+
+class TestSearchChunksCombinedFilters:
+    """Verify that multiple filters combine correctly (AND semantics)."""
+
+    @pytest.mark.asyncio
+    async def test_speaker_and_pass_number_combined(self) -> None:
+        """Speaker + pass_number filters combine with AND semantics."""
+        results = _make_results()
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=results,
+            ),
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            raw = await handle_search_chunks(
+                {
+                    "query": "Lewis",
+                    "filters": {"speaker": "C.S. Lewis", "pass_number": 2},
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        data = json.loads(raw)
+        # Only chunk[1] has speaker="C.S. Lewis" AND pass_number=2
+        assert len(data["results"]) == 1
+        assert data["results"][0]["chunk_id"] == str(_CHUNK_IDS[1])

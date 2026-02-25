@@ -104,6 +104,12 @@ async def vector_search(
         if granularity_filter and row["granularity"] != granularity_filter:
             continue
 
+        result_metadata: dict[str, object] = {}
+        if "pass_number" in row:
+            result_metadata["pass_number"] = row["pass_number"]
+        if row.get("speaker") is not None:
+            result_metadata["speaker"] = row["speaker"]
+
         results.append(
             RetrievalResult(
                 chunk_id=UUID(str(row["chunk_id"])),
@@ -113,6 +119,7 @@ async def vector_search(
                 granularity=row["granularity"],
                 source_class=row["source_class"],
                 source="vector",
+                metadata=result_metadata,
             )
         )
 

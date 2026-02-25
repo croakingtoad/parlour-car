@@ -67,6 +67,14 @@ async def keyword_search(
             granularity=hit.granularity,
             source_class=hit.source_class,
             source="fulltext",
+            metadata={
+                k: v
+                for k, v in [
+                    ("pass_number", hit.pass_number),
+                    ("speaker", hit.speaker),
+                ]
+                if v is not None
+            },
         )
         for hit in hits
     ]
@@ -138,6 +146,14 @@ async def phrase_search(
                 granularity=hit.granularity,
                 source_class=hit.source_class,
                 source="phrase",
+                metadata={
+                    k: v
+                    for k, v in [
+                        ("pass_number", hit.pass_number),
+                        ("speaker", hit.speaker),
+                    ]
+                    if v is not None
+                },
             )
         )
 

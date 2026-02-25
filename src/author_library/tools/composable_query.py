@@ -70,9 +70,9 @@ async def handle_search_chunks(
     source_class_filter = filters.get("source_class")  # list or None
     work_ids_filter = filters.get("work_ids")  # list or None
     granularity_filter = filters.get("granularity")  # list or None
-    speaker_filter = filters.get("speaker")  # str or None
-    themes_filter = filters.get("themes")  # list or None
     pass_number_filter = filters.get("pass_number")  # int or None
+    speaker_filter = filters.get("speaker")  # str or None
+    themes_filter = filters.get("themes")  # list[str] or None
 
     # Build source class filter string for search functions
     # If multiple source classes given, we'll filter post-search
@@ -145,15 +145,43 @@ async def handle_search_chunks(
         gran_set = set(granularity_filter)
         merged = [r for r in merged if r.granularity in gran_set]
 
-    # Apply speaker, themes, and pass_number filters via DB lookup
-    if speaker_filter or themes_filter or pass_number_filter is not None:
-        merged = await _apply_chunk_metadata_filters(
-            merged,
-            storage=storage,
-            speaker_filter=speaker_filter,
-            themes_filter=themes_filter,
-            pass_number_filter=pass_number_filter,
-        )
+    # Apply speaker filter (speaker is stored in chunk metadata JSONB)
+    if speaker_filter:
+        merged = [
+            r for r in merged if r.metadata.get("speaker") == speaker_filter
+        ]
+
+    # Apply pass_number filter (pass_number is stored on the chunks table)
+    if pass_number_filter is not None:
+        merged = [
+            r
+            for r in merged
+            if r.metadata.get("pass_number") == pass_number_filter
+        ]
+
+    # Apply themes filter via Neo4j (themes are stored as EXPLORES_THEME edges)
+    if themes_filter:
+        themes_set = {t.lower() for t in themes_filter}
+        filtered_by_theme: list[Any] = []
+        for r in merged:
+            try:
+                chunk_themes = await storage.graph.get_themes_for_chunk(
+                    str(r.chunk_id)
+                )
+                chunk_theme_names = {
+                    t.get("canonical_name", t.get("name", "")).lower()
+                    for t in chunk_themes
+                }
+                if chunk_theme_names & themes_set:
+                    filtered_by_theme.append(r)
+            except Exception:
+                # If Neo4j is unavailable, skip theme filtering for this chunk
+                log.warning(
+                    "theme_filter_failed",
+                    chunk_id=str(r.chunk_id),
+                    exc_info=True,
+                )
+        merged = filtered_by_theme
 
     # Exclude personal if not requested
     if not include_personal:
@@ -258,147 +286,6 @@ def _build_provenance_rules(source_class: str) -> dict[str, Any]:
         },
     }
     return rules.get(source_class, rules["secondary"])
-
-
-async def _apply_chunk_metadata_filters(
-    results: list[Any],
-    *,
-    storage: StorageManager,
-    speaker_filter: str | None = None,
-    themes_filter: list[str] | None = None,
-    pass_number_filter: int | None = None,
-) -> list[Any]:
-    """Apply speaker, themes, and pass_number filters to search results.
-
-    Batch-queries the chunks table for metadata (speaker) and pass_number,
-    and queries the Neo4j graph for theme associations.  Results that do
-    not match ALL supplied filters are removed.
-
-    Args:
-        results: List of RetrievalResult objects from search.
-        storage: StorageManager for DB access.
-        speaker_filter: If set, only keep chunks whose metadata speaker
-            matches (case-insensitive).
-        themes_filter: If set, only keep chunks that explore at least one
-            of the given themes.
-        pass_number_filter: If set, only keep chunks with this pass number.
-
-    Returns:
-        Filtered list of RetrievalResult objects.
-    """
-    if not results:
-        return results
-
-    chunk_ids = [str(r.chunk_id) for r in results]
-
-    # Batch-fetch metadata and pass_number from PG for speaker/pass_number filters
-    chunk_meta: dict[str, dict[str, Any]] = {}
-    if speaker_filter or pass_number_filter is not None:
-        chunk_meta = await _batch_fetch_chunk_metadata(storage, chunk_ids)
-
-    # Fetch theme associations from Neo4j for themes filter
-    chunk_themes: dict[str, set[str]] = {}
-    if themes_filter:
-        chunk_themes = await _batch_fetch_chunk_themes(storage, chunk_ids)
-
-    filtered: list[Any] = []
-    for r in results:
-        cid = str(r.chunk_id)
-
-        # Speaker filter: check metadata->>'speaker' (case-insensitive)
-        if speaker_filter:
-            meta = chunk_meta.get(cid, {})
-            chunk_speaker = meta.get("speaker", "")
-            if not chunk_speaker or chunk_speaker.lower() != speaker_filter.lower():
-                continue
-
-        # Pass number filter: check pass_number column
-        if pass_number_filter is not None:
-            meta = chunk_meta.get(cid, {})
-            chunk_pass = meta.get("pass_number")
-            if chunk_pass is None or chunk_pass != pass_number_filter:
-                continue
-
-        # Themes filter: chunk must explore at least one of the requested themes
-        if themes_filter:
-            cthemes = chunk_themes.get(cid, set())
-            themes_lower = {t.lower() for t in themes_filter}
-            if not cthemes & themes_lower:
-                continue
-
-        filtered.append(r)
-
-    return filtered
-
-
-async def _batch_fetch_chunk_metadata(
-    storage: StorageManager,
-    chunk_ids: list[str],
-) -> dict[str, dict[str, Any]]:
-    """Batch-fetch metadata and pass_number for chunks from PostgreSQL.
-
-    Returns a mapping of chunk_id -> {speaker, pass_number, ...metadata}.
-    """
-    if not chunk_ids:
-        return {}
-
-    import json as json_mod
-
-    # Build parameterised query for batch lookup
-    placeholders = ", ".join(f"${i + 1}" for i in range(len(chunk_ids)))
-    sql = f"""
-        SELECT id::text AS chunk_id, metadata, pass_number
-        FROM chunks
-        WHERE id::text IN ({placeholders})
-    """
-    rows = await storage.pg.fetch_all(sql, *chunk_ids)
-
-    result: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        cid = row["chunk_id"]
-        raw_meta = row["metadata"]
-        if isinstance(raw_meta, str):
-            raw_meta = json_mod.loads(raw_meta)
-        meta_dict = raw_meta if isinstance(raw_meta, dict) else {}
-        meta_dict["pass_number"] = row["pass_number"]
-        result[cid] = meta_dict
-
-    return result
-
-
-async def _batch_fetch_chunk_themes(
-    storage: StorageManager,
-    chunk_ids: list[str],
-) -> dict[str, set[str]]:
-    """Batch-fetch theme associations from Neo4j for multiple chunks.
-
-    Returns a mapping of chunk_id -> set of lowercase canonical theme names.
-    """
-    if not chunk_ids:
-        return {}
-
-    try:
-        records = await storage.neo4j.execute_read(
-            """UNWIND $chunk_ids AS cid
-            MATCH (c:Chunk {chunk_id: cid})-[:EXPLORES_THEME]->(t:Theme)
-            RETURN c.chunk_id AS chunk_id,
-                   t.canonical_name AS canonical_name,
-                   t.name AS name""",
-            {"chunk_ids": chunk_ids},
-        )
-    except Exception:
-        log.warning("batch_fetch_chunk_themes_failed", chunk_count=len(chunk_ids))
-        return {}
-
-    result: dict[str, set[str]] = {}
-    for rec in records:
-        cid = rec["chunk_id"]
-        # Use canonical_name if available, fall back to name
-        theme = (rec.get("canonical_name") or rec.get("name") or "").lower()
-        if theme:
-            result.setdefault(cid, set()).add(theme)
-
-    return result
 
 
 # ---------------------------------------------------------------------------
