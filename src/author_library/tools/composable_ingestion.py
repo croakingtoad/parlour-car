@@ -959,16 +959,26 @@ async def _retroactive_link_scan(
                 explicit = ExplicitLinkDetector(storage.neo4j)
                 result = await explicit.detect_and_link(primary_chunks, new_chunks)
                 retro_links["explicit_citation"] += result.edges_created
-            except Exception:
-                pass
+            except Exception as exc:
+                log.error(
+                    "retroactive_explicit_citation_failed",
+                    primary_work_id=prim_wid,
+                    error=str(exc),
+                    exc_info=exc,
+                )
 
         if "implicit_engagement" in scan_types:
             try:
                 implicit = ImplicitEngagementDetector(storage.neo4j)
                 result = await implicit.detect_and_link(primary_chunks, new_chunks)
                 retro_links["implicit_engagement"] += result.edges_created
-            except Exception:
-                pass
+            except Exception as exc:
+                log.error(
+                    "retroactive_implicit_engagement_failed",
+                    primary_work_id=prim_wid,
+                    error=str(exc),
+                    exc_info=exc,
+                )
 
         if "thematic_parallel" in scan_types:
             try:
@@ -978,8 +988,13 @@ async def _retroactive_link_scan(
                     similarity_threshold=confidence_threshold,
                 )
                 retro_links["thematic_parallel"] += result.edges_created
-            except Exception:
-                pass
+            except Exception as exc:
+                log.error(
+                    "retroactive_thematic_parallel_failed",
+                    primary_work_id=prim_wid,
+                    error=str(exc),
+                    exc_info=exc,
+                )
 
     return retro_links
 
