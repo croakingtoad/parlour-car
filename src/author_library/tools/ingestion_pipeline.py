@@ -363,6 +363,25 @@ class IngestionPipeline:
                 "voice profile skipped, entity extraction skipped",
             )
 
+        # Step 12: Post-ingestion connection surfacing (N1/N3)
+        # After passage links are created, scan for new cross-work
+        # connections and generate PR content for user review.
+        surfacing_result = None
+        if route in (
+            ProcessingRoute.FULL_ENRICHMENT,
+            ProcessingRoute.EMBEDDINGS_AND_LINKS,
+        ):
+            try:
+                surfacing_result = await self._surface_connections(
+                    work_id=work_id,
+                    work_title=catalog_entry.title,
+                    work_author=catalog_entry.author,
+                )
+            except Exception as exc:
+                error_msg = f"Post-ingestion surfacing failed: {exc}"
+                log.error("ingestion_surfacing_failed", error=error_msg)
+                errors.append(error_msg)
+
         log.info(
             "ingestion_complete",
             work_id=work_id,
@@ -372,6 +391,9 @@ class IngestionPipeline:
             embeddings=embeddings_stored,
             entities=entity_count,
             edges=edge_count,
+            surfacing_connections=surfacing_result.scan_result.total_found
+            if surfacing_result and surfacing_result.scan_result
+            else 0,
             errors=len(errors),
         )
 
@@ -385,6 +407,42 @@ class IngestionPipeline:
             edge_count=edge_count,
             errors=errors,
         )
+
+    async def _surface_connections(
+        self,
+        *,
+        work_id: str,
+        work_title: str = "",
+        work_author: str = "",
+    ) -> Any:
+        """Run post-ingestion connection surfacing (N1/N3).
+
+        Scans for new cross-work connections and generates PR content.
+        Returns the BatchSurfacingResult for logging purposes.
+        """
+        from author_library.surfacing.batch_surfacing import BatchSurfacer
+
+        surfacer = BatchSurfacer(
+            settings=self._settings,
+            storage=self._storage,
+            embedding_provider=self._embedding,
+        )
+
+        result = await surfacer.surface_after_ingestion(
+            work_id,
+            work_title=work_title,
+            work_author=work_author,
+        )
+
+        if result.scan_result and result.scan_result.total_found > 0:
+            log.info(
+                "ingestion_surfacing_complete",
+                work_id=work_id,
+                connections_found=result.scan_result.total_found,
+                pr_content_generated=result.pr_content is not None,
+            )
+
+        return result
 
     async def _create_passage_links(
         self,

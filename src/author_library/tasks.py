@@ -9,6 +9,7 @@ Tasks:
   - task_ingest_book: Full single-work ingestion (all pipeline stages)
   - task_ingest_corpus: Bulk ingestion of multiple works with cross-work analysis
   - task_process_capture: Chrome extension capture event processing
+  - task_surface_connections: Post-ingestion connection scanning + PR content generation
 
 The existing synchronous pipeline (IngestionPipeline.ingest) remains
 available for direct invocation when immediate results are needed
@@ -249,6 +250,76 @@ async def task_process_capture(
         "task_process_capture_complete",
         capture_id=result.capture_id,
         chunk_id=result.chunk_id,
+        errors=len(result.errors),
+    )
+
+    return result_dict
+
+
+async def task_surface_connections(
+    ctx: dict[str, Any],
+    *,
+    work_id: str,
+    work_title: str = "",
+    work_author: str = "",
+    confidence_threshold: float = 0.4,
+    min_connections_for_pr: int = 1,
+) -> dict[str, Any]:
+    """arq task: scan for new connections after ingestion and generate PR content.
+
+    Runs BatchSurfacer.surface_after_ingestion() which:
+    1. Scans the newly ingested work's chunks for cross-work connections
+    2. Filters out already-linked pairs
+    3. Groups connections by confidence and target work
+    4. Generates PR content if enough connections are found
+
+    This task is enqueued automatically after passage link detection
+    completes during ingestion. PR content is generated but actual PR
+    creation (via GitHub API) is delegated to the vault sync layer.
+
+    Args:
+        ctx: arq worker context with 'settings', 'storage', 'embedding_provider'.
+        work_id: The newly ingested work to scan connections for.
+        work_title: Title for PR readability.
+        work_author: Author for PR readability.
+        confidence_threshold: Minimum confidence to include (default 0.4).
+        min_connections_for_pr: Skip PR if fewer connections found (default 1).
+
+    Returns:
+        dict with scan results and PR content (serializable for arq result storage).
+    """
+    settings = ctx["settings"]
+    storage = ctx["storage"]
+    embedding_provider = ctx["embedding_provider"]
+
+    log.info(
+        "task_surface_connections_starting",
+        work_id=work_id,
+        work_title=work_title,
+    )
+
+    from author_library.surfacing.batch_surfacing import BatchSurfacer
+
+    surfacer = BatchSurfacer(
+        settings=settings,
+        storage=storage,
+        embedding_provider=embedding_provider,
+    )
+
+    result = await surfacer.surface_after_ingestion(
+        work_id,
+        work_title=work_title,
+        work_author=work_author,
+        confidence_threshold=confidence_threshold,
+        min_connections_for_pr=min_connections_for_pr,
+    )
+
+    result_dict = result.to_dict()
+    log.info(
+        "task_surface_connections_complete",
+        work_id=work_id,
+        total_connections=result.scan_result.total_found if result.scan_result else 0,
+        pr_content_generated=result.pr_content is not None,
         errors=len(result.errors),
     )
 

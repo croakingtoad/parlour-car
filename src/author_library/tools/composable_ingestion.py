@@ -837,20 +837,47 @@ async def handle_detect_passage_links(
         counterpart_chunks, all_works, source_class
     )
 
+    # Post-detection: run connection surfacing (N1/N3)
+    # Scan for new cross-work connections and generate PR content.
+    surfacing_summary: dict[str, Any] = {}
+    total_links = sum(links_created.values())
+    if total_links > 0 or retroactive_scan:
+        try:
+            from author_library.surfacing.batch_surfacing import BatchSurfacer
+
+            surfacer = BatchSurfacer(
+                settings=settings,
+                storage=storage,
+                embedding_provider=embedding_provider,
+                cache_manager=cache_manager,
+            )
+            surfacing_result = await surfacer.surface_after_ingestion(
+                work_id,
+                work_title=work.get("title", ""),
+                work_author=work.get("author", ""),
+            )
+            surfacing_summary = surfacing_result.to_dict()
+        except Exception as exc:
+            surfacing_error = f"Post-detection surfacing failed: {exc}"
+            log.error("detect_passage_links_surfacing_failed", error=surfacing_error)
+            errors.append(surfacing_error)
+
     result: dict[str, Any] = {
         "work_id": work_id,
         "links_created": links_created,
         "contextual_sources_referenced": ctx_sources,
         "unresolved_references": [],
     }
+    if surfacing_summary:
+        result["surfacing"] = surfacing_summary
     if errors:
         result["errors"] = errors
 
-    total_links = sum(links_created.values())
     log.info(
         "detect_passage_links_complete",
         work_id=work_id,
         total_links=total_links,
+        surfacing_connections=surfacing_summary.get("total_connections", 0),
     )
 
     return json.dumps(result, indent=2)

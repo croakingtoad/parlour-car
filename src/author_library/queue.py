@@ -155,6 +155,54 @@ class TaskQueue:
         )
         return job.job_id
 
+    async def enqueue_surface_connections(
+        self,
+        *,
+        work_id: str,
+        work_title: str = "",
+        work_author: str = "",
+        confidence_threshold: float = 0.4,
+        min_connections_for_pr: int = 1,
+    ) -> str | None:
+        """Enqueue a post-ingestion connection surfacing job.
+
+        Scans for new cross-work connections and generates PR content.
+        Triggered automatically after passage link detection completes.
+
+        Args:
+            work_id: The newly ingested work to scan connections for.
+            work_title: Title for PR readability.
+            work_author: Author for PR readability.
+            confidence_threshold: Minimum confidence to include.
+            min_connections_for_pr: Skip PR if fewer connections found.
+
+        Returns:
+            The arq job ID if enqueued, or None if the queue is unavailable.
+        """
+        if not self._pool:
+            return None
+
+        job = await self._pool.enqueue_job(
+            "task_surface_connections",
+            work_id=work_id,
+            work_title=work_title,
+            work_author=work_author,
+            confidence_threshold=confidence_threshold,
+            min_connections_for_pr=min_connections_for_pr,
+        )
+
+        if job is None:
+            log.warning("task_enqueue_failed", task="surface_connections")
+            return None
+
+        log.info(
+            "task_enqueued",
+            task="surface_connections",
+            job_id=job.job_id,
+            work_id=work_id,
+        )
+        return job.job_id
+
     async def get_job_status(self, job_id: str) -> dict[str, Any]:
         """Get the status of a queued job.
 
