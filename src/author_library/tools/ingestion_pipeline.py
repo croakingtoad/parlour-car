@@ -275,14 +275,42 @@ class IngestionPipeline:
         await self._storage.works.update(work_id, {"engagement_passes": pass_number})
 
         # Step 7: Embed chunks (use annotated_text for embedding)
+        # Build token-aware batches so no single API call exceeds provider limits
         embeddings_stored = 0
-        batch_size = 50
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            texts = [c.annotated_text for c in batch]
+        from author_library.embeddings.base import (
+            build_token_aware_batches,
+            estimate_tokens,
+        )
+
+        all_texts = [c.annotated_text for c in chunks]
+        token_batches = build_token_aware_batches(all_texts)
+
+        # Map batch indices back to chunk objects
+        chunk_offset = 0
+        import time as _time
+
+        embed_start = _time.monotonic()
+        total_batches = len(token_batches)
+
+        for batch_idx, batch_texts in enumerate(token_batches):
+            batch_chunks = chunks[chunk_offset : chunk_offset + len(batch_texts)]
+            chunk_offset += len(batch_texts)
+
+            est_tokens = sum(estimate_tokens(t) for t in batch_texts)
+            log.info(
+                "ingestion_embedding_batch",
+                work_id=work_id,
+                batch=batch_idx + 1,
+                total_batches=total_batches,
+                texts=len(batch_texts),
+                estimated_tokens=est_tokens,
+            )
+
             try:
-                batch_result = await self._embedding.embed_batch(texts)
-                for chunk, vector in zip(batch, batch_result.vectors, strict=True):
+                batch_result = await self._embedding.embed_batch(batch_texts)
+                for chunk, vector in zip(
+                    batch_chunks, batch_result.vectors, strict=True
+                ):
                     maybe_id = chunk_id_map.get(chunk.id)
                     if maybe_id is None:
                         continue
@@ -296,11 +324,31 @@ class IngestionPipeline:
                     )
                     embeddings_stored += 1
             except Exception as exc:
-                error_msg = f"Embedding batch {i}-{i + len(batch)} failed: {exc}"
+                error_msg = (
+                    f"Embedding batch {batch_idx + 1}/{total_batches} "
+                    f"({len(batch_texts)} texts, ~{est_tokens} tokens) failed: {exc}"
+                )
                 log.error("ingestion_embedding_failed", error=error_msg)
                 errors.append(error_msg)
 
-        log.info("ingestion_embeddings_stored", work_id=work_id, count=embeddings_stored)
+            # Warn if embedding stage is running long
+            elapsed = _time.monotonic() - embed_start
+            if elapsed > 60:
+                log.warning(
+                    "ingestion_embedding_slow",
+                    work_id=work_id,
+                    elapsed_seconds=round(elapsed, 1),
+                    batches_complete=batch_idx + 1,
+                    total_batches=total_batches,
+                )
+
+        embed_elapsed = round(_time.monotonic() - embed_start, 1)
+        log.info(
+            "ingestion_embeddings_stored",
+            work_id=work_id,
+            count=embeddings_stored,
+            elapsed_seconds=embed_elapsed,
+        )
 
         # Step 8: Upsert chunk nodes in Neo4j
         for chunk in chunks:
