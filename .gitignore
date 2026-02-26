@@ -63,3 +63,6 @@ test-corpus/
 
 # Sidecar
 .sidecar/
+
+# Testing scripts (local only)
+testing/
