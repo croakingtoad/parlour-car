@@ -24,7 +24,8 @@ class TestToolDefinitions:
     """Verify the TOOLS list has correct structure and coverage."""
 
     EXPECTED_TOOLS: frozenset[str] = frozenset({
-        # Original tools (13)
+        # Original tools (14)
+        "list_books",
         "ingest_book",
         "ingest_corpus",
         "ask_author",
@@ -58,7 +59,7 @@ class TestToolDefinitions:
         assert tool_names == self.EXPECTED_TOOLS
 
     def test_tool_count(self) -> None:
-        assert len(TOOLS) == 23
+        assert len(TOOLS) == 24
 
     def test_all_tools_have_descriptions(self) -> None:
         for tool in TOOLS:
