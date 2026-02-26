@@ -8,10 +8,10 @@ EmbeddingProvider lifecycle across the server's session.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mcp.server import Server
-from mcp.server.sse import SseServerTransport
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
@@ -62,6 +62,24 @@ log = get_logger(__name__)
 
 TOOLS: list[Tool] = [
     Tool(
+        name="list_books",
+        description=(
+            "List available books and documents in the Parlour Car corpus directory. "
+            "Use this to find files available for ingestion. Returns file paths, sizes, and types. "
+            "Files are on the server (cc-claudesp droplet), not on the client machine."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "subfolder": {
+                    "type": "string",
+                    "description": "Optional subfolder within the corpus (e.g. 'fred-rogers'). Leave empty to list all.",
+                    "default": "",
+                },
+            },
+        },
+    ),
+    Tool(
         name="ingest_book",
         description=(
             "Ingest a single work into the author library. Parses the document, "
@@ -75,7 +93,7 @@ TOOLS: list[Tool] = [
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the document file (epub, pdf, txt, html, docx).",
+                    "description": "Absolute path on the Parlour Car server (cc-claudesp droplet). NOT a local client path. Example: /home/marty/repos/parlour-car/test-corpus/fred-rogers/filename.epub. Supported: epub, pdf, txt, html, docx.",
                 },
                 "subject_author_id": {
                     "type": "string",
@@ -319,19 +337,18 @@ TOOLS: list[Tool] = [
     Tool(
         name="job_status",
         description=(
-            "Check the status of a background job. Returns the current state "
-            "(queued, in_progress, complete, failed, not_found) and the result "
-            "if the job has completed."
+            "Check background job status. With a job_id, returns that job's state "
+            "(queued, in_progress, complete, failed). Without a job_id, returns a "
+            "summary table of ALL recent jobs and their statuses."
         ),
         inputSchema={
             "type": "object",
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The job ID returned by an async ingestion operation.",
+                    "description": "Optional. A specific job ID to check. If omitted, lists all recent jobs.",
                 },
             },
-            "required": ["job_id"],
         },
     ),
     Tool(
@@ -346,7 +363,7 @@ TOOLS: list[Tool] = [
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the document file (epub, pdf, txt, html, docx).",
+                    "description": "Absolute path on the Parlour Car server (cc-claudesp droplet). NOT a local client path. Example: /home/marty/repos/parlour-car/test-corpus/fred-rogers/filename.epub. Supported: epub, pdf, txt, html, docx.",
                 },
                 "subject_author_id": {
                     "type": "string",
@@ -406,7 +423,7 @@ TOOLS: list[Tool] = [
             "properties": {
                 "file_path": {
                     "type": "string",
-                    "description": "Path to the document file.",
+                    "description": "Absolute path on the Parlour Car server (cc-claudesp droplet). NOT a local client path.",
                 },
                 "source_class": {
                     "type": "string",
@@ -774,6 +791,45 @@ TOOLS: list[Tool] = [
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Utility handlers (no database needed)
+# ---------------------------------------------------------------------------
+
+_CORPUS_ROOT = Path("/home/marty/repos/parlour-car/test-corpus/")
+_ALLOWED_EXTENSIONS = {".epub", ".pdf", ".txt", ".html", ".docx"}
+
+
+def _handle_list_books(arguments: dict[str, Any]) -> str:
+    """List available books in the corpus directory."""
+    import json
+
+    subfolder = arguments.get("subfolder", "").strip("/")
+    base = _CORPUS_ROOT / subfolder if subfolder else _CORPUS_ROOT
+
+    if not base.exists():
+        return json.dumps({"error": f"Directory not found: {base}"})
+    if not str(base.resolve()).startswith(str(_CORPUS_ROOT.resolve())):
+        return json.dumps({"error": "Access restricted to corpus directory"})
+
+    files = []
+    for path in sorted(base.rglob("*")):
+        if path.is_file() and path.suffix.lower() in _ALLOWED_EXTENSIONS:
+            files.append({
+                "path": str(path),
+                "name": path.name,
+                "subfolder": str(path.parent.relative_to(_CORPUS_ROOT)),
+                "size_kb": round(path.stat().st_size / 1024, 1),
+                "type": path.suffix.lstrip("."),
+            })
+
+    return json.dumps({
+        "corpus_root": str(_CORPUS_ROOT),
+        "subfolder": subfolder or "(all)",
+        "file_count": len(files),
+        "files": files,
+    }, indent=2)
+
+
 # Server factory
 # ---------------------------------------------------------------------------
 
@@ -806,7 +862,9 @@ def create_server(settings: Settings) -> Server:
         cache_mgr: CacheManager | None = _state.get("cache_manager")
 
         try:
-            if name == "ingest_book":
+            if name == "list_books":
+                result = _handle_list_books(args)
+            elif name == "ingest_book":
                 result = await handle_ingest_book(
                     args,
                     settings=settings,
@@ -981,22 +1039,44 @@ def create_server(settings: Settings) -> Server:
 
 
 async def _handle_job_status(args: dict[str, Any], *, state: dict[str, Any]) -> str:
-    """Handle the job_status MCP tool call."""
-    job_id = args.get("job_id")
-    if not job_id:
-        return json.dumps({"error": "job_id is required"})
+    """Handle the job_status MCP tool call.
 
+    With job_id: returns that specific job's status.
+    Without job_id: lists all recent jobs from Redis.
+    """
     task_queue = state.get("task_queue")
     if task_queue is None or not task_queue.available:
         return json.dumps({
             "error": "Task queue is not available. Background jobs require Redis.",
-            "job_id": job_id,
         })
 
     from author_library.jobs import get_job_info
 
-    info = await get_job_info(task_queue._pool, job_id)
-    return json.dumps(info.to_dict(), indent=2)
+    job_id = args.get("job_id")
+
+    if job_id:
+        info = await get_job_info(task_queue._pool, job_id)
+        return json.dumps(info.to_dict(), indent=2)
+
+    # No job_id — list all jobs using arq's keys() method
+    pool = task_queue._pool
+    jobs = []
+    try:
+        keys = await pool.keys("arq:job:*")
+        for key in keys:
+            jid = key.decode().removeprefix("arq:job:") if isinstance(key, bytes) else str(key).removeprefix("arq:job:")
+            try:
+                info = await get_job_info(pool, jid)
+                jobs.append(info.to_dict())
+            except Exception:
+                jobs.append({"job_id": jid, "status": "unknown"})
+    except Exception as exc:
+        return json.dumps({"error": f"Failed to list jobs: {exc}"})
+
+    return json.dumps({
+        "total_jobs": len(jobs),
+        "jobs": sorted(jobs, key=lambda j: j.get("job_id", ""), reverse=True),
+    }, indent=2, default=str)
 
 
 async def _handle_ingest_book_async(args: dict[str, Any], *, state: dict[str, Any]) -> str:
@@ -1086,8 +1166,8 @@ async def run_server(settings: Settings) -> None:
     server._tool_state["task_queue"] = task_queue  # type: ignore[attr-defined]
 
     try:
-        if settings.server.transport == "sse":
-            await _run_sse(server, settings)
+        if settings.server.transport in ("sse", "streamable-http", "http"):
+            await _run_http(server, settings)
         else:
             await _run_stdio(server)
     finally:
@@ -1109,24 +1189,35 @@ async def _run_stdio(server: Server) -> None:
         )
 
 
-async def _run_sse(server: Server, settings: Settings) -> None:
-    """Run the server with SSE transport via Starlette + uvicorn.
+async def _run_http(server: Server, settings: Settings) -> None:
+    """Run the server with streamable HTTP transport via Starlette + uvicorn.
 
     Creates a Starlette ASGI app with:
-      - GET /sse — SSE stream for client connections
-      - POST /messages — message endpoint for client commands
+      - /mcp — streamable HTTP MCP endpoint (recommended, replaces SSE)
+      - /sse — legacy SSE endpoint (backwards compat for mcp-remote)
       - POST /api/v1/captures — Chrome extension capture endpoint
       - GET /api/v1/captures/status/{job_id} — capture job status
     """
+    import contextlib
+
     import uvicorn
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
 
     from author_library.captures.endpoint import handle_capture, handle_capture_status
+    from mcp.server.sse import SseServerTransport
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
-    sse_transport = SseServerTransport("/messages/")
+    # Streamable HTTP transport (recommended — stateless, no session stickiness issues)
+    http_session_mgr = StreamableHTTPSessionManager(
+        server, json_response=True, stateless=True,
+    )
+
+    # Legacy SSE transport for backwards compatibility
+    sse_transport = SseServerTransport("/sse/messages/")
 
     async def handle_sse(request: Any) -> None:
+        """Legacy SSE handler for mcp-remote clients."""
         async with sse_transport.connect_sse(
             request.scope, request.receive, request._send
         ) as (read_stream, write_stream):
@@ -1136,10 +1227,20 @@ async def _run_sse(server: Server, settings: Settings) -> None:
                 server.create_initialization_options(),
             )
 
+    @contextlib.asynccontextmanager
+    async def lifespan(app: Starlette):  # type: ignore[type-arg]
+        """Manage the streamable HTTP session manager lifecycle."""
+        async with http_session_mgr.run():
+            yield
+
     app = Starlette(
         routes=[
+            # Streamable HTTP (recommended transport)
+            Mount("/mcp", app=http_session_mgr.handle_request),
+            # Legacy SSE transport
             Route("/sse", endpoint=handle_sse),
-            Mount("/messages", app=sse_transport.handle_post_message),
+            Mount("/sse/messages", app=sse_transport.handle_post_message),
+            # Chrome extension capture endpoints
             Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
             Route(
                 "/api/v1/captures/status/{job_id:str}",
@@ -1147,6 +1248,7 @@ async def _run_sse(server: Server, settings: Settings) -> None:
                 methods=["GET"],
             ),
         ],
+        lifespan=lifespan,
     )
 
     # Inject shared state for capture endpoint
@@ -1161,7 +1263,7 @@ async def _run_sse(server: Server, settings: Settings) -> None:
 
     host = settings.server.host
     port = settings.server.port
-    log.info("author_library.server_ready", transport="sse", host=host, port=port)
+    log.info("author_library.server_ready", transport="streamable-http", host=host, port=port)
 
     config = uvicorn.Config(app, host=host, port=port, log_level="info")
     uvicorn_server = uvicorn.Server(config)
