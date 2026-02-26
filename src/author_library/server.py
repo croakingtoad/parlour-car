@@ -7,7 +7,10 @@ EmbeddingProvider lifecycle across the server's session.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import signal
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -1158,6 +1161,9 @@ async def run_server(settings: Settings) -> None:
     task_queue = TaskQueue()
     await task_queue.connect()
 
+    # Start arq worker subprocess if Redis is available
+    worker_process = await _start_arq_worker(task_queue)
+
     # Create server and inject dependencies
     server = create_server(settings)
     server._tool_state["storage"] = storage  # type: ignore[attr-defined]
@@ -1172,10 +1178,66 @@ async def run_server(settings: Settings) -> None:
             await _run_stdio(server)
     finally:
         # Graceful shutdown
+        await _stop_arq_worker(worker_process)
         await task_queue.close()
         await embedding_provider.close()
         await storage.close()
         log.info("author_library.shutdown_complete")
+
+
+async def _start_arq_worker(
+    task_queue: TaskQueue,
+) -> asyncio.subprocess.Process | None:
+    """Start the arq worker as a background subprocess.
+
+    Only starts if the task queue is connected to Redis. If the worker
+    fails to start, logs a warning and returns None (graceful degradation).
+    """
+    if not task_queue.available:
+        log.info("arq_worker_skipped", reason="redis_unavailable")
+        return None
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "arq",
+            "author_library.worker.WorkerSettings",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        log.info("arq_worker_started", pid=process.pid)
+        return process
+    except Exception as exc:
+        log.warning("arq_worker_start_failed", error=str(exc))
+        return None
+
+
+async def _stop_arq_worker(
+    process: asyncio.subprocess.Process | None,
+) -> None:
+    """Gracefully stop the arq worker subprocess.
+
+    Sends SIGTERM and waits up to 10 seconds for clean shutdown.
+    Falls back to SIGKILL if the process doesn't exit in time.
+    """
+    if process is None or process.returncode is not None:
+        return
+
+    try:
+        process.send_signal(signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except asyncio.TimeoutError:
+            log.warning("arq_worker_kill", pid=process.pid, reason="timeout")
+            process.kill()
+            await process.wait()
+        log.info("arq_worker_stopped", pid=process.pid)
+    except ProcessLookupError:
+        # Process already exited
+        log.info("arq_worker_stopped", pid=process.pid, note="already_exited")
+    except Exception as exc:
+        log.warning("arq_worker_stop_failed", error=str(exc))
 
 
 async def _run_stdio(server: Server) -> None:
