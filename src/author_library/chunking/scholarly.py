@@ -10,6 +10,8 @@ Special handling for footnotes, block quotations, and bibliographies.
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 from author_library.chunking._tree_utils import (
@@ -240,6 +242,26 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 continue
             wc = word_count(para_text)
 
+            # If a single paragraph exceeds the meso ceiling, split it at
+            # sentence boundaries into smaller synthetic paragraphs so the
+            # meso/micro counts reflect the actual content volume.
+            if wc > 500:
+                if buffer:
+                    flush_buffer()
+                for fragment in _split_text_at_sentences(para_text, target_words=400):
+                    syn_node = DocumentNode(
+                        node_type=para_node.node_type,
+                        text=fragment,
+                        metadata=dict(para_node.metadata),
+                    )
+                    frag_wc = word_count(fragment)
+                    if buffer_words + frag_wc > 500 and buffer:
+                        flush_buffer()
+                    buffer.append(fragment)
+                    buffer_paragraphs.append(syn_node)
+                    buffer_words += frag_wc
+                continue
+
             # If adding this paragraph would push past 500 words, flush first
             if buffer_words + wc > 500 and buffer:
                 flush_buffer()
@@ -372,3 +394,49 @@ def _paragraph_text_with_footnotes(
                 # Substantive footnote — append
                 text += f"\n[Footnote: {fn_text}]"
     return text
+
+
+# Sentence-ending pattern: period, question mark, or exclamation followed by
+# whitespace.  Avoid splitting on abbreviations like "Mr." or "e.g." by
+# requiring the next character to be uppercase or a quote.
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'\u201C\u2018])")
+
+
+def _split_text_at_sentences(text: str, *, target_words: int = 400) -> list[str]:
+    """Split *text* at sentence boundaries into fragments of roughly *target_words*.
+
+    If the text has fewer than ``target_words * 1.5`` words it is returned
+    as a single-element list (not worth splitting).
+    """
+    total = word_count(text)
+    if total <= int(target_words * 1.5):
+        return [text]
+
+    sentences = _SENTENCE_END_RE.split(text)
+    if len(sentences) <= 1:
+        # No sentence boundaries found — fall back to the whole text
+        return [text]
+
+    fragments: list[str] = []
+    current: list[str] = []
+    current_words = 0
+
+    for sentence in sentences:
+        swc = word_count(sentence)
+        if current_words + swc > target_words and current:
+            fragments.append(" ".join(current))
+            current = [sentence]
+            current_words = swc
+        else:
+            current.append(sentence)
+            current_words += swc
+
+    if current:
+        # Merge a tiny trailing fragment with the previous one
+        trailing = " ".join(current)
+        if fragments and word_count(trailing) < target_words // 3:
+            fragments[-1] += " " + trailing
+        else:
+            fragments.append(trailing)
+
+    return fragments

@@ -315,3 +315,99 @@ class TestSingleSpineItemEpub:
         sections = [c for c in ch2.children if c.node_type == NodeType.SECTION]
         assert len(sections) >= 1
         assert sections[0].metadata.get("title") == "Section 2.1"
+
+
+class TestDivWrappedContentEpub:
+    """Tests for EPUBs where paragraphs are nested inside wrapper divs.
+
+    Many publisher EPUBs wrap chapter content in ``<div class="content">``
+    or similar containers.  The parser must recurse into these divs to
+    extract individual paragraphs rather than collapsing all text into a
+    single PARAGRAPH node.
+    """
+
+    @staticmethod
+    def _create_div_wrapped_epub(path: object) -> None:
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("div-wrapped-test")
+        book.set_title("Div Wrapped Book")
+        book.set_language("en")
+        book.add_author("Test Author")
+
+        ch = epub.EpubHtml(title="Chapter 1", file_name="ch1.xhtml", lang="en")
+        ch.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1</title></head>
+<body>
+<div class="chapter">
+    <h1>Chapter One: The Beginning</h1>
+    <div class="content">
+        <p>First paragraph of the chapter with some content.</p>
+        <p>Second paragraph continues the discussion.</p>
+        <p>Third paragraph wraps up the section.</p>
+        <blockquote>A notable quotation from the text.</blockquote>
+        <p>Fourth paragraph after the quote.</p>
+    </div>
+</div>
+</body>
+</html>"""
+        book.add_item(ch)
+
+        book.toc = [epub.Link("ch1.xhtml", "Chapter 1", "ch1")]
+        book.spine = ["nav", ch]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @pytest.fixture
+    def div_wrapped_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "div_wrapped.epub"
+        self._create_div_wrapped_epub(path)
+        return path
+
+    async def test_paragraphs_not_collapsed(
+        self, parser: EpubParser, div_wrapped_epub: object
+    ) -> None:
+        """Paragraphs inside a wrapper div must remain as separate PARAGRAPH nodes."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(div_wrapped_epub)  # type: ignore[arg-type]
+
+        def find_type(node: DocumentNode, ntype: NodeType) -> list[DocumentNode]:
+            found: list[DocumentNode] = []
+            if node.node_type == ntype:
+                found.append(node)
+            for child in node.children:
+                found.extend(find_type(child, ntype))
+            return found
+
+        paragraphs = find_type(result.tree, NodeType.PARAGRAPH)
+        # The div wraps 4 paragraphs + 1 blockquote — at minimum 4 paragraphs
+        assert len(paragraphs) >= 4, (
+            f"Expected >=4 paragraphs from div-wrapped content, got {len(paragraphs)}"
+        )
+
+    async def test_blockquote_preserved(
+        self, parser: EpubParser, div_wrapped_epub: object
+    ) -> None:
+        """Blockquote inside a wrapper div must be preserved as BLOCK_QUOTE."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(div_wrapped_epub)  # type: ignore[arg-type]
+
+        def find_type(node: DocumentNode, ntype: NodeType) -> list[DocumentNode]:
+            found: list[DocumentNode] = []
+            if node.node_type == ntype:
+                found.append(node)
+            for child in node.children:
+                found.extend(find_type(child, ntype))
+            return found
+
+        quotes = find_type(result.tree, NodeType.BLOCK_QUOTE)
+        assert len(quotes) >= 1
+        assert "notable quotation" in quotes[0].text

@@ -363,6 +363,29 @@ class EpubParser(DocumentParser):
                 if br_count >= _POEM_LINE_BREAK_THRESHOLD:
                     return self._parse_poem(element, raw_text_parts)
 
+        # Structural container: a div/aside/section/article that wraps
+        # paragraphs, headings, or other block-level content.  Recurse
+        # into children so individual paragraphs are preserved instead of
+        # being collapsed into a single PARAGRAPH node.
+        _STRUCTURAL_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"}
+        if tag in ("div", "aside", "section", "article"):
+            has_structural = element.find(list(_STRUCTURAL_TAGS), recursive=False)
+            if has_structural:
+                container = DocumentNode(node_type=NodeType.SECTION)
+                for child in element.children:
+                    if isinstance(child, Tag):
+                        child_node = self._element_to_node(child, raw_text_parts, warnings)
+                        if child_node is not None:
+                            container.children.append(child_node)
+                    else:
+                        text = str(child).strip()
+                        if text:
+                            raw_text_parts.append(text)
+                            container.children.append(
+                                DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
+                            )
+                return container if container.children else None
+
         # Fallback: extract text from any other element
         text = element.get_text(strip=True)
         if text:
