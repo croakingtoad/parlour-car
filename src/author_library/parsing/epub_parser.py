@@ -34,6 +34,58 @@ _CHAPTER_HEADING_RE = re.compile(
 _POEM_LINE_BREAK_THRESHOLD = 3  # minimum consecutive <br> to consider verse
 
 
+def _extract_title_from_alt(alt_text: str) -> str | None:
+    """Parse a structured image alt-text string for the book title.
+
+    Publisher title-page images often encode metadata in alt text like::
+
+        Book title, Fred Rogers: The Last Interview, subtitle, and Other
+        Conversations, author, Fred Rogers, imprint, Melville House
+
+    Returns the combined "main title: subtitle" or ``None``.
+    """
+    # Split on comma-separated label/value pairs
+    parts = [p.strip() for p in alt_text.split(",")]
+
+    title_value: str | None = None
+    subtitle_value: str | None = None
+    capture_title = False
+    capture_subtitle = False
+    title_parts: list[str] = []
+    subtitle_parts: list[str] = []
+
+    for part in parts:
+        lower = part.lower()
+        if lower in ("book title", "title"):
+            capture_title = True
+            capture_subtitle = False
+            continue
+        if lower == "subtitle":
+            capture_subtitle = True
+            capture_title = False
+            continue
+        if lower in ("author", "imprint", "publisher", "series"):
+            capture_title = False
+            capture_subtitle = False
+            continue
+        if capture_title:
+            title_parts.append(part)
+        elif capture_subtitle:
+            subtitle_parts.append(part)
+
+    if title_parts:
+        title_value = ", ".join(title_parts).strip()
+    if subtitle_parts:
+        subtitle_value = ", ".join(subtitle_parts).strip()
+
+    if title_value and subtitle_value:
+        # If subtitle starts with a conjunction, join with space not colon
+        if subtitle_value.lower().startswith(("and ", "or ", "& ")):
+            return f"{title_value} {subtitle_value}"
+        return f"{title_value}: {subtitle_value}"
+    return title_value
+
+
 class EpubParser(DocumentParser):
     """Parser for EPUB documents."""
 
@@ -119,7 +171,7 @@ class EpubParser(DocumentParser):
     def _extract_metadata(
         self, book: epub.EpubBook, warnings: list[str]
     ) -> DocumentMetadata:
-        title = book.get_metadata("DC", "title")
+        title_entries = book.get_metadata("DC", "title")
         author = book.get_metadata("DC", "creator")
         publisher = book.get_metadata("DC", "publisher")
         date = book.get_metadata("DC", "date")
@@ -134,14 +186,139 @@ class EpubParser(DocumentParser):
                 isbn = str(val)
                 break
 
+        author_name = author[0][0] if author else None
+        extracted_title = self._resolve_title(title_entries, author_name, book)
+
+        if extracted_title and author_name:
+            # Guard: if the title (or its main component before any subtitle
+            # separator) matches the author name, the EPUB metadata is almost
+            # certainly wrong — fall back to content-based extraction.
+            title_main = extracted_title.split(":")[0].strip()
+            title_lower = title_main.lower()
+            author_lower = author_name.lower().strip()
+            if title_lower == author_lower or title_lower in author_lower:
+                fallback = self._title_from_content(book)
+                if fallback:
+                    log.info(
+                        "epub_title_fallback",
+                        original=extracted_title,
+                        fallback=fallback,
+                    )
+                    extracted_title = fallback
+                else:
+                    warnings.append(
+                        f"Extracted title '{extracted_title}' matches author name; "
+                        "no alternative found"
+                    )
+
         return DocumentMetadata(
-            title=title[0][0] if title else None,
-            author=author[0][0] if author else None,
+            title=extracted_title,
+            author=author_name,
             publisher=publisher[0][0] if publisher else None,
             publication_date=date[0][0] if date else None,
             isbn=isbn,
             language=language[0][0] if language else "en",
         )
+
+    @staticmethod
+    def _resolve_title(
+        title_entries: list[tuple[str, dict[str, str]]],
+        author_name: str | None,
+        book: epub.EpubBook,
+    ) -> str | None:
+        """Combine dc:title entries (main + subtitle) into a single title string.
+
+        EPUB 3 allows multiple ``dc:title`` elements distinguished by
+        ``title-type`` refines (main, subtitle, etc.).  Many publisher
+        EPUBs split the title this way — e.g. "Fred Rogers" (main) +
+        "and Other Conversations" (subtitle).
+        """
+        if not title_entries:
+            return None
+
+        if len(title_entries) == 1:
+            return title_entries[0][0]
+
+        # Multiple title entries — check OPF refines for title-type hints
+        opf_ns = "http://www.idpf.org/2007/opf"
+        meta_entries = book.metadata.get(opf_ns, {}).get("meta", [])
+
+        title_types: dict[str, str] = {}  # id → title-type
+        for value, attrs in meta_entries:
+            prop = attrs.get("property", "")
+            refines = attrs.get("refines", "")
+            if prop == "title-type" and refines.startswith("#") and value:
+                title_types[refines[1:]] = str(value)
+
+        main_parts: list[str] = []
+        subtitle_parts: list[str] = []
+
+        for entry_val, entry_attrs in title_entries:
+            entry_id = entry_attrs.get("id", "")
+            ttype = title_types.get(entry_id, "")
+            if ttype == "subtitle":
+                subtitle_parts.append(entry_val)
+            else:
+                main_parts.append(entry_val)
+
+        combined = ": ".join(main_parts) if main_parts else ""
+        if subtitle_parts:
+            sub = " ".join(subtitle_parts)
+            # Avoid doubling a colon if the main title already ends with one
+            if combined and not combined.rstrip().endswith(":"):
+                combined += ": " + sub
+            elif combined:
+                combined += " " + sub
+            else:
+                combined = sub
+
+        return combined or title_entries[0][0]
+
+    def _title_from_content(self, book: epub.EpubBook) -> str | None:
+        """Try to extract the book title from spine content.
+
+        Looks at the first few spine items for image alt text (title-page
+        images) or the copyright page for a full-title line, or the first
+        ``<h1>`` heading in the content.
+        """
+        spine_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+
+        for item in spine_items[:5]:
+            content = item.get_content()
+            if not content:
+                continue
+            try:
+                with _warnings_mod.catch_warnings():
+                    _warnings_mod.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+                    soup = BeautifulSoup(content, "lxml")
+            except Exception:
+                continue
+
+            # Strategy 1: title-page image alt text (common in publisher EPUBs)
+            for img in soup.find_all("img"):
+                alt = str(img.get("alt", ""))
+                if "book title" in alt.lower() or "title" in alt.lower():
+                    # Parse structured alt text like "Book title, Fred Rogers:
+                    # The Last Interview, subtitle, and Other Conversations, ..."
+                    title = _extract_title_from_alt(alt)
+                    if title:
+                        return title
+
+            # Strategy 2: copyright page often has the full title
+            body = soup.find("body")
+            if body:
+                first_p = body.find("p")
+                if first_p:
+                    first_text = first_p.get_text(strip=True)
+                    # Copyright pages often start with the full title
+                    if ":" in first_text and len(first_text) < 200:
+                        # Trim at "Copyright" if present
+                        if "Copyright" in first_text:
+                            first_text = first_text[: first_text.index("Copyright")].strip()
+                        if first_text:
+                            return first_text
+
+        return None
 
     def _extract_toc(self, book: epub.EpubBook) -> list[str]:
         toc = book.toc

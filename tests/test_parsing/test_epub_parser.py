@@ -411,3 +411,143 @@ class TestDivWrappedContentEpub:
         quotes = find_type(result.tree, NodeType.BLOCK_QUOTE)
         assert len(quotes) >= 1
         assert "notable quotation" in quotes[0].text
+
+
+class TestEpubTitleExtraction:
+    """Tests for robust EPUB title extraction.
+
+    Covers the bug where an EPUB with dc:title = author name (e.g. "Fred
+    Rogers") produced a work_id like ``fred-rogers--fred-rogers``.
+    """
+
+    @staticmethod
+    def _create_epub_with_split_title(path: object) -> None:
+        """Create an EPUB with separate main-title and subtitle dc:title entries."""
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("split-title-test")
+        book.set_language("en")
+        book.add_author("Fred Rogers")
+
+        # Set main title and subtitle via raw metadata
+        # ebooklib's set_title only sets one dc:title; we need two.
+        book.add_metadata("DC", "title", "Fred Rogers", {"id": "maintitle"})
+        book.add_metadata("DC", "title", "and Other Conversations", {"id": "subtitle"})
+        book.add_metadata(
+            "OPF", "meta", "main",
+            {"property": "title-type", "refines": "#maintitle"},
+        )
+        book.add_metadata(
+            "OPF", "meta", "subtitle",
+            {"property": "title-type", "refines": "#subtitle"},
+        )
+
+        # Add a copyright page with the full title
+        cop = epub.EpubHtml(title="Copyright", file_name="cop.xhtml", lang="en")
+        cop.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Copyright</title></head>
+<body>
+<p>FRED ROGERS: THE LAST INTERVIEW AND OTHER CONVERSATIONS</p>
+<p>Copyright 2021 by Melville House</p>
+</body>
+</html>"""
+        book.add_item(cop)
+
+        ch1 = epub.EpubHtml(title="Chapter 1", file_name="ch1.xhtml", lang="en")
+        ch1.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body><h1>Introduction</h1><p>Content here.</p></body>
+</html>"""
+        book.add_item(ch1)
+
+        book.toc = [epub.Link("ch1.xhtml", "Introduction", "ch1")]
+        book.spine = ["nav", cop, ch1]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @staticmethod
+    def _create_epub_with_normal_title(path: object) -> None:
+        """Create an EPUB with a normal dc:title that differs from the author."""
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("normal-title-test")
+        book.set_title("Faith, Hope and Poetry")
+        book.set_language("en")
+        book.add_author("Malcolm Guite")
+
+        ch = epub.EpubHtml(title="Ch1", file_name="ch1.xhtml", lang="en")
+        ch.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body><h1>Chapter 1</h1><p>Content.</p></body>
+</html>"""
+        book.add_item(ch)
+
+        book.toc = [epub.Link("ch1.xhtml", "Ch1", "ch1")]
+        book.spine = ["nav", ch]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @pytest.fixture
+    def split_title_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "split_title.epub"
+        self._create_epub_with_split_title(path)
+        return path
+
+    @pytest.fixture
+    def normal_title_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "normal_title.epub"
+        self._create_epub_with_normal_title(path)
+        return path
+
+    async def test_split_title_not_author_name(
+        self, parser: EpubParser, split_title_epub: object
+    ) -> None:
+        """When dc:title equals the author name, a better title must be found."""
+        result = await parser.parse(split_title_epub)  # type: ignore[arg-type]
+        assert result.metadata.title is not None
+        assert result.metadata.title != "Fred Rogers", (
+            "Title should not be just the author name"
+        )
+        # The fallback should find the full title from copyright page
+        title_lower = result.metadata.title.lower()
+        assert "last interview" in title_lower or "conversations" in title_lower
+
+    async def test_normal_title_unchanged(
+        self, parser: EpubParser, normal_title_epub: object
+    ) -> None:
+        """A normal title that differs from the author should not be changed."""
+        result = await parser.parse(normal_title_epub)  # type: ignore[arg-type]
+        assert result.metadata.title == "Faith, Hope and Poetry"
+        assert result.metadata.author == "Malcolm Guite"
+
+    async def test_title_from_alt_text(self) -> None:
+        """_extract_title_from_alt should parse structured image alt text."""
+        from author_library.parsing.epub_parser import _extract_title_from_alt
+
+        alt = (
+            "Book title, Fred Rogers: The Last Interview, subtitle, "
+            "and Other Conversations, author, Fred Rogers, imprint, Melville House"
+        )
+        title = _extract_title_from_alt(alt)
+        assert title is not None
+        assert "Fred Rogers" in title
+        assert "Last Interview" in title
+        assert "Conversations" in title
+
+    async def test_alt_text_no_structured_data(self) -> None:
+        """_extract_title_from_alt returns None for unstructured alt text."""
+        from author_library.parsing.epub_parser import _extract_title_from_alt
+
+        assert _extract_title_from_alt("A decorative cover image") is None
+        assert _extract_title_from_alt("") is None
