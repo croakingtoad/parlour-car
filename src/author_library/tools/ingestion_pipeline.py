@@ -16,6 +16,7 @@ work before re-processing.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -132,6 +133,7 @@ class IngestionPipeline:
         path = Path(file_path)
         hints = metadata_hints or {}
         errors: list[str] = []
+        pipeline_start = time.monotonic()
 
         log.info(
             "ingestion_starting",
@@ -140,6 +142,7 @@ class IngestionPipeline:
         )
 
         # Step 1: Parse
+        stage_start = time.monotonic()
         parser = get_parser(path)
         document = await parser.parse(str(path))
         log.info(
@@ -147,9 +150,11 @@ class IngestionPipeline:
             title=document.metadata.title,
             word_count=document.metadata.word_count,
             format=document.format,
+            elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
 
         # Step 2: Classify via pipeline (creates catalog entry + stores in works table)
+        stage_start = time.monotonic()
         classification_pipeline = ClassificationPipeline(
             settings=self._settings,
             work_repository=self._storage.works,
@@ -173,6 +178,7 @@ class IngestionPipeline:
             work_id=work_id,
             source_class=source_class.value,
             route=route.value,
+            elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
 
         # Determine pass number: detect if source already has chunks
@@ -213,6 +219,7 @@ class IngestionPipeline:
             )
 
         # Step 4: Chunk
+        stage_start = time.monotonic()
         genre_tags = catalog_entry.genre_tags
         strategy = get_chunking_strategy(genre_tags)
         chunks = strategy.chunk(document, work_id, source_class.value)
@@ -227,14 +234,23 @@ class IngestionPipeline:
             work_id=work_id,
             total_chunks=len(chunks),
             by_granularity=chunks_by_gran,
+            elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
 
         # Step 5: Annotate
+        stage_start = time.monotonic()
         annotation_ctx = self._build_annotation_context(catalog_entry, source_class)
         annotator = ChunkAnnotator(self._settings)
         chunks = await annotator.annotate_chunks(chunks, annotation_ctx)
+        log.info(
+            "ingestion_annotated",
+            work_id=work_id,
+            chunks=len(chunks),
+            elapsed_seconds=round(time.monotonic() - stage_start, 1),
+        )
 
         # Step 6: Store chunks in PG
+        stage_start = time.monotonic()
         # Sort so parents (macro) are inserted before children (meso) before
         # grandchildren (micro), satisfying the parent_chunk_id foreign key.
         _gran_order = {"macro": 0, "meso": 1, "micro": 2, "nano": 3}
@@ -269,20 +285,51 @@ class IngestionPipeline:
             pg_id = await self._storage.chunks.create(chunk_data)
             chunk_id_map[chunk.id] = pg_id
 
-        log.info("ingestion_chunks_stored", work_id=work_id, count=len(chunk_id_map))
+        log.info(
+            "ingestion_chunks_stored",
+            work_id=work_id,
+            count=len(chunk_id_map),
+            elapsed_seconds=round(time.monotonic() - stage_start, 1),
+        )
 
         # Update engagement_passes on the work record
         await self._storage.works.update(work_id, {"engagement_passes": pass_number})
 
         # Step 7: Embed chunks (use annotated_text for embedding)
+        # Build token-aware batches so no single API call exceeds provider limits
         embeddings_stored = 0
-        batch_size = 50
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i : i + batch_size]
-            texts = [c.annotated_text for c in batch]
+        from author_library.embeddings.base import (
+            build_token_aware_batches,
+            estimate_tokens,
+        )
+
+        all_texts = [c.annotated_text for c in chunks]
+        token_batches = build_token_aware_batches(all_texts)
+
+        # Map batch indices back to chunk objects
+        chunk_offset = 0
+        embed_start = time.monotonic()
+        total_batches = len(token_batches)
+
+        for batch_idx, batch_texts in enumerate(token_batches):
+            batch_chunks = chunks[chunk_offset : chunk_offset + len(batch_texts)]
+            chunk_offset += len(batch_texts)
+
+            est_tokens = sum(estimate_tokens(t) for t in batch_texts)
+            log.info(
+                "ingestion_embedding_batch",
+                work_id=work_id,
+                batch=batch_idx + 1,
+                total_batches=total_batches,
+                texts=len(batch_texts),
+                estimated_tokens=est_tokens,
+            )
+
             try:
-                batch_result = await self._embedding.embed_batch(texts)
-                for chunk, vector in zip(batch, batch_result.vectors, strict=True):
+                batch_result = await self._embedding.embed_batch(batch_texts)
+                for chunk, vector in zip(
+                    batch_chunks, batch_result.vectors, strict=True
+                ):
                     maybe_id = chunk_id_map.get(chunk.id)
                     if maybe_id is None:
                         continue
@@ -296,11 +343,31 @@ class IngestionPipeline:
                     )
                     embeddings_stored += 1
             except Exception as exc:
-                error_msg = f"Embedding batch {i}-{i + len(batch)} failed: {exc}"
+                error_msg = (
+                    f"Embedding batch {batch_idx + 1}/{total_batches} "
+                    f"({len(batch_texts)} texts, ~{est_tokens} tokens) failed: {exc}"
+                )
                 log.error("ingestion_embedding_failed", error=error_msg)
                 errors.append(error_msg)
 
-        log.info("ingestion_embeddings_stored", work_id=work_id, count=embeddings_stored)
+            # Warn if embedding stage is running long
+            elapsed = time.monotonic() - embed_start
+            if elapsed > 60:
+                log.warning(
+                    "ingestion_embedding_slow",
+                    work_id=work_id,
+                    elapsed_seconds=round(elapsed, 1),
+                    batches_complete=batch_idx + 1,
+                    total_batches=total_batches,
+                )
+
+        embed_elapsed = round(time.monotonic() - embed_start, 1)
+        log.info(
+            "ingestion_embeddings_stored",
+            work_id=work_id,
+            count=embeddings_stored,
+            elapsed_seconds=embed_elapsed,
+        )
 
         # Step 8: Upsert chunk nodes in Neo4j
         for chunk in chunks:
@@ -382,6 +449,7 @@ class IngestionPipeline:
                 log.error("ingestion_surfacing_failed", error=error_msg)
                 errors.append(error_msg)
 
+        total_elapsed = round(time.monotonic() - pipeline_start, 1)
         log.info(
             "ingestion_complete",
             work_id=work_id,
@@ -395,7 +463,15 @@ class IngestionPipeline:
             if surfacing_result and surfacing_result.scan_result
             else 0,
             errors=len(errors),
+            total_elapsed_seconds=total_elapsed,
         )
+        if total_elapsed > 120:
+            log.warning(
+                "ingestion_slow_pipeline",
+                work_id=work_id,
+                total_elapsed_seconds=total_elapsed,
+                hint="Consider using ingest_book_async for large works",
+            )
 
         return IngestionResult(
             work_id=work_id,

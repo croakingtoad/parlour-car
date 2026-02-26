@@ -1,13 +1,63 @@
 """Abstract embedding provider interface and result types.
 
 Defines the contract that all embedding providers must implement,
-plus immutable result dataclasses for single and batch operations.
+plus immutable result dataclasses for single and batch operations,
+and shared utilities for token-aware batching.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+# -- Token estimation and batching utilities ----------------------------------
+
+_DEFAULT_MAX_TOKENS_PER_BATCH = 100_000  # conservative default; Voyage limit is 120K
+_DEFAULT_MAX_ITEMS_PER_BATCH = 128
+_TOKENS_PER_WORD_ESTIMATE = 1.3
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate token count from text using a word-count heuristic.
+
+    Subword tokenizers typically produce ~1.3 tokens per whitespace word.
+    """
+    word_count = len(text.split())
+    return max(1, int(word_count * _TOKENS_PER_WORD_ESTIMATE))
+
+
+def build_token_aware_batches(
+    texts: list[str],
+    max_tokens: int = _DEFAULT_MAX_TOKENS_PER_BATCH,
+    max_items: int = _DEFAULT_MAX_ITEMS_PER_BATCH,
+) -> list[list[str]]:
+    """Split texts into sub-batches respecting both token and item limits.
+
+    Accumulates texts into the current batch until adding the next text
+    would exceed either the token budget or the item count limit, then
+    starts a new batch.  A single text that exceeds *max_tokens* on its
+    own is placed in a solo batch (the API will reject it if truly too
+    large, but we don't silently drop content).
+    """
+    batches: list[list[str]] = []
+    current_batch: list[str] = []
+    current_tokens = 0
+
+    for text in texts:
+        est = estimate_tokens(text)
+        if current_batch and (
+            current_tokens + est > max_tokens or len(current_batch) >= max_items
+        ):
+            batches.append(current_batch)
+            current_batch = []
+            current_tokens = 0
+        current_batch.append(text)
+        current_tokens += est
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
 
 
 @dataclass(frozen=True)

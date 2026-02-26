@@ -11,8 +11,13 @@ import os
 
 import pytest
 
+from author_library.embeddings.base import (
+    build_token_aware_batches,
+    estimate_tokens,
+)
 from author_library.embeddings.voyage import (
     _MAX_BATCH_SIZE,
+    _MAX_TOKENS_PER_BATCH,
     _VOYAGE_API_URL,
     VoyageEmbeddingProvider,
 )
@@ -99,6 +104,93 @@ class TestVoyageApiUrlConstant:
 
     def test_api_url(self) -> None:
         assert _VOYAGE_API_URL == "https://api.voyageai.com/v1/embeddings"
+
+
+class TestTokenEstimation:
+    """Validate token estimation heuristic."""
+
+    def test_estimate_tokens_short_text(self) -> None:
+        assert estimate_tokens("hello world") == 2  # 2 words * 1.3 = 2.6 → 2
+
+    def test_estimate_tokens_empty_string(self) -> None:
+        # Empty string has 1 "word" (the empty string itself from split)
+        # but max(1, ...) ensures at least 1
+        assert estimate_tokens("") >= 1
+
+    def test_estimate_tokens_long_text(self) -> None:
+        text = " ".join(["word"] * 1000)
+        est = estimate_tokens(text)
+        assert est == 1300  # 1000 * 1.3
+
+
+class TestTokenAwareBatching:
+    """Validate token-aware batch splitting."""
+
+    def test_small_input_single_batch(self) -> None:
+        """5 short texts should fit in one batch."""
+        texts = ["hello world"] * 5
+        batches = build_token_aware_batches(texts)
+        assert len(batches) == 1
+        assert len(batches[0]) == 5
+
+    def test_large_chunks_split_by_tokens(self) -> None:
+        """64 chunks of ~5K tokens each (~320K total) must split into multiple batches."""
+        # Simulate a 104K-word book with 64 chunks: ~1625 words per chunk
+        chunk_text = " ".join(["word"] * 1625)  # ~2112 estimated tokens
+        texts = [chunk_text] * 64
+        batches = build_token_aware_batches(texts)
+        # Total tokens: 64 * 2112 = ~135K, limit is 100K per batch
+        # Should produce at least 2 batches
+        assert len(batches) >= 2
+        # Every batch should be under the token limit
+        for batch in batches:
+            batch_tokens = sum(estimate_tokens(t) for t in batch)
+            assert batch_tokens <= _MAX_TOKENS_PER_BATCH
+
+    def test_very_large_single_chunk_gets_solo_batch(self) -> None:
+        """A single chunk exceeding the token limit gets its own batch."""
+        # 100K words → ~130K tokens, over the 100K limit
+        huge_text = " ".join(["word"] * 100_000)
+        small_text = "hello"
+        texts = [small_text, huge_text, small_text]
+        batches = build_token_aware_batches(texts)
+        # The huge text should be in its own batch
+        assert len(batches) == 3
+        assert batches[0] == [small_text]
+        assert batches[1] == [huge_text]
+        assert batches[2] == [small_text]
+
+    def test_respects_item_count_limit(self) -> None:
+        """Even tiny texts should split at max_items boundary."""
+        texts = ["hi"] * 200
+        batches = build_token_aware_batches(texts, max_items=50)
+        assert len(batches) == 4
+        assert all(len(b) <= 50 for b in batches)
+
+    def test_100_plus_chunks_all_covered(self) -> None:
+        """All 100+ chunks are present across batches (no data loss)."""
+        texts = [f"chunk number {i} with some words" for i in range(150)]
+        batches = build_token_aware_batches(texts)
+        flat = [t for batch in batches for t in batch]
+        assert flat == texts
+
+    def test_realistic_scholarly_book(self) -> None:
+        """Simulate 'Faith, Hope and Poetry': 104K words, 64 chunks.
+
+        Original failure: 50 chunks sent as one batch → 328K tokens.
+        With token-aware batching, no batch should exceed 100K tokens.
+        """
+        # Average chunk: 104000/64 ≈ 1625 words
+        chunks = [" ".join(["scholarly"] * 1625) for _ in range(64)]
+        batches = build_token_aware_batches(chunks)
+        for batch in batches:
+            est = sum(estimate_tokens(t) for t in batch)
+            assert est <= _MAX_TOKENS_PER_BATCH, (
+                f"Batch has {est} estimated tokens, exceeds {_MAX_TOKENS_PER_BATCH}"
+            )
+        # Verify all chunks are covered
+        total_texts = sum(len(b) for b in batches)
+        assert total_texts == 64
 
 
 # -- Integration tests (require live API key) --------------------------------
