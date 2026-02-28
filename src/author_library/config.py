@@ -51,7 +51,7 @@ class LLMSettings(BaseSettings):
     query_model: str = "claude-sonnet-4-6"
 
     # Entity extraction optimisation knobs
-    entity_extraction_granularities: str = "macro,meso"
+    entity_extraction_granularities: str = "macro,meso,micro"
     """Comma-separated chunk granularities to run entity extraction on.
     Micro/nano chunks are redundant because their parent meso chunks
     already capture the same entities."""

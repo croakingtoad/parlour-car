@@ -315,13 +315,13 @@ class TestEntityExtractionWithNeo4j:
 class TestGranularityFilter:
     """Test that entity extraction granularity filtering works."""
 
-    def test_default_granularities_macro_meso(self) -> None:
-        """Default config extracts from macro and meso only."""
+    def test_default_granularities_all(self) -> None:
+        """Default config extracts from all granularities."""
         settings = LLMSettings()
-        assert settings.entity_extraction_granularities == "macro,meso"
+        assert settings.entity_extraction_granularities == "macro,meso,micro"
 
-    def test_granularity_filter_excludes_micro(self) -> None:
-        """Micro chunks should be excluded by default granularity filter."""
+    def test_granularity_filter_includes_micro(self) -> None:
+        """Micro chunks should be included by default granularity filter."""
         settings = LLMSettings()
         allowed = {g.strip() for g in settings.entity_extraction_granularities.split(",")}
 
@@ -349,12 +349,12 @@ class TestGranularityFilter:
         ]
 
         filtered = [c for c in chunks if str(c.granularity) in allowed]
-        assert len(filtered) == 2
-        assert {c.id for c in filtered} == {"macro-1", "meso-1"}
+        assert len(filtered) == 4
+        assert {c.id for c in filtered} == {"macro-1", "meso-1", "micro-1", "micro-2"}
 
-    def test_custom_granularity_includes_micro(self) -> None:
-        """Custom config can include micro chunks."""
-        settings = LLMSettings(entity_extraction_granularities="macro,meso,micro")
+    def test_custom_granularity_excludes_micro(self) -> None:
+        """Custom config can exclude micro chunks."""
+        settings = LLMSettings(entity_extraction_granularities="macro,meso")
         allowed = {g.strip() for g in settings.entity_extraction_granularities.split(",")}
 
         chunks = [
@@ -369,7 +369,8 @@ class TestGranularityFilter:
         ]
 
         filtered = [c for c in chunks if str(c.granularity) in allowed]
-        assert len(filtered) == 2
+        assert len(filtered) == 1
+        assert filtered[0].id == "meso-1"
 
 
 class TestConcurrencyConfig:
