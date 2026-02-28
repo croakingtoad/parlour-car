@@ -29,7 +29,7 @@ _VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
 _DEFAULT_MODEL = "voyage-3-large"
 _DEFAULT_DIMENSIONS = 1024
 _MAX_BATCH_SIZE = 128
-_MAX_TOKENS_PER_BATCH = 100_000  # Voyage limit is 120K; leave 20K headroom
+_MAX_TOKENS_PER_BATCH = 80_000  # Voyage limit is 120K; leave 40K headroom for underestimation
 _MAX_RETRIES = 3
 _INITIAL_BACKOFF = 1.0
 
