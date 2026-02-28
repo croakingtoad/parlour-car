@@ -45,9 +45,14 @@ class TestIngestionResult:
         assert d["source_class"] == "primary"
         assert d["processing_route"] == "full_enrichment"
         assert d["chunks_by_granularity"] == {"meso": 15}
-        assert d["embeddings_stored"] == 15
-        assert d["entity_count"] == 8
-        assert d["edge_count"] == 3
+        stats = d["post_ingestion_stats"]
+        assert stats["embeddings_stored"] == 15
+        assert stats["total_chunks"] == 15
+        assert stats["embedding_coverage_percent"] == 100.0
+        assert stats["unembedded_chunks"] == 0
+        assert stats["entity_count"] == 8
+        assert stats["edge_count"] == 3
+        assert stats["status"] == "complete — all chunks embedded"
         assert d["errors"] == ["minor warning"]
 
     def test_to_dict_round_trip(self) -> None:
@@ -68,9 +73,7 @@ class TestIngestionResult:
             "source_class",
             "processing_route",
             "chunks_by_granularity",
-            "embeddings_stored",
-            "entity_count",
-            "edge_count",
+            "post_ingestion_stats",
             "errors",
         }
 
@@ -101,6 +104,8 @@ class TestIngestionResult:
             errors=[],
         )
         d = result.to_dict()
-        assert d["embeddings_stored"] == 0
-        assert d["entity_count"] == 0
-        assert d["edge_count"] == 0
+        stats = d["post_ingestion_stats"]
+        assert stats["embeddings_stored"] == 0
+        assert stats["entity_count"] == 0
+        assert stats["edge_count"] == 0
+        assert stats["status"] == "complete — all chunks embedded"

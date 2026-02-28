@@ -55,6 +55,8 @@ class IngestionResult:
         "errors",
         "processing_route",
         "source_class",
+        "total_chunks",
+        "unembedded_chunk_ids",
         "work_id",
     )
 
@@ -69,6 +71,8 @@ class IngestionResult:
         entity_count: int,
         edge_count: int,
         errors: list[str],
+        total_chunks: int = 0,
+        unembedded_chunk_ids: list[str] | None = None,
     ) -> None:
         self.work_id = work_id
         self.source_class = source_class
@@ -78,18 +82,33 @@ class IngestionResult:
         self.entity_count = entity_count
         self.edge_count = edge_count
         self.errors = errors
+        self.total_chunks = total_chunks or sum(chunks_by_granularity.values())
+        self.unembedded_chunk_ids = unembedded_chunk_ids or []
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        total = self.total_chunks
+        coverage = round(self.embeddings_stored / total * 100, 1) if total > 0 else 0.0
+        result: dict[str, Any] = {
             "work_id": self.work_id,
             "source_class": self.source_class,
             "processing_route": self.processing_route,
             "chunks_by_granularity": self.chunks_by_granularity,
-            "embeddings_stored": self.embeddings_stored,
-            "entity_count": self.entity_count,
-            "edge_count": self.edge_count,
+            "post_ingestion_stats": {
+                "total_chunks": total,
+                "embeddings_stored": self.embeddings_stored,
+                "embedding_coverage_percent": coverage,
+                "unembedded_chunks": len(self.unembedded_chunk_ids),
+                "entity_count": self.entity_count,
+                "edge_count": self.edge_count,
+            },
             "errors": self.errors,
         }
+        if self.unembedded_chunk_ids:
+            result["post_ingestion_stats"]["unembedded_chunk_ids"] = self.unembedded_chunk_ids
+            result["post_ingestion_stats"]["status"] = "incomplete — some chunks missing embeddings"
+        else:
+            result["post_ingestion_stats"]["status"] = "complete — all chunks embedded"
+        return result
 
 
 class IngestionPipeline:
@@ -342,11 +361,41 @@ class IngestionPipeline:
                     total_batches=total_batches,
                 )
 
+        # Identify unembedded chunks
+        embedded_chunk_ids = set()
+        for chunk in chunks:
+            pg_id = chunk_id_map.get(chunk.id)
+            if pg_id is not None:
+                embedded_chunk_ids.add(chunk.id)
+        # Chunks that were stored but didn't get embedded
+        all_chunk_ids = {c.id for c in chunks if chunk_id_map.get(c.id) is not None}
+        # We track by count: if embeddings_stored < len(all_chunk_ids), some are missing
+        unembedded_chunk_ids: list[str] = []
+        if embeddings_stored < len(all_chunk_ids):
+            # Query DB for chunks missing embeddings
+            try:
+                pg_ids = list(chunk_id_map.values())
+                embedded_pg_ids = set()
+                for pg_id in pg_ids:
+                    has_embed = await self._storage.embeddings.exists(pg_id)
+                    if has_embed:
+                        embedded_pg_ids.add(pg_id)
+                for chunk in chunks:
+                    pg_id = chunk_id_map.get(chunk.id)
+                    if pg_id and pg_id not in embedded_pg_ids:
+                        unembedded_chunk_ids.append(chunk.id)
+            except Exception:
+                # If we can't check, estimate from counts
+                unembedded_chunk_ids = [f"~{len(all_chunk_ids) - embeddings_stored}_chunks_unverified"]
+
         embed_elapsed = round(time.monotonic() - embed_start, 1)
         log.info(
             "ingestion_embeddings_stored",
             work_id=work_id,
             count=embeddings_stored,
+            total_chunks=len(all_chunk_ids),
+            coverage_percent=round(embeddings_stored / max(len(all_chunk_ids), 1) * 100, 1),
+            unembedded=len(unembedded_chunk_ids),
             elapsed_seconds=embed_elapsed,
         )
 
@@ -483,6 +532,8 @@ class IngestionPipeline:
             entity_count=entity_count,
             edge_count=edge_count,
             errors=errors,
+            total_chunks=len(chunks),
+            unembedded_chunk_ids=unembedded_chunk_ids,
         )
 
     async def _surface_connections(
