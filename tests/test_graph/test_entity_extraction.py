@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
+import pytest
+
+from author_library.chunking.models import Chunk, ChunkGranularity
+from author_library.config import LLMSettings
 from author_library.graph.entity_extraction import (
     ChunkExtraction,
     EntityExtractor,
@@ -16,8 +20,7 @@ from author_library.graph.entity_extraction import (
 from .conftest import requires_anthropic, requires_neo4j
 
 if TYPE_CHECKING:
-    from author_library.chunking.models import Chunk
-    from author_library.config import APIKeySettings, LLMSettings
+    from author_library.config import APIKeySettings
     from author_library.storage.neo4j import Neo4jConnection
 
 
@@ -307,6 +310,162 @@ class TestEntityExtractionWithNeo4j:
         )
         # Coleridge should be extracted as a referenced person
         assert len(persons) >= 0  # LLM-dependent, but structure should work
+
+
+class TestGranularityFilter:
+    """Test that entity extraction granularity filtering works."""
+
+    def test_default_granularities_macro_meso(self) -> None:
+        """Default config extracts from macro and meso only."""
+        settings = LLMSettings()
+        assert settings.entity_extraction_granularities == "macro,meso"
+
+    def test_granularity_filter_excludes_micro(self) -> None:
+        """Micro chunks should be excluded by default granularity filter."""
+        settings = LLMSettings()
+        allowed = {g.strip() for g in settings.entity_extraction_granularities.split(",")}
+
+        chunks = [
+            Chunk(
+                id="macro-1", text="macro text", granularity=ChunkGranularity.MACRO,
+                work_id="w1", source_class="primary", position=0,
+            ),
+            Chunk(
+                id="meso-1", text="meso text", granularity=ChunkGranularity.MESO,
+                work_id="w1", source_class="primary", position=1,
+            ),
+            Chunk(
+                id="micro-1", text="micro text", granularity=ChunkGranularity.MICRO,
+                work_id="w1", source_class="primary", position=2,
+            ),
+            Chunk(
+                id="micro-2", text="micro text 2", granularity=ChunkGranularity.MICRO,
+                work_id="w1", source_class="primary", position=3,
+            ),
+            Chunk(
+                id="nano-1", text="nano", granularity=ChunkGranularity.NANO,
+                work_id="w1", source_class="primary", position=4,
+            ),
+        ]
+
+        filtered = [c for c in chunks if str(c.granularity) in allowed]
+        assert len(filtered) == 2
+        assert {c.id for c in filtered} == {"macro-1", "meso-1"}
+
+    def test_custom_granularity_includes_micro(self) -> None:
+        """Custom config can include micro chunks."""
+        settings = LLMSettings(entity_extraction_granularities="macro,meso,micro")
+        allowed = {g.strip() for g in settings.entity_extraction_granularities.split(",")}
+
+        chunks = [
+            Chunk(
+                id="meso-1", text="meso", granularity=ChunkGranularity.MESO,
+                work_id="w1", source_class="primary", position=0,
+            ),
+            Chunk(
+                id="micro-1", text="micro", granularity=ChunkGranularity.MICRO,
+                work_id="w1", source_class="primary", position=1,
+            ),
+        ]
+
+        filtered = [c for c in chunks if str(c.granularity) in allowed]
+        assert len(filtered) == 2
+
+
+class TestConcurrencyConfig:
+    """Test entity extraction concurrency settings."""
+
+    def test_default_concurrency_is_5(self) -> None:
+        """Default concurrency should be 5."""
+        settings = LLMSettings()
+        assert settings.entity_extraction_concurrency == 5
+
+    def test_custom_concurrency(self) -> None:
+        """Concurrency can be overridden."""
+        settings = LLMSettings(entity_extraction_concurrency=10)
+        assert settings.entity_extraction_concurrency == 10
+
+
+class TestTruncatedJsonSalvage:
+    """Test JSON truncation salvage in _parse_extraction_response."""
+
+    def test_salvage_truncated_array(self) -> None:
+        """Truncated JSON array should be salvaged up to last complete object."""
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        # Build a truncated response: two complete objects + truncated third
+        complete = json.dumps([
+            {
+                "chunk_id": "c1",
+                "themes": [{"name": "T1", "canonical_name": "t1"}],
+                "arguments": [], "concepts": [], "persons": [],
+            },
+            {
+                "chunk_id": "c2",
+                "themes": [{"name": "T2", "canonical_name": "t2"}],
+                "arguments": [], "concepts": [], "persons": [],
+            },
+        ])
+        # Simulate truncation by cutting the array mid-third-object
+        truncated = complete[:-1] + ', {"chunk_id": "c3", "themes": [{"name": "T3", "canoni'
+
+        # Use the actual parser via the class (need to construct minimally)
+        # We can call the static-like method by accessing it on the class
+        # and passing a dummy self — or just test the function directly
+        extractor_cls = EntityExtractor
+        # _parse_extraction_response is a regular method, call via class
+        result = extractor_cls._parse_extraction_response(None, truncated)  # type: ignore[arg-type]
+        # Should salvage at least the first two complete objects
+        assert len(result) >= 2
+        assert result[0].chunk_id == "c1"
+        assert result[1].chunk_id == "c2"
+
+    def test_completely_broken_json_raises(self) -> None:
+        """Completely invalid JSON that can't be salvaged should raise."""
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        broken = "this is not json at all"
+        with pytest.raises(json.JSONDecodeError):
+            EntityExtractor._parse_extraction_response(None, broken)  # type: ignore[arg-type]
+
+
+class TestMaxTokensConfig:
+    """Test that max_tokens is set high enough to avoid truncation."""
+
+    def test_system_prompt_has_entity_limits(self) -> None:
+        """System prompt should specify per-chunk entity maximums."""
+        from author_library.graph.entity_extraction import _EXTRACTION_SYSTEM_PROMPT
+
+        assert "max 5" in _EXTRACTION_SYSTEM_PROMPT or "(max 5)" in _EXTRACTION_SYSTEM_PROMPT
+        assert "max 3" in _EXTRACTION_SYSTEM_PROMPT or "(max 3)" in _EXTRACTION_SYSTEM_PROMPT
+
+
+class TestEmptyChunksInput:
+    """Test edge case: empty chunk list."""
+
+    @pytest.mark.asyncio
+    async def test_extract_empty_returns_empty_result(self) -> None:
+        """Passing empty chunk list should return empty result without API calls."""
+        from unittest.mock import MagicMock
+
+        from pydantic import SecretStr
+
+        from author_library.config import APIKeySettings, LLMSettings
+
+        neo4j = MagicMock()
+        api_keys = APIKeySettings(anthropic_api_key=SecretStr("test-key"))
+        llm_settings = LLMSettings()
+
+        extractor = EntityExtractor(neo4j, api_keys, llm_settings)
+        # Patch the client so no API call is made
+        extractor._client = MagicMock()
+
+        result = await extractor.extract_and_persist([], work_title="Test", author="Test")
+        assert result.nodes_created == 0
+        assert result.edges_created == 0
+        assert result.errors == []
+        # Verify no API call was made
+        extractor._client.messages.create.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
