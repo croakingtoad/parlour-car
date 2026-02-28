@@ -384,9 +384,29 @@ class IngestionPipeline:
             await self._storage.graph.upsert_chunk_node(chunk_node)
 
         # Step 9: Entity extraction (PRIMARY and SECONDARY only — NOT personal)
+        # Filter to configured granularities (default: macro+meso) to skip
+        # redundant extraction on micro/nano chunks whose parents already
+        # capture the same entities.
         entity_count = 0
         edge_count = 0
         if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_GRAPH):
+            allowed_grans = {
+                g.strip()
+                for g in self._settings.llm.entity_extraction_granularities.split(",")
+            }
+            extraction_chunks = [
+                c for c in chunks if str(c.granularity) in allowed_grans
+            ]
+            skipped = len(chunks) - len(extraction_chunks)
+            if skipped:
+                log.info(
+                    "entity_extraction_granularity_filter",
+                    total_chunks=len(chunks),
+                    extraction_chunks=len(extraction_chunks),
+                    skipped_chunks=skipped,
+                    allowed_granularities=sorted(allowed_grans),
+                )
+
             try:
                 extractor = EntityExtractor(
                     self._storage.neo4j,
@@ -394,7 +414,7 @@ class IngestionPipeline:
                     self._settings.llm,
                 )
                 extraction_result = await extractor.extract_and_persist(
-                    chunks,
+                    extraction_chunks,
                     work_title=catalog_entry.title,
                     author=catalog_entry.author,
                 )
