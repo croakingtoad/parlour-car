@@ -325,30 +325,11 @@ class IngestionPipeline:
                 estimated_tokens=est_tokens,
             )
 
-            try:
-                batch_result = await self._embedding.embed_batch(batch_texts)
-                for chunk, vector in zip(
-                    batch_chunks, batch_result.vectors, strict=True
-                ):
-                    maybe_id = chunk_id_map.get(chunk.id)
-                    if maybe_id is None:
-                        continue
-                    pg_id = maybe_id
-                    await self._storage.embeddings.store(
-                        pg_id,
-                        vector,
-                        self._embedding.provider_name,
-                        self._embedding.model_name,
-                        self._embedding.dimensions,
-                    )
-                    embeddings_stored += 1
-            except Exception as exc:
-                error_msg = (
-                    f"Embedding batch {batch_idx + 1}/{total_batches} "
-                    f"({len(batch_texts)} texts, ~{est_tokens} tokens) failed: {exc}"
-                )
-                log.error("ingestion_embedding_failed", error=error_msg)
-                errors.append(error_msg)
+            stored = await self._embed_batch_with_retry(
+                batch_texts, batch_chunks, chunk_id_map,
+                batch_idx + 1, total_batches, work_id, errors,
+            )
+            embeddings_stored += stored
 
             # Warn if embedding stage is running long
             elapsed = time.monotonic() - embed_start
@@ -539,6 +520,102 @@ class IngestionPipeline:
             )
 
         return result
+
+    async def _embed_batch_with_retry(
+        self,
+        texts: list[str],
+        batch_chunks: list,
+        chunk_id_map: dict,
+        batch_num: int,
+        total_batches: int,
+        work_id: str,
+        errors: list[str],
+        *,
+        _depth: int = 0,
+    ) -> int:
+        """Embed a batch of texts with retry and split-on-failure logic.
+
+        If a batch fails, splits it in half and retries each half recursively.
+        This ensures that a single oversized chunk doesn't cause the entire
+        batch to be permanently skipped.
+
+        Returns the number of embeddings successfully stored.
+        """
+        import asyncio as _asyncio
+
+        max_retries = 2
+        stored = 0
+
+        for attempt in range(max_retries + 1):
+            try:
+                batch_result = await self._embedding.embed_batch(texts)
+                for chunk, vector in zip(
+                    batch_chunks, batch_result.vectors, strict=True
+                ):
+                    maybe_id = chunk_id_map.get(chunk.id)
+                    if maybe_id is None:
+                        continue
+                    pg_id = maybe_id
+                    await self._storage.embeddings.store(
+                        pg_id,
+                        vector,
+                        self._embedding.provider_name,
+                        self._embedding.model_name,
+                        self._embedding.dimensions,
+                    )
+                    stored += 1
+                return stored
+            except Exception as exc:
+                if attempt < max_retries:
+                    wait = 2 ** (attempt + 1)
+                    log.warning(
+                        "ingestion_embedding_retry",
+                        work_id=work_id,
+                        batch=batch_num,
+                        attempt=attempt + 1,
+                        wait_seconds=wait,
+                        error=str(exc),
+                    )
+                    await _asyncio.sleep(wait)
+                    continue
+
+                # All retries exhausted — split in half and try each half
+                if len(texts) > 1 and _depth < 3:
+                    mid = len(texts) // 2
+                    log.warning(
+                        "ingestion_embedding_split",
+                        work_id=work_id,
+                        batch=batch_num,
+                        original_size=len(texts),
+                        split_sizes=[mid, len(texts) - mid],
+                        depth=_depth + 1,
+                    )
+                    left = await self._embed_batch_with_retry(
+                        texts[:mid], batch_chunks[:mid], chunk_id_map,
+                        batch_num, total_batches, work_id, errors,
+                        _depth=_depth + 1,
+                    )
+                    right = await self._embed_batch_with_retry(
+                        texts[mid:], batch_chunks[mid:], chunk_id_map,
+                        batch_num, total_batches, work_id, errors,
+                        _depth=_depth + 1,
+                    )
+                    return left + right
+
+                # Single chunk or max depth — truly failed
+                failed_ids = [c.id for c in batch_chunks if chunk_id_map.get(c.id)]
+                error_msg = (
+                    f"Embedding batch {batch_num}/{total_batches} "
+                    f"({len(texts)} texts) permanently failed after "
+                    f"{max_retries} retries + split: {exc}. "
+                    f"Unembedded chunk IDs: {failed_ids}"
+                )
+                log.error("ingestion_embedding_permanent_failure", error=error_msg,
+                          chunk_ids=failed_ids, work_id=work_id)
+                errors.append(error_msg)
+                return 0
+
+        return stored
 
     async def _create_passage_links(
         self,
