@@ -110,7 +110,7 @@ class TestTokenEstimation:
     """Validate token estimation heuristic."""
 
     def test_estimate_tokens_short_text(self) -> None:
-        assert estimate_tokens("hello world") == 2  # 2 words * 1.3 = 2.6 → 2
+        assert estimate_tokens("hello world") == 3  # 2 words * 1.5 = 3.0 → 3
 
     def test_estimate_tokens_empty_string(self) -> None:
         # Empty string has 1 "word" (the empty string itself from split)
@@ -120,7 +120,34 @@ class TestTokenEstimation:
     def test_estimate_tokens_long_text(self) -> None:
         text = " ".join(["word"] * 1000)
         est = estimate_tokens(text)
-        assert est == 1300  # 1000 * 1.3
+        assert est == 1500  # 1000 * 1.5
+
+    def test_scholarly_prose_not_underestimated(self) -> None:
+        """Scholarly text with long words should not drastically undercount tokens.
+
+        Real-world example: batch of scholarly prose estimated at 93,611 tokens
+        but Voyage API reported 125,766 actual tokens (34% higher with 1.3x).
+        The 1.5x multiplier brings the estimate much closer.
+        """
+        # Simulate scholarly prose: long words, citations, technical terms
+        scholarly_words = [
+            "transubstantiation", "epistemological", "hermeneutics",
+            "phenomenological", "Christendom", "Neoplatonist",
+            "eschatological", "soteriological", "pneumatological",
+            "sacramental", "incarnational", "ecclesiology",
+        ]
+        # Build text with mix of short and long words (realistic pattern)
+        words = []
+        for i in range(1000):
+            if i % 3 == 0:
+                words.append(scholarly_words[i % len(scholarly_words)])
+            else:
+                words.append("the")
+        text = " ".join(words)
+        est = estimate_tokens(text)
+        # With 1.5x: 1000 * 1.5 = 1500
+        # Must be at least 1400 to avoid the 34% underestimate seen with 1.3x
+        assert est >= 1400, f"Estimate {est} too low for scholarly prose"
 
 
 class TestTokenAwareBatching:
@@ -134,12 +161,12 @@ class TestTokenAwareBatching:
         assert len(batches[0]) == 5
 
     def test_large_chunks_split_by_tokens(self) -> None:
-        """64 chunks of ~5K tokens each (~320K total) must split into multiple batches."""
+        """64 chunks of ~2.4K tokens each (~156K total) must split into multiple batches."""
         # Simulate a 104K-word book with 64 chunks: ~1625 words per chunk
-        chunk_text = " ".join(["word"] * 1625)  # ~2112 estimated tokens
+        chunk_text = " ".join(["word"] * 1625)  # ~2437 estimated tokens (1625 * 1.5)
         texts = [chunk_text] * 64
         batches = build_token_aware_batches(texts)
-        # Total tokens: 64 * 2112 = ~135K, limit is 100K per batch
+        # Total tokens: 64 * 2437 = ~156K, limit is 80K per batch
         # Should produce at least 2 batches
         assert len(batches) >= 2
         # Every batch should be under the token limit
@@ -149,7 +176,7 @@ class TestTokenAwareBatching:
 
     def test_very_large_single_chunk_gets_solo_batch(self) -> None:
         """A single chunk exceeding the token limit gets its own batch."""
-        # 100K words → ~130K tokens, over the 100K limit
+        # 100K words → ~150K tokens, over the 80K limit
         huge_text = " ".join(["word"] * 100_000)
         small_text = "hello"
         texts = [small_text, huge_text, small_text]
@@ -178,7 +205,7 @@ class TestTokenAwareBatching:
         """Simulate 'Faith, Hope and Poetry': 104K words, 64 chunks.
 
         Original failure: 50 chunks sent as one batch → 328K tokens.
-        With token-aware batching, no batch should exceed 100K tokens.
+        With token-aware batching, no batch should exceed 80K tokens.
         """
         # Average chunk: 104000/64 ≈ 1625 words
         chunks = [" ".join(["scholarly"] * 1625) for _ in range(64)]

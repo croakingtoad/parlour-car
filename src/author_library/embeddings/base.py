@@ -12,15 +12,18 @@ from dataclasses import dataclass
 
 # -- Token estimation and batching utilities ----------------------------------
 
-_DEFAULT_MAX_TOKENS_PER_BATCH = 100_000  # conservative default; Voyage limit is 120K
+_DEFAULT_MAX_TOKENS_PER_BATCH = 80_000  # safe headroom below Voyage's 120K limit
 _DEFAULT_MAX_ITEMS_PER_BATCH = 128
-_TOKENS_PER_WORD_ESTIMATE = 1.3
+_TOKENS_PER_WORD_ESTIMATE = 1.5  # scholarly prose with long words/citations needs higher ratio
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count from text using a word-count heuristic.
 
-    Subword tokenizers typically produce ~1.3 tokens per whitespace word.
+    Subword tokenizers typically produce ~1.3-1.6 tokens per whitespace
+    word depending on vocabulary complexity.  Scholarly prose with long
+    words, citations, and technical terms sits at the high end; 1.5 is a
+    safe middle ground that avoids API overruns.
     """
     word_count = len(text.split())
     return max(1, int(word_count * _TOKENS_PER_WORD_ESTIMATE))
