@@ -551,3 +551,88 @@ class TestEpubTitleExtraction:
 
         assert _extract_title_from_alt("A decorative cover image") is None
         assert _extract_title_from_alt("") is None
+
+
+class TestDuplicateSpineEntries:
+    """Tests for EPUB deduplication: spine entries pointing to the same content."""
+
+    @staticmethod
+    def _create_epub_with_duplicate_spine(path: object) -> None:
+        """Create an EPUB where the same chapter appears twice in the spine."""
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("duplicate-spine-test")
+        book.set_title("Duplicate Spine Book")
+        book.set_language("en")
+        book.add_author("Test Author")
+
+        ch1 = epub.EpubHtml(title="Chapter 1", file_name="ch1.xhtml", lang="en")
+        ch1.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1</title></head>
+<body>
+    <h1>Chapter 1: Unique Content</h1>
+    <p>This paragraph should only appear once in the parsed output.</p>
+    <p>Second paragraph with more content for the chapter.</p>
+</body>
+</html>"""
+        book.add_item(ch1)
+
+        ch2 = epub.EpubHtml(title="Chapter 2", file_name="ch2.xhtml", lang="en")
+        ch2.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 2</title></head>
+<body>
+    <h1>Chapter 2: Different Content</h1>
+    <p>This is a genuinely different chapter.</p>
+</body>
+</html>"""
+        book.add_item(ch2)
+
+        # Duplicate ch1 as a separate manifest item with the SAME content
+        ch1_dup = epub.EpubHtml(
+            title="Chapter 1 Dup", file_name="ch1_dup.xhtml", lang="en"
+        )
+        ch1_dup.content = ch1.content  # identical bytes
+        book.add_item(ch1_dup)
+
+        book.toc = [
+            epub.Link("ch1.xhtml", "Chapter 1", "ch1"),
+            epub.Link("ch2.xhtml", "Chapter 2", "ch2"),
+        ]
+
+        book.spine = ["nav", ch1, ch2, ch1_dup]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @pytest.fixture
+    def duplicate_spine_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "duplicate_spine.epub"
+        self._create_epub_with_duplicate_spine(path)
+        return path
+
+    async def test_duplicate_content_deduplicated(
+        self, parser: EpubParser, duplicate_spine_epub: object
+    ) -> None:
+        """Spine items with identical content should be deduplicated."""
+        result = await parser.parse(duplicate_spine_epub)  # type: ignore[arg-type]
+        chapters = [c for c in result.tree.children if c.node_type == NodeType.CHAPTER]
+        # Should have 2 unique chapters, not 3 (ch1 + ch2, NOT ch1 + ch2 + ch1_dup)
+        assert len(chapters) == 2
+        titles = [str(c.metadata.get("title", "")) for c in chapters]
+        assert "Chapter 1: Unique Content" in titles
+        assert "Chapter 2: Different Content" in titles
+
+    async def test_nav_document_excluded(
+        self, parser: EpubParser, duplicate_spine_epub: object
+    ) -> None:
+        """Navigation documents should not be processed as content."""
+        result = await parser.parse(duplicate_spine_epub)  # type: ignore[arg-type]
+        # The raw text should not contain TOC navigation text
+        assert "Chapter 1: Unique Content" in result.raw_text
+        assert "Chapter 2: Different Content" in result.raw_text

@@ -6,6 +6,7 @@ DocumentNode tree from the HTML spine items.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import warnings as _warnings_mod
 from pathlib import Path
@@ -119,14 +120,26 @@ class EpubParser(DocumentParser):
         root = DocumentNode(node_type=NodeType.BOOK, metadata={"title": metadata.title or ""})
         raw_text_parts: list[str] = []
 
-        spine_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+        spine_items = self._spine_items(book)
         if not spine_items:
             warnings.append("No document items found in EPUB spine")
 
+        seen_content_hashes: set[str] = set()
         for item in spine_items:
             content = item.get_content()
             if not content:
                 continue
+
+            # Deduplicate: some EPUBs have duplicate spine entries or
+            # manifest items that reference the same content.
+            content_hash = hashlib.sha256(content).hexdigest()
+            if content_hash in seen_content_hashes:
+                log.debug(
+                    "epub_skipping_duplicate_spine_item",
+                    item=item.get_name(),
+                )
+                continue
+            seen_content_hashes.add(content_hash)
 
             try:
                 with _warnings_mod.catch_warnings():
@@ -281,7 +294,7 @@ class EpubParser(DocumentParser):
         images) or the copyright page for a full-title line, or the first
         ``<h1>`` heading in the content.
         """
-        spine_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+        spine_items = self._spine_items(book)
 
         for item in spine_items[:5]:
             content = item.get_content()
@@ -337,6 +350,47 @@ class EpubParser(DocumentParser):
                     self._walk_toc(children, titles)
             elif hasattr(item, "title"):
                 titles.append(str(item.title))
+
+    @staticmethod
+    def _spine_items(book: epub.EpubBook) -> list[epub.EpubItem]:
+        """Return document items in spine reading order, excluding nav docs.
+
+        ``book.get_items_of_type(ITEM_DOCUMENT)`` returns *all* manifest
+        items of type ITEM_DOCUMENT regardless of whether they are in the
+        spine.  That set often includes the EPUB navigation document
+        (nav.xhtml) which duplicates the table of contents and should not
+        be chunked as prose.
+
+        This method resolves the spine to actual item objects and skips
+        navigation items (both EPUB 3 ``EpubNav`` and EPUB 2 NCX).  If
+        the spine is empty or cannot be resolved, falls back to manifest
+        items (excluding navigation) for robustness.
+        """
+        items: list[epub.EpubItem] = []
+        seen_ids: set[str] = set()
+
+        for spine_id, _ in book.spine:
+            if spine_id in seen_ids:
+                continue
+            seen_ids.add(spine_id)
+            item = book.get_item_with_id(spine_id)
+            if item is None:
+                continue
+            # Skip navigation documents: EpubNav (EPUB3) or non-chapter items
+            if isinstance(item, epub.EpubNav):
+                continue
+            items.append(item)
+
+        if items:
+            return items
+
+        # Fallback: spine unresolvable — use manifest items minus nav
+        log.warning("epub_spine_unresolvable_using_manifest")
+        return [
+            item
+            for item in book.get_items_of_type(ITEM_DOCUMENT)
+            if not isinstance(item, epub.EpubNav)
+        ]
 
     # ------------------------------------------------------------------
     # HTML body → DocumentNode tree
