@@ -250,7 +250,7 @@ class EntityExtractor:
         """
         try:
             return await self._extract_batch(batch, work_title=work_title, author=author)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, AttributeError, TypeError, KeyError) as exc:
             if _retry_depth >= _MAX_BATCH_RETRIES:
                 error_msg = (
                     f"Batch JSON parse failed after {_retry_depth} retries "
@@ -408,6 +408,9 @@ class EntityExtractor:
         extractions: list[ChunkExtraction] = []
 
         for raw in raw_list:
+            if not isinstance(raw, dict):
+                log.warning("entity_extraction_skip_non_dict", type=type(raw).__name__, preview=str(raw)[:100])
+                continue
             chunk_id = raw.get("chunk_id", "")
             if not chunk_id:
                 continue
