@@ -145,13 +145,42 @@ class ChunkAnnotator:
         source_class: str,
         use_llm: bool,
     ) -> None:
-        """Annotate a batch of same-source-class chunks."""
-        if use_llm:
-            # Process in batches for efficiency
-            for i in range(0, len(chunks), _BATCH_SIZE):
-                batch = chunks[i : i + _BATCH_SIZE]
+        """Annotate a batch of same-source-class chunks.
+
+        LLM annotation batches run concurrently (up to _ANNOTATION_CONCURRENCY
+        parallel API calls) for performance.
+        """
+        if not use_llm:
+            for chunk in chunks:
+                chunk.annotation = _format_annotation(chunk, context, source_class, {})
+            return
+
+        concurrency = int(
+            getattr(self._settings.llm, "annotation_concurrency", 0) or 5
+        )
+        semaphore = asyncio.Semaphore(concurrency)
+
+        # Split into sub-batches
+        batches = [
+            chunks[i : i + _BATCH_SIZE]
+            for i in range(0, len(chunks), _BATCH_SIZE)
+        ]
+
+        total_batches = len(batches)
+        logger.info(
+            "annotation_starting",
+            total_chunks=len(chunks),
+            total_batches=total_batches,
+            concurrency=concurrency,
+            source_class=source_class,
+        )
+
+        async def _process_one_batch(batch: list[Chunk], batch_idx: int) -> None:
+            async with semaphore:
                 try:
-                    llm_results = await self._llm_batch_annotate(batch, context, source_class)
+                    llm_results = await self._llm_batch_annotate(
+                        batch, context, source_class
+                    )
                     for chunk, llm_data in zip(batch, llm_results, strict=True):
                         chunk.annotation = _format_annotation(
                             chunk, context, source_class, llm_data
@@ -160,6 +189,7 @@ class ChunkAnnotator:
                     logger.error(
                         "llm_annotation_failed",
                         error=str(exc),
+                        batch_idx=batch_idx + 1,
                         batch_size=len(batch),
                         source_class=source_class,
                     )
@@ -168,9 +198,10 @@ class ChunkAnnotator:
                         chunk.annotation = _format_annotation(
                             chunk, context, source_class, {}
                         )
-        else:
-            for chunk in chunks:
-                chunk.annotation = _format_annotation(chunk, context, source_class, {})
+
+        await asyncio.gather(
+            *(_process_one_batch(b, i) for i, b in enumerate(batches))
+        )
 
     async def _llm_batch_annotate(
         self,
