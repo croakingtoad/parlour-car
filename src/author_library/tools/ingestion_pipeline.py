@@ -223,6 +223,35 @@ class IngestionPipeline:
             "publication_year": catalog_entry.publication_year,
         })
 
+        # Upsert author record in PG (authors table)
+        await self._storage.pg.execute(
+            "INSERT INTO authors (id, canonical_name) VALUES ($1, $2) "
+            "ON CONFLICT (id) DO NOTHING",
+            subject_author_id,
+            catalog_entry.author,
+        )
+
+        # Upsert Author node in Neo4j and create AUTHORED->Work edge
+        await self._storage.neo4j.execute_write(
+            """MERGE (a:Author {author_id: $author_id})
+            SET a.canonical_name = $name
+            WITH a
+            MATCH (w:Work {work_id: $work_id})
+            MERGE (a)-[:AUTHORED]->(w)""",
+            {
+                "author_id": subject_author_id,
+                "name": catalog_entry.author,
+                "work_id": work_id,
+            },
+        )
+
+        log.info(
+            "ingestion_author_upserted",
+            author_id=subject_author_id,
+            canonical_name=catalog_entry.author,
+            work_id=work_id,
+        )
+
         # Step 3: Route by source class
         if route == ProcessingRoute.METADATA_ONLY:
             log.info("ingestion_tertiary_metadata_only", work_id=work_id)
