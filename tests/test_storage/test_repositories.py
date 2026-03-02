@@ -345,6 +345,173 @@ async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
     assert themes[0]["canonical_name"] == "imagination"
 
 
+async def test_chunk_creates_part_of_edge_to_work(neo4j_conn: Neo4jConnection) -> None:
+    """Upserting a chunk node creates a PART_OF edge to its Work node."""
+    await neo4j_conn.init_schema()
+    graph = Neo4jGraphRepository(neo4j_conn)
+
+    # Create work node first (as ingestion pipeline does)
+    await graph.upsert_work_node({
+        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "title": "Faith, Hope and Poetry",
+        "author": "malcolm-guite",
+        "source_class": "primary",
+        "publication_year": 2010,
+    })
+
+    # Create chunk node — should automatically create PART_OF edge
+    await graph.upsert_chunk_node({
+        "chunk_id": "chunk-001",
+        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "text_preview": "The imagination is not merely a faculty...",
+        "granularity": "meso",
+        "source_class": "primary",
+    })
+
+    # Verify PART_OF edge exists
+    results = await neo4j_conn.execute_read(
+        """MATCH (c:Chunk {chunk_id: $chunk_id})-[:PART_OF]->(w:Work)
+        RETURN w.work_id AS work_id, w.title AS title""",
+        {"chunk_id": "chunk-001"},
+    )
+    assert len(results) == 1
+    assert results[0]["work_id"] == "malcolm-guite--faith-hope-and-poetry"
+    assert results[0]["title"] == "Faith, Hope and Poetry"
+
+
+async def test_all_chunks_connected_to_work_via_part_of(neo4j_conn: Neo4jConnection) -> None:
+    """All chunks for a work are connected via PART_OF edges."""
+    await neo4j_conn.init_schema()
+    graph = Neo4jGraphRepository(neo4j_conn)
+
+    work_id = "malcolm-guite--faith-hope-and-poetry"
+    await graph.upsert_work_node({
+        "work_id": work_id,
+        "title": "Faith, Hope and Poetry",
+        "author": "malcolm-guite",
+        "source_class": "primary",
+        "publication_year": 2010,
+    })
+
+    # Create multiple chunks
+    chunk_ids = [f"chunk-{i:03d}" for i in range(1, 6)]
+    for cid in chunk_ids:
+        await graph.upsert_chunk_node({
+            "chunk_id": cid,
+            "work_id": work_id,
+            "text_preview": f"Text for {cid}",
+            "granularity": "meso",
+            "source_class": "primary",
+        })
+
+    # Verify all chunks are connected to the work
+    results = await neo4j_conn.execute_read(
+        """MATCH (c:Chunk)-[:PART_OF]->(w:Work {work_id: $work_id})
+        RETURN count(c) AS chunk_count""",
+        {"work_id": work_id},
+    )
+    assert results[0]["chunk_count"] == 5
+
+    # Verify the work node is NOT disconnected
+    disconnected = await neo4j_conn.execute_read(
+        """MATCH (w:Work {work_id: $work_id})
+        WHERE NOT (w)--()
+        RETURN count(w) AS count""",
+        {"work_id": work_id},
+    )
+    assert disconnected[0]["count"] == 0
+
+
+async def test_work_node_has_correct_properties(neo4j_conn: Neo4jConnection) -> None:
+    """Work node is created with all expected properties."""
+    await neo4j_conn.init_schema()
+    graph = Neo4jGraphRepository(neo4j_conn)
+
+    await graph.upsert_work_node({
+        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "title": "Faith, Hope and Poetry",
+        "author": "malcolm-guite",
+        "source_class": "primary",
+        "publication_year": 2010,
+    })
+
+    results = await neo4j_conn.execute_read(
+        """MATCH (w:Work {work_id: $work_id})
+        RETURN w.title AS title, w.author AS author,
+               w.source_class AS source_class,
+               w.publication_year AS publication_year""",
+        {"work_id": "malcolm-guite--faith-hope-and-poetry"},
+    )
+    assert len(results) == 1
+    assert results[0]["title"] == "Faith, Hope and Poetry"
+    assert results[0]["author"] == "malcolm-guite"
+    assert results[0]["source_class"] == "primary"
+    assert results[0]["publication_year"] == 2010
+
+
+async def test_chunk_without_work_node_still_created(neo4j_conn: Neo4jConnection) -> None:
+    """Chunk node is created even when Work node doesn't exist (no PART_OF edge)."""
+    await neo4j_conn.init_schema()
+    graph = Neo4jGraphRepository(neo4j_conn)
+
+    # Create chunk WITHOUT creating work node first
+    await graph.upsert_chunk_node({
+        "chunk_id": "orphan-chunk",
+        "work_id": "nonexistent-work",
+        "text_preview": "Some text",
+        "granularity": "meso",
+        "source_class": "primary",
+    })
+
+    # Chunk node should exist
+    chunks = await neo4j_conn.execute_read(
+        "MATCH (c:Chunk {chunk_id: $cid}) RETURN c.chunk_id AS cid",
+        {"cid": "orphan-chunk"},
+    )
+    assert len(chunks) == 1
+
+    # But no PART_OF edge (work doesn't exist)
+    edges = await neo4j_conn.execute_read(
+        "MATCH (c:Chunk {chunk_id: $cid})-[:PART_OF]->() RETURN count(*) AS cnt",
+        {"cid": "orphan-chunk"},
+    )
+    assert edges[0]["cnt"] == 0
+
+
+async def test_part_of_is_idempotent(neo4j_conn: Neo4jConnection) -> None:
+    """Upserting the same chunk twice doesn't create duplicate PART_OF edges."""
+    await neo4j_conn.init_schema()
+    graph = Neo4jGraphRepository(neo4j_conn)
+
+    await graph.upsert_work_node({
+        "work_id": "work-1",
+        "title": "Test Work",
+        "author": "test-author",
+        "source_class": "primary",
+        "publication_year": 2020,
+    })
+
+    chunk_data = {
+        "chunk_id": "chunk-dup",
+        "work_id": "work-1",
+        "text_preview": "Some text",
+        "granularity": "meso",
+        "source_class": "primary",
+    }
+
+    # Upsert twice
+    await graph.upsert_chunk_node(chunk_data)
+    await graph.upsert_chunk_node(chunk_data)
+
+    # Should have exactly one PART_OF edge
+    results = await neo4j_conn.execute_read(
+        """MATCH (c:Chunk {chunk_id: $cid})-[r:PART_OF]->(w:Work)
+        RETURN count(r) AS edge_count""",
+        {"cid": "chunk-dup"},
+    )
+    assert results[0]["edge_count"] == 1
+
+
 # -- StorageManager Tests ----------------------------------------------------
 
 
