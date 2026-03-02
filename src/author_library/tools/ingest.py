@@ -93,11 +93,27 @@ async def handle_ingest_book(
         metadata_hints=metadata_hints,
     )
 
+    # After successful ingestion, run cross-work analysis for primary sources.
+    # This triggers voice profile extraction, thematic index generation, and
+    # thematic evolution analysis — previously only called by ingest_corpus.
+    cross_work_summary: dict[str, Any] = {}
+    if result.source_class == "primary":
+        cross_work_summary = await _run_cross_work_analysis(
+            subject_author_id=subject_author_id,
+            settings=settings,
+            storage=storage,
+            embedding_provider=embedding_provider,
+        )
+
     # Invalidate caches — new content may affect query/graph/voice/thematic results
     if cache_manager is not None:
         await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
 
-    return json.dumps(result.to_dict(), indent=2)
+    response = result.to_dict()
+    if cross_work_summary:
+        response["cross_work_analysis"] = cross_work_summary
+
+    return json.dumps(response, indent=2)
 
 
 async def _classify_only(
