@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from author_library.errors import StorageError
+from author_library.text_utils import sanitize_text
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -374,6 +375,10 @@ class PgChunkRepository(ChunkRepository):
         self._pool = pool
 
     async def create(self, chunk: dict[str, Any]) -> UUID:
+        # Safety net: sanitize text fields before INSERT to prevent
+        # invalid UTF-8 byte sequences from reaching PostgreSQL.
+        text = sanitize_text(chunk["text"]) if chunk.get("text") else chunk.get("text", "")
+        annotation = sanitize_text(chunk["annotation"]) if chunk.get("annotation") else chunk.get("annotation")
         row = await self._pool.fetch_one(
             """INSERT INTO chunks (
                 work_id, text, annotation, granularity, source_class,
@@ -382,8 +387,8 @@ class PgChunkRepository(ChunkRepository):
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id""",
             chunk["work_id"],
-            chunk["text"],
-            chunk.get("annotation"),
+            text,
+            annotation,
             chunk["granularity"],
             chunk["source_class"],
             chunk.get("chapter"),
