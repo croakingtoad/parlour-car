@@ -940,3 +940,228 @@ class TestEpubRealFile:
         assert bad_chunks == [], (
             f"{len(bad_chunks)} chunks with encoding issues out of {len(chunks)}"
         )
+
+
+class TestHeaderWrappedHeadingsEpub:
+    """Tests for EPUBs that use <article>/<section>/<header> wrappers.
+
+    Many publisher EPUBs (e.g. Canterbury Press, OUP) structure each spine
+    item as ``<body><article><section><header><h1>…</h1></header>…</section></article></body>``.
+    The parser must unwrap these and extract chapter/section titles.
+    """
+
+    @staticmethod
+    def _create_header_wrapped_epub(path: object) -> None:
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("header-wrapped-test")
+        book.set_title("Header Wrapped Book")
+        book.set_language("en")
+        book.add_author("Test Author")
+
+        intro = epub.EpubHtml(title="Introduction", file_name="intro.xhtml", lang="en")
+        intro.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Introduction</title></head>
+<body>
+<section>
+  <header>
+    <h1 class="chno">Introduction</h1>
+    <h1 class="chtitle">Poetry and Transfiguration</h1>
+  </header>
+  <p>The first paragraph of the introduction with real content.</p>
+  <p>The second paragraph continues the discussion about poetry.</p>
+</section>
+</body>
+</html>"""
+        book.add_item(intro)
+
+        ch1 = epub.EpubHtml(title="Chapter 1", file_name="ch1.xhtml", lang="en")
+        ch1.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 1</title></head>
+<body>
+<article>
+  <section>
+    <header>
+      <h1 class="chno">Chapter 1</h1>
+      <h1 class="chtitle">Seeing through Dreams</h1>
+    </header>
+    <section id="sec1_1">
+      <header>
+        <h2 class="head2">Truth and Dreaming</h2>
+      </header>
+      <p>First paragraph of section one about truth.</p>
+      <p>Second paragraph of section one about dreaming.</p>
+    </section>
+    <section id="sec1_2">
+      <header>
+        <h2 class="head2">The Five Levels</h2>
+      </header>
+      <p>First paragraph of section two about levels.</p>
+    </section>
+  </section>
+</article>
+</body>
+</html>"""
+        book.add_item(ch1)
+
+        ch2 = epub.EpubHtml(title="Chapter 2", file_name="ch2.xhtml", lang="en")
+        ch2.content = b"""<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>Chapter 2</title></head>
+<body>
+<article>
+  <section>
+    <header>
+      <h1 class="chno">Chapter 2</h1>
+      <h1 class="chtitle">Truth and Feigning</h1>
+    </header>
+    <p>Content of chapter two about Shakespeare.</p>
+  </section>
+</article>
+</body>
+</html>"""
+        book.add_item(ch2)
+
+        book.toc = [
+            epub.Link("intro.xhtml", "Introduction", "intro"),
+            epub.Link("ch1.xhtml", "Chapter 1", "ch1"),
+            epub.Link("ch2.xhtml", "Chapter 2", "ch2"),
+        ]
+        book.spine = ["nav", intro, ch1, ch2]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @pytest.fixture
+    def header_wrapped_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "header_wrapped.epub"
+        self._create_header_wrapped_epub(path)
+        return path
+
+    async def test_chapters_found(
+        self, parser: EpubParser, header_wrapped_epub: object
+    ) -> None:
+        """Article/section/header wrappers should be unwrapped to find chapters."""
+        result = await parser.parse(header_wrapped_epub)  # type: ignore[arg-type]
+        chapters = [c for c in result.tree.children if c.node_type == NodeType.CHAPTER]
+        assert len(chapters) >= 3
+
+    async def test_chapter_titles_combined(
+        self, parser: EpubParser, header_wrapped_epub: object
+    ) -> None:
+        """Multiple h1s in a <header> should be combined into chapter title."""
+        result = await parser.parse(header_wrapped_epub)  # type: ignore[arg-type]
+        chapters = [c for c in result.tree.children if c.node_type == NodeType.CHAPTER]
+        titles = [str(c.metadata.get("title", "")) for c in chapters]
+        assert any("Introduction" in t and "Transfiguration" in t for t in titles)
+        assert any("Chapter 1" in t and "Seeing through Dreams" in t for t in titles)
+        assert any("Chapter 2" in t and "Truth and Feigning" in t for t in titles)
+
+    async def test_section_titles_extracted(
+        self, parser: EpubParser, header_wrapped_epub: object
+    ) -> None:
+        """Section headings inside <header> elements should produce titled SECTION nodes."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(header_wrapped_epub)  # type: ignore[arg-type]
+        chapters = [c for c in result.tree.children if c.node_type == NodeType.CHAPTER]
+        ch1 = next(
+            (c for c in chapters if "Seeing through Dreams" in str(c.metadata.get("title", ""))),
+            None,
+        )
+        assert ch1 is not None
+
+        def find_sections(node: DocumentNode) -> list[DocumentNode]:
+            found: list[DocumentNode] = []
+            if node.node_type == NodeType.SECTION:
+                found.append(node)
+            for child in node.children:
+                found.extend(find_sections(child))
+            return found
+
+        sections = find_sections(ch1)
+        section_titles = [str(s.metadata.get("title", "")) for s in sections]
+        assert any("Truth and Dreaming" in t for t in section_titles)
+        assert any("Five Levels" in t for t in section_titles)
+
+    async def test_paragraphs_preserved(
+        self, parser: EpubParser, header_wrapped_epub: object
+    ) -> None:
+        """Paragraphs inside nested sections should be preserved."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(header_wrapped_epub)  # type: ignore[arg-type]
+
+        def find_type(node: DocumentNode, ntype: NodeType) -> list[DocumentNode]:
+            found: list[DocumentNode] = []
+            if node.node_type == ntype:
+                found.append(node)
+            for child in node.children:
+                found.extend(find_type(child, ntype))
+            return found
+
+        paragraphs = find_type(result.tree, NodeType.PARAGRAPH)
+        assert len(paragraphs) >= 5
+
+
+class TestRealEpubChapterMetadata:
+    """Integration test using the real 'Faith, Hope and Poetry' EPUB.
+
+    Verifies the full chain: EPUB parsing → chapter title extraction →
+    chunking → chapter/section fields populated on every Chunk.
+    """
+
+    EPUB_PATH = "/home/marty/repos/booklore/bookdrop/Faith, Hope and Poetry - Malcolm Guite.epub"
+
+    @pytest.fixture
+    def real_epub_path(self) -> object:
+        from pathlib import Path
+
+        path = Path(self.EPUB_PATH)
+        if not path.exists():
+            pytest.skip(f"Real EPUB not found at {self.EPUB_PATH}")
+        return path
+
+    async def test_chapters_have_titles(
+        self, parser: EpubParser, real_epub_path: object
+    ) -> None:
+        """Every chapter in the real EPUB should have a non-empty title."""
+        result = await parser.parse(real_epub_path)  # type: ignore[arg-type]
+        chapters = [c for c in result.tree.children if c.node_type == NodeType.CHAPTER]
+        assert len(chapters) >= 10, f"Expected 10+ chapters, got {len(chapters)}"
+        titled = [c for c in chapters if c.metadata.get("title")]
+        assert len(titled) >= 10, (
+            f"Expected 10+ titled chapters, got {len(titled)}. "
+            f"Untitled: {[c.metadata for c in chapters if not c.metadata.get('title')]}"
+        )
+
+    async def test_scholarly_chunks_have_chapter(
+        self, parser: EpubParser, real_epub_path: object
+    ) -> None:
+        """Chunking the real EPUB should produce chunks with chapter metadata."""
+        from author_library.chunking.models import ChunkGranularity
+        from author_library.chunking.scholarly import ScholarlyProseStrategy
+
+        result = await parser.parse(real_epub_path)  # type: ignore[arg-type]
+        strategy = ScholarlyProseStrategy()
+        chunks = strategy.chunk(result, work_id="guite--faith-hope-poetry", source_class="primary")
+
+        assert len(chunks) > 100, f"Expected many chunks, got {len(chunks)}"
+
+        macro_chunks = [c for c in chunks if c.granularity == ChunkGranularity.MACRO]
+        macro_with_chapter = [c for c in macro_chunks if c.chapter]
+        assert len(macro_with_chapter) > 0, "No macro chunks have chapter set"
+        assert len(macro_with_chapter) >= len(macro_chunks) * 0.8, (
+            f"Only {len(macro_with_chapter)}/{len(macro_chunks)} macro chunks have chapter"
+        )
+
+        all_with_chapter = [c for c in chunks if c.chapter]
+        assert len(all_with_chapter) > len(chunks) * 0.5, (
+            f"Only {len(all_with_chapter)}/{len(chunks)} chunks have chapter set"
+        )

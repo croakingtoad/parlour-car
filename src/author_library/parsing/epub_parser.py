@@ -538,11 +538,11 @@ class EpubParser(DocumentParser):
 
             # If it's a heading, determine whether to create a chapter title or section
             if node.node_type == NodeType.HEADING:
-                level = element.name  # h1, h2, etc.
-                if level in ("h1", "h2") and not chapter.metadata.get("title"):
+                heading_level = node.metadata.get("level", 0)
+                if heading_level in (1, 2) and not chapter.metadata.get("title"):
                     chapter.metadata["title"] = node.text
                     chapter.children.append(node)
-                elif level == "h1" and chapter.metadata.get("title"):
+                elif heading_level == 1 and chapter.metadata.get("title"):
                     # New h1 while we already have a titled chapter —
                     # finalize the current chapter and start a new one.
                     if chapter.children:
@@ -553,7 +553,7 @@ class EpubParser(DocumentParser):
                     )
                     chapter.children.append(node)
                     current_section = None
-                elif level in ("h2", "h3", "h4", "h5", "h6"):
+                elif heading_level in (2, 3, 4, 5, 6):
                     current_section = DocumentNode(
                         node_type=NodeType.SECTION,
                         metadata={"title": node.text},
@@ -588,30 +588,30 @@ class EpubParser(DocumentParser):
 
     @staticmethod
     def _unwrap_container(body: Tag) -> Tag:
-        """If *body* is a thin wrapper around a single structural div, return that div.
+        """Unwrap thin structural wrappers around the actual chapter content.
 
-        Many EPUBs (especially those converted from other formats) wrap the
-        entire content in ``<body><div>…</div></body>`` where the ``<div>``
-        contains headings and paragraphs.  In that case we want to iterate
-        over the div's children rather than treating the div as one opaque
-        element.
+        Many EPUBs wrap content in single-child containers like
+        ``<body><div>…</div></body>`` or
+        ``<body><article><section>…</section></article></body>``.
+        Recursively unwrap up to 3 levels so that ``_parse_body`` can iterate
+        directly over headings and paragraphs.
         """
-        # Collect direct Tag children of body, skipping whitespace-only text
-        direct_tags = [c for c in body.children if isinstance(c, Tag)]
-
-        if len(direct_tags) != 1:
-            return body
-
-        wrapper = direct_tags[0]
-        if wrapper.name != "div":
-            return body
-
-        # Check if the wrapper div contains heading tags — a strong signal
-        # that it is structural content, not a styled container
-        if wrapper.find(["h1", "h2", "h3"]):
-            return wrapper
-
-        return body
+        _WRAPPER_TAGS = {"div", "section", "article"}
+        effective = body
+        for _ in range(3):
+            direct_tags = [c for c in effective.children if isinstance(c, Tag)]
+            if len(direct_tags) != 1:
+                break
+            wrapper = direct_tags[0]
+            if wrapper.name not in _WRAPPER_TAGS:
+                break
+            # Only unwrap if the wrapper contains heading tags — a strong
+            # signal that it is structural content, not a styled container.
+            if wrapper.find(["h1", "h2", "h3"]):
+                effective = wrapper
+            else:
+                break
+        return effective
 
     def _element_to_node(
         self,
@@ -670,6 +670,34 @@ class EpubParser(DocumentParser):
                 metadata={"alt": str(alt), "src": str(src)},
             )
 
+        if tag == "header":
+            # HTML5 <header> elements often wrap headings in EPUB documents.
+            # Extract all heading children and combine them into a single
+            # HEADING node (e.g. "Chapter 1" + "Seeing through Dreams" →
+            # "Chapter 1: Seeing through Dreams").
+            headings = element.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+            if headings:
+                best_level = min(int(h.name[1]) for h in headings)
+                texts: list[str] = []
+                for h in headings:
+                    text = h.get_text(strip=True)
+                    if text:
+                        texts.append(text)
+                        raw_text_parts.append(text)
+                combined = ": ".join(texts)
+                if combined:
+                    return DocumentNode(
+                        node_type=NodeType.HEADING,
+                        text=combined,
+                        metadata={"level": best_level},
+                    )
+            # No headings found — extract as paragraph fallback
+            text = element.get_text(strip=True)
+            if text:
+                raw_text_parts.append(text)
+                return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
+            return None
+
         if tag in ("aside", "div"):
             # Check for footnote / endnote patterns
             role = str(element.get("role") or element.get("epub:type") or "")
@@ -703,7 +731,9 @@ class EpubParser(DocumentParser):
         # paragraphs, headings, or other block-level content.  Recurse
         # into children so individual paragraphs are preserved instead of
         # being collapsed into a single PARAGRAPH node.
-        _STRUCTURAL_TAGS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"}
+        _STRUCTURAL_TAGS = {
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "header",
+        }
         if tag in ("div", "aside", "section", "article"):
             has_structural = element.find(list(_STRUCTURAL_TAGS), recursive=False)
             if has_structural:
@@ -713,6 +743,12 @@ class EpubParser(DocumentParser):
                         child_node = self._element_to_node(child, raw_text_parts, warnings)
                         if child_node is not None:
                             container.children.append(child_node)
+                            # Extract section title from first heading child
+                            if (
+                                child_node.node_type == NodeType.HEADING
+                                and "title" not in container.metadata
+                            ):
+                                container.metadata["title"] = child_node.text
                     else:
                         text = _sanitize_text(str(child).strip())
                         if text:
