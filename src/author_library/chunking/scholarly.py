@@ -23,7 +23,7 @@ from author_library.chunking._tree_utils import (
 )
 from author_library.chunking.base import ChunkingStrategy
 from author_library.chunking.models import Chunk, ChunkGranularity
-from author_library.parsing.models import DocumentNode, NodeType, ParsedDocument
+from author_library.parsing.models import DocumentNode, NodeType, ParsedDocument, SectionType
 
 logger = structlog.get_logger()
 
@@ -63,6 +63,9 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 chapter_title = chapter_node.text.split("\n")[0][:100]
             chapter_title_str = str(chapter_title) if chapter_title else None
 
+            # Propagate the section_type from the document node
+            section_type_val = chapter_node.section_type.value
+
             # --- MACRO: chapter-level summary text ---
             chapter_text = collect_text(chapter_node)
             if not chapter_text.strip():
@@ -74,6 +77,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 work_id=work_id,
                 source_class=source_class,
                 chapter=chapter_title_str,
+                section_type=section_type_val,
                 position=position_counters[ChunkGranularity.MACRO],
                 metadata={"genre": "scholarly_prose"},
             )
@@ -92,6 +96,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                     work_id=work_id,
                     source_class=source_class,
                     chapter=chapter_title_str,
+                    section_type=section_type_val,
                     parent_id=macro_chunk.id,
                     footnotes=footnotes,
                     position_counters=position_counters,
@@ -118,6 +123,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             parent_id=macro_chunk.id,
                             footnotes=footnotes,
                             position_counters=position_counters,
@@ -131,6 +137,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             position=position_counters[ChunkGranularity.MESO],
                             parent_chunk_id=macro_chunk.id,
                             metadata={"genre": "scholarly_prose"},
@@ -145,11 +152,18 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             parent_id=meso_chunk.id,
                             footnotes=footnotes,
                             position_counters=position_counters,
                         )
                         chunks.extend(micro_chunks)
+
+        # Filter out micro chunks under the minimum character threshold.
+        # These are typically index entries, single-word fragments, or noise.
+        pre_filter = len(chunks)
+        chunks = filter_min_chunk_size(chunks)
+        filtered_out = pre_filter - len(chunks)
 
         logger.info(
             "scholarly_chunking_complete",
@@ -158,6 +172,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
             macro=sum(1 for c in chunks if c.granularity == ChunkGranularity.MACRO),
             meso=sum(1 for c in chunks if c.granularity == ChunkGranularity.MESO),
             micro=sum(1 for c in chunks if c.granularity == ChunkGranularity.MICRO),
+            filtered_micro_chunks=filtered_out,
         )
         return chunks
 
@@ -173,6 +188,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
         source_class: str,
         chapter: str | None,
         section: str | None = None,
+        section_type: str = "chapter",
         parent_id: str | None = None,
         footnotes: dict[str, str],
         position_counters: dict[ChunkGranularity, int],
@@ -199,6 +215,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 source_class=source_class,
                 chapter=chapter,
                 section=section,
+                section_type=section_type,
                 position=position_counters[ChunkGranularity.MESO],
                 parent_chunk_id=parent_id,
                 metadata={"genre": "scholarly_prose"},
@@ -225,6 +242,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                     source_class=source_class,
                     chapter=chapter,
                     section=section,
+                    section_type=section_type,
                     position=position_counters[ChunkGranularity.MICRO],
                     parent_chunk_id=meso_chunk.id,
                     metadata=meta,
@@ -291,6 +309,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                         source_class=source_class,
                         chapter=chapter,
                         section=section,
+                        section_type=section_type,
                         position=position_counters[ChunkGranularity.MICRO],
                         parent_chunk_id=last_meso.id,
                         metadata={"genre": "scholarly_prose"},
@@ -312,6 +331,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
         source_class: str,
         chapter: str | None,
         section: str | None,
+        section_type: str = "chapter",
         parent_id: str,
         footnotes: dict[str, str],
         position_counters: dict[ChunkGranularity, int],
@@ -335,6 +355,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 source_class=source_class,
                 chapter=chapter,
                 section=section,
+                section_type=section_type,
                 position=position_counters[ChunkGranularity.MICRO],
                 parent_chunk_id=parent_id,
                 metadata=meta,
@@ -342,6 +363,53 @@ class ScholarlyProseStrategy(ChunkingStrategy):
             position_counters[ChunkGranularity.MICRO] += 1
             chunks.append(micro)
         return chunks
+
+
+# ------------------------------------------------------------------
+# Minimum chunk size filter
+# ------------------------------------------------------------------
+
+#: Minimum character length for a chunk to be retained.  Chunks shorter
+#: than this (typically index entries, single words, page-number fragments)
+#: are merged into their nearest sibling or dropped.
+MIN_CHUNK_CHARS = 50
+
+
+def filter_min_chunk_size(
+    chunks: list[Chunk],
+    min_chars: int = MIN_CHUNK_CHARS,
+) -> list[Chunk]:
+    """Remove micro/nano chunks shorter than *min_chars* characters.
+
+    Macro and meso chunks are never filtered (they aggregate children).
+    Micro/nano chunks below the threshold are dropped — their text is
+    already represented in their parent meso/macro chunk.
+
+    Args:
+        chunks: The full list of chunks at all granularity levels.
+        min_chars: Minimum character count for micro/nano chunks.
+
+    Returns:
+        Filtered list with tiny chunks removed.
+    """
+    kept: list[Chunk] = []
+    dropped = 0
+    for chunk in chunks:
+        # Only filter micro and nano — macro/meso are aggregates
+        if chunk.granularity in (ChunkGranularity.MICRO, ChunkGranularity.NANO):
+            if len(chunk.text.strip()) < min_chars:
+                dropped += 1
+                continue
+        kept.append(chunk)
+
+    if dropped:
+        logger.debug(
+            "min_chunk_size_filter",
+            dropped=dropped,
+            min_chars=min_chars,
+            remaining=len(kept),
+        )
+    return kept
 
 
 # ------------------------------------------------------------------

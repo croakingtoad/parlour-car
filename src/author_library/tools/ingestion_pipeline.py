@@ -31,6 +31,7 @@ from author_library.graph.linking_explicit import ExplicitLinkDetector
 from author_library.graph.linking_implicit import ImplicitEngagementDetector
 from author_library.graph.linking_thematic import ThematicParallelDetector
 from author_library.parsing import get_parser
+from author_library.parsing.models import SectionType
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -284,6 +285,16 @@ class IngestionPipeline:
             by_granularity=chunks_by_gran,
             elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
+
+        # Step 4b: Section-type routing — filter out non-content sections
+        chunks, skipped_sections = self._filter_by_section_type(chunks, work_id)
+
+        # Recount after filtering
+        if skipped_sections:
+            chunks_by_gran = {}
+            for chunk in chunks:
+                gran = str(chunk.granularity)
+                chunks_by_gran[gran] = chunks_by_gran.get(gran, 0) + 1
 
         # Step 5: Annotate
         stage_start = time.monotonic()
@@ -804,6 +815,53 @@ class IngestionPipeline:
 
         log.info("passage_links_created", edges=edges_created)
         return edges_created
+
+    def _filter_by_section_type(
+        self,
+        chunks: list[Chunk],
+        work_id: str,
+    ) -> tuple[list[Chunk], dict[str, int]]:
+        """Filter chunks by section type, removing non-content sections.
+
+        Section types that get FULL pipeline processing:
+        - chapter, preface, back_matter: full pipeline
+        Section types that are EXCLUDED from chunking/annotation/embedding:
+        - bibliography: skip (future: parse for acquisition candidates)
+        - index: skip (future: parse for vocabulary proposals)
+        - toc: skip entirely
+        - front_matter: skip (future: extract catalog metadata)
+
+        Returns:
+            Tuple of (filtered_chunks, skipped_counts_by_section_type).
+        """
+        # Section types that receive full pipeline processing
+        _CONTENT_SECTION_TYPES = {
+            SectionType.CHAPTER.value,
+            SectionType.PREFACE.value,
+            SectionType.BACK_MATTER.value,
+        }
+
+        content_chunks: list[Chunk] = []
+        skipped: dict[str, int] = {}
+
+        for chunk in chunks:
+            if chunk.section_type in _CONTENT_SECTION_TYPES:
+                content_chunks.append(chunk)
+            else:
+                skipped[chunk.section_type] = skipped.get(chunk.section_type, 0) + 1
+
+        if skipped:
+            total_skipped = sum(skipped.values())
+            log.info(
+                "ingestion_section_type_filter",
+                work_id=work_id,
+                original_chunks=len(chunks),
+                kept_chunks=len(content_chunks),
+                skipped_chunks=total_skipped,
+                skipped_by_type=skipped,
+            )
+
+        return content_chunks, skipped
 
     def _build_annotation_context(
         self,

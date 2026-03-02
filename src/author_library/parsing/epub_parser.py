@@ -22,6 +22,7 @@ from author_library.parsing.models import (
     DocumentNode,
     NodeType,
     ParsedDocument,
+    SectionType,
 )
 from author_library.text_utils import CP1252_TO_UNICODE as _CP1252_TO_UNICODE
 from author_library.text_utils import sanitize_text as _sanitize_text
@@ -59,6 +60,122 @@ _CHAPTER_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _POEM_LINE_BREAK_THRESHOLD = 3  # minimum consecutive <br> to consider verse
+
+# ------------------------------------------------------------------
+# Section type detection patterns
+# ------------------------------------------------------------------
+
+# Heading text patterns that identify section types.
+# Each tuple: (compiled_regex, SectionType).  Order matters — first match wins.
+_SECTION_HEADING_PATTERNS: list[tuple[re.Pattern[str], SectionType]] = [
+    # Table of Contents
+    (re.compile(
+        r"^(table\s+of\s+)?contents$",
+        re.IGNORECASE,
+    ), SectionType.TABLE_OF_CONTENTS),
+    # Bibliography / References
+    (re.compile(
+        r"^(bibliography|works?\s+cited|references|further\s+reading|"
+        r"select\s+bibliography|selected\s+bibliography|"
+        r"notes\s+on\s+sources|sources|endnotes\s+and\s+bibliography)$",
+        re.IGNORECASE,
+    ), SectionType.BIBLIOGRAPHY),
+    # Index
+    (re.compile(
+        r"^(index|general\s+index|subject\s+index|name\s+index|"
+        r"index\s+of\s+names|index\s+of\s+subjects|"
+        r"index\s+of\s+first\s+lines|index\s+of\s+authors|"
+        r"combined\s+index|scripture\s+index|biblical?\s+index)$",
+        re.IGNORECASE,
+    ), SectionType.INDEX),
+    # Front matter
+    (re.compile(
+        r"^(copyright(\s+page)?|"
+        r"first\s+published|all\s+rights\s+reserved|"
+        r"dedication|"
+        r"acknowledgements?|"
+        r"epigraph|"
+        r"about\s+the\s+author|about\s+the\s+editor|"
+        r"also\s+by|other\s+books?\s+by|"
+        r"title\s+page|half\s+title)$",
+        re.IGNORECASE,
+    ), SectionType.FRONT_MATTER),
+    # Preface (treat as content) — allow optional subtitle after colon
+    (re.compile(
+        r"^(preface|foreword|introduction|author'?s?\s+note|"
+        r"editor'?s?\s+note|prologue)(:\s+.*)?$",
+        re.IGNORECASE,
+    ), SectionType.PREFACE),
+    # Back matter — allow optional subtitle after colon
+    (re.compile(
+        r"^(appendix(\s+[a-z0-9]+)?|endnotes|notes|"
+        r"glossary|abbreviations|list\s+of\s+(illustrations|figures|tables)|"
+        r"epilogue|afterword|postscript)(:\s+.*)?$",
+        re.IGNORECASE,
+    ), SectionType.BACK_MATTER),
+]
+
+# Content patterns for body-level detection (when headings are absent).
+# These match within the full text of a spine item.
+_INDEX_ENTRY_RE = re.compile(
+    r"^[A-Z][a-z]+(?:\s[A-Za-z]+)*\s*,?\s*\d+(?:[,\-\u2013]\s*\d+)*$",
+    re.MULTILINE,
+)
+_BIB_ENTRY_RE = re.compile(
+    r"^[A-Z][a-z]+,\s+[A-Z].*\(\d{4}\)|^[A-Z][a-z]+,\s+[A-Z].*\d{4}\.",
+    re.MULTILINE,
+)
+
+
+def _detect_section_type_from_heading(heading_text: str) -> SectionType | None:
+    """Match heading text against known section patterns.
+
+    Returns the detected SectionType or None if no pattern matches.
+    """
+    cleaned = heading_text.strip()
+    for pattern, section_type in _SECTION_HEADING_PATTERNS:
+        if pattern.match(cleaned):
+            return section_type
+    return None
+
+
+def _detect_section_type_from_content(text: str) -> SectionType | None:
+    """Detect section type from body content when headings are absent.
+
+    Uses content heuristics: index-like entries (term + page numbers),
+    bibliography-like entries (Author, Title (Year)).
+    """
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+    if not lines:
+        return None
+
+    # Count index-like lines (term followed by page numbers)
+    index_matches = sum(1 for line in lines if _INDEX_ENTRY_RE.match(line))
+    if len(lines) >= 5 and index_matches / len(lines) > 0.4:
+        return SectionType.INDEX
+
+    # Count bibliography-like lines
+    bib_matches = sum(1 for line in lines if _BIB_ENTRY_RE.match(line))
+    if len(lines) >= 3 and bib_matches / len(lines) > 0.3:
+        return SectionType.BIBLIOGRAPHY
+
+    return None
+
+
+def _detect_section_type_from_position(
+    spine_index: int,
+    total_spine_items: int,
+) -> SectionType | None:
+    """Infer section type from position in the EPUB spine.
+
+    The first 2 items are often front matter (title page, copyright).
+    This is a weak heuristic used only when heading/content detection fails.
+    """
+    # Only tag the very first item (title page / half title) as front matter.
+    # Being too aggressive here would misclassify actual chapters.
+    if total_spine_items >= 5 and spine_index == 0:
+        return SectionType.FRONT_MATTER
+    return None
 
 
 def _extract_title_from_alt(alt_text: str) -> str | None:
@@ -151,7 +268,8 @@ class EpubParser(DocumentParser):
             warnings.append("No document items found in EPUB spine")
 
         seen_content_hashes: set[str] = set()
-        for item in spine_items:
+        total_spine = len(spine_items)
+        for spine_index, item in enumerate(spine_items):
             content = item.get_content()
             if not content:
                 continue
@@ -186,6 +304,11 @@ class EpubParser(DocumentParser):
 
             result_node = self._parse_body(body, raw_text_parts, warnings)
             if result_node is not None:
+                # Classify the section type of each top-level node
+                self._classify_section_type(
+                    result_node, spine_index, total_spine, body
+                )
+
                 if (
                     result_node.node_type == NodeType.BOOK
                     and result_node.metadata.get("synthetic")
@@ -423,6 +546,100 @@ class EpubParser(DocumentParser):
             for item in book.get_items_of_type(ITEM_DOCUMENT)
             if not isinstance(item, epub.EpubNav)
         ]
+
+    # ------------------------------------------------------------------
+    # Section type classification
+    # ------------------------------------------------------------------
+
+    def _classify_section_type(
+        self,
+        node: DocumentNode,
+        spine_index: int,
+        total_spine: int,
+        body: Tag,
+    ) -> None:
+        """Classify the section type of a parsed DocumentNode.
+
+        Uses a cascade of detection strategies:
+        1. Heading text patterns (strongest signal)
+        2. Body content patterns (index entries, bibliography entries)
+        3. Spine position heuristic (weakest signal, first item only)
+
+        For synthetic BOOK nodes (multiple chapters in one body), each child
+        chapter is classified independently.
+        """
+        if (
+            node.node_type == NodeType.BOOK
+            and node.metadata.get("synthetic")
+        ):
+            # Multi-chapter body: classify each child separately
+            for child in node.children:
+                self._classify_single_node(child, spine_index, total_spine)
+            return
+
+        self._classify_single_node(node, spine_index, total_spine)
+
+    def _classify_single_node(
+        self,
+        node: DocumentNode,
+        spine_index: int,
+        total_spine: int,
+    ) -> None:
+        """Classify a single chapter/section node's section_type."""
+        # Strategy 1: Check the chapter title / first heading
+        title = str(node.metadata.get("title", ""))
+        if title:
+            detected = _detect_section_type_from_heading(title)
+            if detected is not None:
+                node.section_type = detected
+                log.debug(
+                    "section_type_detected_from_heading",
+                    title=title,
+                    section_type=detected.value,
+                )
+                return
+
+        # Also check first heading child if no title metadata
+        for child in node.children:
+            if child.node_type == NodeType.HEADING:
+                detected = _detect_section_type_from_heading(child.text)
+                if detected is not None:
+                    node.section_type = detected
+                    log.debug(
+                        "section_type_detected_from_child_heading",
+                        heading=child.text,
+                        section_type=detected.value,
+                    )
+                    return
+                break  # only check the first heading
+
+        # Strategy 2: Content-based detection
+        from author_library.chunking._tree_utils import collect_text
+
+        full_text = collect_text(node)
+        if full_text.strip():
+            detected = _detect_section_type_from_content(full_text)
+            if detected is not None:
+                node.section_type = detected
+                log.debug(
+                    "section_type_detected_from_content",
+                    section_type=detected.value,
+                    text_preview=full_text[:80],
+                )
+                return
+
+        # Strategy 3: Spine position heuristic
+        detected = _detect_section_type_from_position(spine_index, total_spine)
+        if detected is not None:
+            node.section_type = detected
+            log.debug(
+                "section_type_detected_from_position",
+                spine_index=spine_index,
+                section_type=detected.value,
+            )
+            return
+
+        # Default: CHAPTER (already the field default)
 
     # ------------------------------------------------------------------
     # HTML body → DocumentNode tree
