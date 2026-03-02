@@ -20,6 +20,7 @@ import structlog
 
 from author_library.config import Settings, get_settings
 from author_library.errors import IngestionError
+from author_library.text_utils import sanitize_text
 
 if TYPE_CHECKING:
     from author_library.chunking.models import Chunk
@@ -182,6 +183,13 @@ class ChunkAnnotator:
                         batch, context, source_class
                     )
                     for chunk, llm_data in zip(batch, llm_results, strict=True):
+                        # Sanitize LLM output — API responses can contain
+                        # smart quotes and other chars that become invalid
+                        # byte sequences when stored in PostgreSQL.
+                        llm_data = {
+                            k: sanitize_text(v) if isinstance(v, str) else v
+                            for k, v in llm_data.items()
+                        }
                         chunk.annotation = _format_annotation(
                             chunk, context, source_class, llm_data
                         )
