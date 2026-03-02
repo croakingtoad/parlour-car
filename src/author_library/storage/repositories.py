@@ -816,9 +816,15 @@ class Neo4jGraphRepository(GraphRepository):
             set_clause += ",\n                c.user_id = $user_id"
             params["user_id"] = chunk["user_id"]
 
+        # Upsert chunk node AND create PART_OF edge to its Work node.
+        # The Work node is matched (not merged) because it must already exist
+        # — upsert_work_node is called earlier in the ingestion pipeline.
         await self._neo4j.execute_write(
             f"""MERGE (c:Chunk {{chunk_id: $chunk_id}})
-            {set_clause}""",
+            {set_clause}
+            WITH c
+            MATCH (w:Work {{work_id: $work_id}})
+            MERGE (c)-[:PART_OF]->(w)""",
             params,
         )
 
