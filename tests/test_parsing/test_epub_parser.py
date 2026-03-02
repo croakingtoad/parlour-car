@@ -7,7 +7,11 @@ import pytest
 from ebooklib import epub
 
 from author_library.errors import ParsingError
-from author_library.parsing.epub_parser import EpubParser
+from author_library.parsing.epub_parser import (
+    EpubParser,
+    _decode_epub_content,
+    _sanitize_text,
+)
 from author_library.parsing.models import NodeType
 
 
@@ -636,3 +640,303 @@ class TestDuplicateSpineEntries:
         # The raw text should not contain TOC navigation text
         assert "Chapter 1: Unique Content" in result.raw_text
         assert "Chapter 2: Different Content" in result.raw_text
+
+
+# ------------------------------------------------------------------
+# UTF-8 sanitisation tests
+# ------------------------------------------------------------------
+
+
+class TestSanitizeText:
+    """Unit tests for the _sanitize_text helper."""
+
+    def test_smart_quotes_preserved(self) -> None:
+        """Unicode smart quotes survive sanitisation unchanged."""
+        text = "\u201cHello,\u201d she said, \u2018quietly.\u2019"
+        result = _sanitize_text(text)
+        assert result == text
+        # Verify round-trip
+        assert result.encode("utf-8").decode("utf-8") == result
+
+    def test_em_dash_en_dash_ellipsis_preserved(self) -> None:
+        """Em dash, en dash, and ellipsis survive sanitisation."""
+        text = "word\u2014another\u2013thing\u2026end"
+        result = _sanitize_text(text)
+        assert "\u2014" in result  # em dash
+        assert "\u2013" in result  # en dash
+        assert "\u2026" in result  # ellipsis
+
+    def test_nfc_normalisation(self) -> None:
+        """Decomposed Unicode (NFD) is composed to NFC."""
+        # e + combining acute accent → é (NFC)
+        decomposed = "caf\u0065\u0301"
+        result = _sanitize_text(decomposed)
+        assert "\u00e9" in result  # composed é
+
+    def test_c1_control_codes_mapped(self) -> None:
+        """Windows-1252 C1 codes (0x80-0x9F) are mapped to proper Unicode."""
+        # 0x93 = left double quote in Windows-1252
+        text = "said \x93hello\x94"
+        result = _sanitize_text(text)
+        assert "\u201c" in result  # proper left double quote
+        assert "\u201d" in result  # proper right double quote
+        assert "\x93" not in result
+        assert "\x94" not in result
+
+    def test_null_bytes_stripped(self) -> None:
+        """Null bytes are removed from text."""
+        text = "hello\x00world"
+        result = _sanitize_text(text)
+        assert result == "helloworld"
+        assert "\x00" not in result
+
+    def test_control_chars_stripped_whitespace_kept(self) -> None:
+        """C0 control chars are stripped but newlines and tabs preserved."""
+        text = "line1\nline2\ttab\x01bad\x02char"
+        result = _sanitize_text(text)
+        assert "\n" in result
+        assert "\t" in result
+        assert "\x01" not in result
+        assert "\x02" not in result
+
+    def test_empty_string(self) -> None:
+        """Empty string passes through unchanged."""
+        assert _sanitize_text("") == ""
+
+    def test_plain_ascii(self) -> None:
+        """Plain ASCII text passes through unchanged."""
+        text = "Hello, world! This is a test."
+        assert _sanitize_text(text) == text
+
+    def test_utf8_round_trip_clean(self) -> None:
+        """Sanitised text always round-trips through UTF-8."""
+        # Mix of problematic characters
+        text = "curly \u201cquotes\u201d, em\u2014dash, \x93cp1252\x94, null\x00byte"
+        result = _sanitize_text(text)
+        encoded = result.encode("utf-8")
+        decoded = encoded.decode("utf-8")
+        assert decoded == result
+
+    def test_replacement_char_not_introduced(self) -> None:
+        """Sanitisation does not introduce U+FFFD for valid input."""
+        text = "Completely normal text with \u201csmart quotes\u201d"
+        result = _sanitize_text(text)
+        assert "\ufffd" not in result
+
+
+class TestDecodeEpubContent:
+    """Unit tests for the _decode_epub_content helper."""
+
+    def test_valid_utf8(self) -> None:
+        """Valid UTF-8 bytes decode correctly."""
+        text = "Café — résumé"
+        content = text.encode("utf-8")
+        assert _decode_epub_content(content) == text
+
+    def test_utf8_smart_quotes(self) -> None:
+        """UTF-8 encoded smart quotes decode correctly."""
+        text = "\u201cHello\u201d \u2018world\u2019"
+        content = text.encode("utf-8")
+        result = _decode_epub_content(content)
+        assert result == text
+
+    def test_windows_1252_fallback(self) -> None:
+        """Windows-1252 bytes that aren't valid UTF-8 fall back to cp1252."""
+        # Windows-1252 smart quotes: 0x93 = ", 0x94 = "
+        content = b"She said \x93hello\x94"
+        result = _decode_epub_content(content)
+        assert "\u201c" in result  # proper left double quote
+        assert "\u201d" in result  # proper right double quote
+
+    def test_xml_declaration_preserved(self) -> None:
+        """XML declaration with encoding attribute survives decoding."""
+        content = b'<?xml version="1.0" encoding="utf-8"?>\n<html><body>text</body></html>'
+        result = _decode_epub_content(content)
+        assert "text" in result
+
+
+class TestEpubUtf8Integration:
+    """Integration tests for UTF-8 handling through the full EPUB parse pipeline."""
+
+    @staticmethod
+    def _create_epub_with_special_chars(path: object) -> None:
+        """Create an EPUB with smart quotes, em dashes, and other special chars."""
+        from pathlib import Path
+
+        book = epub.EpubBook()
+        book.set_identifier("utf8-test")
+        book.set_title("UTF-8 Test Book")
+        book.set_language("en")
+        book.add_author("Test Author")
+
+        ch = epub.EpubHtml(title="Chapter 1", file_name="ch1.xhtml", lang="en")
+        # Content with the exact characters that caused the bug:
+        # smart quotes, em dash, en dash, ellipsis
+        ch.content = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+            "<head><title>Chapter 1</title></head>\n"
+            "<body>\n"
+            "  <h1>Chapter 1: The \u201cBeginning\u201d</h1>\n"
+            "  <p>He said \u2018quietly\u2019 that faith, hope and poetry\u2014"
+            "these three\u2014are the pillars.</p>\n"
+            "  <p>Pages 10\u201315 discuss the topic\u2026 in depth.</p>\n"
+            "  <p>The caf\u00e9 had r\u00e9sum\u00e9s on the table.</p>\n"
+            "  <blockquote>\u201cTo be or not to be,\u201d he mused, "
+            "\u201cthat is the question.\u201d</blockquote>\n"
+            "</body>\n"
+            "</html>"
+        ).encode("utf-8")
+        book.add_item(ch)
+
+        book.toc = [epub.Link("ch1.xhtml", "Chapter 1", "ch1")]
+        book.spine = ["nav", ch]
+        book.add_item(epub.EpubNcx())
+        book.add_item(epub.EpubNav())
+
+        epub.write_epub(str(Path(str(path))), book)
+
+    @pytest.fixture
+    def utf8_epub(self, tmp_path: object) -> object:
+        from pathlib import Path
+
+        path = Path(str(tmp_path)) / "utf8_test.epub"
+        self._create_epub_with_special_chars(path)
+        return path
+
+    async def test_smart_quotes_in_parsed_text(
+        self, parser: EpubParser, utf8_epub: object
+    ) -> None:
+        """Smart quotes should be preserved in parsed document text."""
+        result = await parser.parse(utf8_epub)  # type: ignore[arg-type]
+        assert "\u201c" in result.raw_text  # left double quote
+        assert "\u201d" in result.raw_text  # right double quote
+        assert "\u2018" in result.raw_text  # left single quote
+        assert "\u2019" in result.raw_text  # right single quote
+
+    async def test_dashes_and_ellipsis_in_parsed_text(
+        self, parser: EpubParser, utf8_epub: object
+    ) -> None:
+        """Em dash, en dash, and ellipsis survive parsing."""
+        result = await parser.parse(utf8_epub)  # type: ignore[arg-type]
+        assert "\u2014" in result.raw_text  # em dash
+        assert "\u2013" in result.raw_text  # en dash
+        assert "\u2026" in result.raw_text  # ellipsis
+
+    async def test_accented_chars_in_parsed_text(
+        self, parser: EpubParser, utf8_epub: object
+    ) -> None:
+        """Accented characters (e.g. é) survive parsing."""
+        result = await parser.parse(utf8_epub)  # type: ignore[arg-type]
+        assert "caf\u00e9" in result.raw_text
+        assert "r\u00e9sum\u00e9" in result.raw_text
+
+    async def test_all_nodes_valid_utf8(
+        self, parser: EpubParser, utf8_epub: object
+    ) -> None:
+        """Every node in the parsed tree must have valid UTF-8 text."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(utf8_epub)  # type: ignore[arg-type]
+
+        def check_node(node: DocumentNode) -> None:
+            if node.text:
+                # Must round-trip cleanly
+                encoded = node.text.encode("utf-8")
+                decoded = encoded.decode("utf-8")
+                assert decoded == node.text, f"UTF-8 round-trip failed for: {node.text[:50]!r}"
+                # Must not contain replacement characters
+                assert "\ufffd" not in node.text, (
+                    f"Replacement char in: {node.text[:50]!r}"
+                )
+            for child in node.children:
+                check_node(child)
+
+        check_node(result.tree)
+
+    async def test_raw_text_valid_utf8(
+        self, parser: EpubParser, utf8_epub: object
+    ) -> None:
+        """The raw_text output must be clean UTF-8."""
+        result = await parser.parse(utf8_epub)  # type: ignore[arg-type]
+        encoded = result.raw_text.encode("utf-8")
+        decoded = encoded.decode("utf-8")
+        assert decoded == result.raw_text
+        assert "\ufffd" not in result.raw_text
+
+
+class TestEpubRealFile:
+    """Integration test with the real 'Faith, Hope and Poetry' EPUB.
+
+    Skipped if the file is not available on the machine.
+    """
+
+    _EPUB_PATH = "/home/marty/repos/booklore/bookdrop/Faith, Hope and Poetry - Malcolm Guite.epub"
+
+    @pytest.fixture
+    def real_epub(self) -> object:
+        from pathlib import Path
+
+        path = Path(self._EPUB_PATH)
+        if not path.exists():
+            pytest.skip(f"Real EPUB not available: {self._EPUB_PATH}")
+        return path
+
+    async def test_real_epub_all_nodes_valid_utf8(
+        self, parser: EpubParser, real_epub: object
+    ) -> None:
+        """Every node from the real EPUB must have valid UTF-8 text."""
+        from author_library.parsing.models import DocumentNode
+
+        result = await parser.parse(real_epub)  # type: ignore[arg-type]
+
+        corrupted: list[str] = []
+
+        def check_node(node: DocumentNode) -> None:
+            if node.text:
+                encoded = node.text.encode("utf-8")
+                decoded = encoded.decode("utf-8")
+                if decoded != node.text:
+                    corrupted.append(f"round-trip: {node.text[:80]!r}")
+                if "\ufffd" in node.text:
+                    corrupted.append(f"replacement: {node.text[:80]!r}")
+
+            for child in node.children:
+                check_node(child)
+
+        check_node(result.tree)
+        assert corrupted == [], f"Found {len(corrupted)} corrupted nodes: {corrupted[:5]}"
+
+    async def test_real_epub_smart_quotes_present(
+        self, parser: EpubParser, real_epub: object
+    ) -> None:
+        """The real EPUB should have smart quotes that survive parsing."""
+        result = await parser.parse(real_epub)  # type: ignore[arg-type]
+        # This EPUB has extensive use of smart quotes
+        assert "\u2018" in result.raw_text or "\u2019" in result.raw_text, (
+            "Expected smart single quotes in Faith, Hope and Poetry"
+        )
+
+    async def test_real_epub_no_bare_0xe2_in_chunks(
+        self, parser: EpubParser, real_epub: object
+    ) -> None:
+        """No chunk text should contain bare/truncated 0xe2 bytes."""
+        from author_library.chunking.scholarly import ScholarlyProseStrategy
+
+        result = await parser.parse(real_epub)  # type: ignore[arg-type]
+        strategy = ScholarlyProseStrategy()
+        chunks = strategy.chunk(result, work_id="test-utf8", source_class="primary")
+
+        bad_chunks: list[int] = []
+        for i, chunk in enumerate(chunks):
+            encoded = chunk.text.encode("utf-8")
+            # Check for truncated multi-byte: 0xe2 as last byte
+            if encoded and encoded[-1] == 0xE2:
+                bad_chunks.append(i)
+            # Check for replacement characters
+            if "\ufffd" in chunk.text:
+                bad_chunks.append(i)
+
+        assert bad_chunks == [], (
+            f"{len(bad_chunks)} chunks with encoding issues out of {len(chunks)}"
+        )

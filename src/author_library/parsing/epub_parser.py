@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 import warnings as _warnings_mod
 from pathlib import Path
 
@@ -25,6 +26,104 @@ from author_library.parsing.models import (
 )
 
 log = structlog.get_logger(__name__)
+
+# ------------------------------------------------------------------
+# Text sanitisation helpers — defend against encoding corruption
+# ------------------------------------------------------------------
+
+# Characters in the Windows-1252 0x80–0x9F range that have Unicode equivalents.
+# These bytes are technically invalid in UTF-8 (they're C1 control codes in
+# ISO-8859-1) but Windows-1252 maps them to printable characters.  Publisher
+# EPUBs sometimes embed these bytes despite declaring UTF-8 encoding.
+_CP1252_TO_UNICODE: dict[int, str] = {
+    0x80: "\u20AC",  # €
+    0x82: "\u201A",  # ‚
+    0x83: "\u0192",  # ƒ
+    0x84: "\u201E",  # „
+    0x85: "\u2026",  # …
+    0x86: "\u2020",  # †
+    0x87: "\u2021",  # ‡
+    0x88: "\u02C6",  # ˆ
+    0x89: "\u2030",  # ‰
+    0x8A: "\u0160",  # Š
+    0x8B: "\u2039",  # ‹
+    0x8C: "\u0152",  # Œ
+    0x8E: "\u017D",  # Ž
+    0x91: "\u2018",  # '
+    0x92: "\u2019",  # '
+    0x93: "\u201C",  # "
+    0x94: "\u201D",  # "
+    0x95: "\u2022",  # •
+    0x96: "\u2013",  # –
+    0x97: "\u2014",  # —
+    0x98: "\u02DC",  # ˜
+    0x99: "\u2122",  # ™
+    0x9A: "\u0161",  # š
+    0x9B: "\u203A",  # ›
+    0x9C: "\u0153",  # œ
+    0x9E: "\u017E",  # ž
+    0x9F: "\u0178",  # Ÿ
+}
+
+
+def _decode_epub_content(content: bytes) -> str:
+    """Decode EPUB HTML content bytes, handling common encoding problems.
+
+    Strategy:
+    1. Try strict UTF-8 (the EPUB spec requires UTF-8 or UTF-16).
+    2. If that fails, try Windows-1252 — many publisher EPUBs declare UTF-8
+       but actually contain Windows-1252 smart quotes and dashes.
+    3. Last resort: UTF-8 with replacement characters.
+    """
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        log.warning("epub_content_not_utf8_trying_cp1252")
+        try:
+            return content.decode("windows-1252")
+        except UnicodeDecodeError:
+            log.warning("epub_content_decode_fallback_replace")
+            return content.decode("utf-8", errors="replace")
+
+
+def _sanitize_text(text: str) -> str:
+    """Normalise and clean extracted text for safe UTF-8 storage.
+
+    Applies:
+    - Unicode NFC normalisation (compose decomposed sequences)
+    - Windows-1252 C1 control-code fixup (0x80–0x9F → proper Unicode)
+    - Strip null bytes and remaining C0/C1 control characters (keep \\n, \\r, \\t)
+    - UTF-8 round-trip verification
+    """
+    if not text:
+        return text
+
+    # 1. NFC normalisation — ensures composed forms (é not e+combining accent)
+    text = unicodedata.normalize("NFC", text)
+
+    # 2. Fix C1 control codes that are actually Windows-1252 characters.
+    #    These slip through when content is labelled ISO-8859-1 but actually
+    #    uses the Windows-1252 superset, or when lxml preserves raw C1 bytes.
+    chars: list[str] = []
+    for ch in text:
+        cp = ord(ch)
+        if cp in _CP1252_TO_UNICODE:
+            chars.append(_CP1252_TO_UNICODE[cp])
+        elif cp < 0x20 and ch not in ("\n", "\r", "\t"):
+            continue  # strip C0 control chars except whitespace
+        elif cp == 0x7F:
+            continue  # strip DEL
+        elif 0x80 <= cp <= 0x9F:
+            continue  # strip unmapped C1 controls
+        else:
+            chars.append(ch)
+    text = "".join(chars)
+
+    # 3. Verify clean UTF-8 round-trip (belt-and-suspenders)
+    text = text.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
+    return text
+
 
 # Patterns for detecting structural elements
 _CHAPTER_HEADING_RE = re.compile(
@@ -141,10 +240,15 @@ class EpubParser(DocumentParser):
                 continue
             seen_content_hashes.add(content_hash)
 
+            # Decode bytes → str with encoding fallback before BS4 parsing.
+            # This ensures we control the encoding rather than relying on
+            # lxml's auto-detection, which can silently drop characters.
+            decoded_content = _decode_epub_content(content)
+
             try:
                 with _warnings_mod.catch_warnings():
                     _warnings_mod.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-                    soup = BeautifulSoup(content, "lxml")
+                    soup = BeautifulSoup(decoded_content, "lxml")
             except Exception as exc:
                 warnings.append(f"Failed to parse HTML for {item.get_name()}: {exc}")
                 continue
@@ -301,9 +405,10 @@ class EpubParser(DocumentParser):
             if not content:
                 continue
             try:
+                decoded_content = _decode_epub_content(content)
                 with _warnings_mod.catch_warnings():
                     _warnings_mod.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-                    soup = BeautifulSoup(content, "lxml")
+                    soup = BeautifulSoup(decoded_content, "lxml")
             except Exception:
                 continue
 
@@ -418,7 +523,7 @@ class EpubParser(DocumentParser):
 
         for element in effective_body.children:
             if not isinstance(element, Tag):
-                text = str(element).strip()
+                text = _sanitize_text(str(element).strip())
                 if text:
                     raw_text_parts.append(text)
                     target = current_section if current_section else chapter
@@ -518,7 +623,7 @@ class EpubParser(DocumentParser):
         tag = element.name
 
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if text:
                 raw_text_parts.append(text)
                 return DocumentNode(
@@ -529,14 +634,14 @@ class EpubParser(DocumentParser):
             return None
 
         if tag == "p":
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if not text:
                 return None
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
 
         if tag == "blockquote":
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if text:
                 raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.BLOCK_QUOTE, text=text)
@@ -544,7 +649,7 @@ class EpubParser(DocumentParser):
         if tag in ("ul", "ol"):
             list_node = DocumentNode(node_type=NodeType.LIST)
             for li in element.find_all("li", recursive=False):
-                li_text = li.get_text(strip=True)
+                li_text = _sanitize_text(li.get_text(strip=True))
                 if li_text:
                     raw_text_parts.append(li_text)
                     list_node.children.append(
@@ -553,7 +658,7 @@ class EpubParser(DocumentParser):
             return list_node if list_node.children else None
 
         if tag == "table":
-            text = element.get_text(separator=" | ", strip=True)
+            text = _sanitize_text(element.get_text(separator=" | ", strip=True))
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.TABLE, text=text)
 
@@ -574,12 +679,12 @@ class EpubParser(DocumentParser):
             else:
                 classes = str(class_attr or "")
             if "footnote" in str(role).lower() or "footnote" in classes.lower():
-                text = element.get_text(strip=True)
+                text = _sanitize_text(element.get_text(strip=True))
                 if text:
                     raw_text_parts.append(text)
                 return DocumentNode(node_type=NodeType.FOOTNOTE, text=text if text else "")
             if "endnote" in str(role).lower() or "endnote" in classes.lower():
-                text = element.get_text(strip=True)
+                text = _sanitize_text(element.get_text(strip=True))
                 if text:
                     raw_text_parts.append(text)
                 return DocumentNode(node_type=NodeType.ENDNOTE, text=text if text else "")
@@ -609,7 +714,7 @@ class EpubParser(DocumentParser):
                         if child_node is not None:
                             container.children.append(child_node)
                     else:
-                        text = str(child).strip()
+                        text = _sanitize_text(str(child).strip())
                         if text:
                             raw_text_parts.append(text)
                             container.children.append(
@@ -618,7 +723,7 @@ class EpubParser(DocumentParser):
                 return container if container.children else None
 
         # Fallback: extract text from any other element
-        text = element.get_text(strip=True)
+        text = _sanitize_text(element.get_text(strip=True))
         if text:
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
@@ -636,7 +741,7 @@ class EpubParser(DocumentParser):
         for part in stanza_parts:
             stanza_soup = BeautifulSoup(part, "lxml")
             text = stanza_soup.get_text()
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            lines = [_sanitize_text(line.strip()) for line in text.split("\n") if line.strip()]
             if not lines:
                 continue
             stanza = DocumentNode(node_type=NodeType.STANZA)
