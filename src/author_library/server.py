@@ -798,8 +798,8 @@ TOOLS: list[Tool] = [
 # Utility handlers (no database needed)
 # ---------------------------------------------------------------------------
 
-_CORPUS_ROOT = Path("/home/marty/repos/parlour-car/test-corpus/")
-_ALLOWED_EXTENSIONS = {".epub", ".pdf", ".txt", ".html", ".docx"}
+_CORPUS_ROOT = Path("/home/marty/repos/booklore/bookdrop/")
+_ALLOWED_EXTENSIONS = {".epub", ".pdf", ".txt", ".html", ".docx", ".mobi", ".azw3"}
 
 
 def _handle_list_books(arguments: dict[str, Any]) -> str:
