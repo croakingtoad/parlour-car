@@ -54,14 +54,12 @@ def event_loop():
 
 @pytest.fixture(scope="session")
 def integration_settings() -> Settings:
-    """Settings configured for integration tests."""
-    return Settings(
-        database=DatabaseSettings(
-            postgres_url="postgresql://author_library:author_library@localhost:5432/author_library",
-            neo4j_url="bolt://localhost:7687",
-            neo4j_user="neo4j",
-        ),
-    )
+    """Settings configured for integration tests.
+
+    DB_POSTGRES_URL is forced to the test database by tests/conftest.py
+    so these settings NEVER point at the production database.
+    """
+    return Settings()
 
 
 @pytest_asyncio.fixture
