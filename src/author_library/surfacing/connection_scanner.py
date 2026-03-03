@@ -194,6 +194,24 @@ class ConnectionScanner:
                     continue
                 result.connections.extend(batch_result)
 
+        # Discover cross-work connections via shared entity graph nodes
+        try:
+            entity_connections = await self._find_entity_overlap_connections(
+                work_id=work_id,
+                existing_links=existing_links,
+                limit=100,
+            )
+            result.connections.extend(entity_connections)
+            log.info(
+                "connection_scan_entity_overlap",
+                work_id=work_id,
+                found=len(entity_connections),
+            )
+        except Exception as exc:
+            error_msg = f"Entity overlap scan failed for {work_id}: {exc}"
+            log.warning("connection_scan_entity_overlap_failed", error=error_msg)
+            result.errors.append(error_msg)
+
         # Group by confidence and target work
         result.total_found = len(result.connections)
         result.by_confidence = self._group_by_confidence(result.connections)
@@ -255,7 +273,8 @@ class ConnectionScanner:
                 continue
 
             # Classify confidence
-            level = classify_confidence(item)
+            scored = classify_confidence(item)
+            level = scored.confidence_level
             if level == ConfidenceLevel.LOW and item.relevance_score < confidence_threshold:
                 continue
 
@@ -298,6 +317,140 @@ class ConnectionScanner:
             )
         return links
 
+    async def _find_entity_overlap_connections(
+        self,
+        *,
+        work_id: str,
+        existing_links: set[tuple[str, str]],
+        limit: int = 100,
+    ) -> list[StagedConnection]:
+        """Discover cross-work connections via shared entity graph nodes.
+
+        Queries Neo4j for chunk pairs where a chunk from the new work and a
+        chunk from a different work both connect to the same entity nodes
+        (themes, persons, or concepts). Pairs with 2+ shared entities are
+        returned as entity-overlap connections.
+
+        Args:
+            work_id: The newly ingested work to find connections for.
+            existing_links: Set of (source, target) chunk ID pairs to skip.
+            limit: Maximum number of connections to return.
+
+        Returns:
+            List of StagedConnections from entity overlap discovery.
+        """
+        if not (hasattr(self._storage, "neo4j") and self._storage.neo4j):
+            log.debug("entity_overlap_skip_no_neo4j")
+            return []
+
+        # Query for chunk pairs from different works sharing entity nodes
+        query = """
+        MATCH (c1:Chunk {work_id: $new_work_id})
+              -[:EXPLORES_THEME|REFERENCES_PERSON|CONCEPT_USED_IN]->(entity)
+              <-[:EXPLORES_THEME|REFERENCES_PERSON|CONCEPT_USED_IN]-(c2:Chunk)
+        WHERE c2.work_id <> $new_work_id
+        WITH c1, c2,
+             collect(DISTINCT entity.name) AS shared_entities,
+             collect(DISTINCT labels(entity)[0]) AS entity_types,
+             count(DISTINCT entity) AS overlap_count
+        WHERE overlap_count >= 2
+        RETURN c1.chunk_id AS source_chunk_id,
+               c2.chunk_id AS target_chunk_id,
+               c1.work_id AS source_work,
+               c2.work_id AS target_work,
+               c1.text_preview AS source_preview,
+               c2.text_preview AS target_preview,
+               shared_entities,
+               entity_types,
+               overlap_count
+        ORDER BY overlap_count DESC
+        LIMIT $limit
+        """
+
+        try:
+            records = await self._storage.neo4j.execute_read(
+                query,
+                {"new_work_id": work_id, "limit": limit},
+            )
+        except Exception as exc:
+            log.warning(
+                "entity_overlap_query_failed",
+                work_id=work_id,
+                error=str(exc),
+            )
+            return []
+
+        if not records:
+            return []
+
+        staged: list[StagedConnection] = []
+        for record in records:
+            source_id = record["source_chunk_id"]
+            target_id = record["target_chunk_id"]
+
+            # Skip already-linked pairs
+            pair = (source_id, target_id)
+            reverse_pair = (target_id, source_id)
+            if pair in existing_links or reverse_pair in existing_links:
+                continue
+
+            # Also skip duplicates within this batch (same pair found
+            # via different entity combinations)
+            if any(
+                c.source_chunk_id == source_id and c.target_chunk_id == target_id
+                for c in staged
+            ):
+                continue
+
+            overlap_count = record["overlap_count"]
+            shared_entities = record["shared_entities"]
+
+            # Map overlap count to confidence level
+            if overlap_count >= 5:
+                level = ConfidenceLevel.HIGH
+                # Map to a relevance_score for consistent scoring
+                relevance_score = 0.95
+            elif overlap_count >= 3:
+                level = ConfidenceLevel.MEDIUM
+                relevance_score = 0.75
+            else:
+                level = ConfidenceLevel.LOW
+                relevance_score = 0.5
+
+            label = _CONFIDENCE_LABELS.get(level, "Related content")
+
+            # Build explanation listing the shared entities
+            entity_list = ", ".join(shared_entities[:5])
+            if len(shared_entities) > 5:
+                entity_list += f" (and {len(shared_entities) - 5} more)"
+            explanation = (
+                f"Both passages share {overlap_count} entities: {entity_list}."
+            )
+
+            staged.append(
+                StagedConnection(
+                    source_chunk_id=source_id,
+                    target_chunk_id=target_id,
+                    source_work_id=work_id,
+                    target_work_id=record["target_work"],
+                    connection_type=ConnectionType.ENTITY_OVERLAP.value,
+                    confidence_level=level.value,
+                    confidence_label=label,
+                    source_excerpt=record.get("source_preview", "") or "",
+                    target_excerpt=record.get("target_preview", "") or "",
+                    explanation=explanation,
+                )
+            )
+
+        log.info(
+            "entity_overlap_connections_found",
+            work_id=work_id,
+            total_candidates=len(records),
+            after_dedup=len(staged),
+        )
+
+        return staged
+
     @staticmethod
     def _build_explanation(item: RelatedItem, level: ConfidenceLevel) -> str:
         """Build human-readable explanation of WHY a connection exists."""
@@ -318,6 +471,12 @@ class ConnectionScanner:
             return "Semantic similarity suggests these passages address related ideas."
         elif conn_type == ConnectionType.PERSONAL_REFLECTION:
             return "Your personal reflection engages with this content."
+        elif conn_type == ConnectionType.ENTITY_OVERLAP:
+            entities = item.metadata.get("shared_entities", []) if item.metadata else []
+            if entities:
+                entity_str = ", ".join(entities[:5])
+                return f"Both passages engage with shared entities: {entity_str}."
+            return "Both passages share multiple entities in the knowledge graph."
         else:
             return "A potential connection was detected between these passages."
 
