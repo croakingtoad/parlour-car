@@ -6,6 +6,7 @@ DocumentNode tree from the HTML spine items.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import warnings as _warnings_mod
 from pathlib import Path
@@ -21,9 +22,36 @@ from author_library.parsing.models import (
     DocumentNode,
     NodeType,
     ParsedDocument,
+    SectionType,
 )
+from author_library.text_utils import CP1252_TO_UNICODE as _CP1252_TO_UNICODE
+from author_library.text_utils import sanitize_text as _sanitize_text
 
 log = structlog.get_logger(__name__)
+
+
+def _decode_epub_content(content: bytes) -> str:
+    """Decode EPUB HTML content bytes, handling common encoding problems.
+
+    Strategy:
+    1. Try strict UTF-8 (the EPUB spec requires UTF-8 or UTF-16).
+    2. If that fails, try Windows-1252 — many publisher EPUBs declare UTF-8
+       but actually contain Windows-1252 smart quotes and dashes.
+    3. Last resort: UTF-8 with replacement characters.
+    """
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        log.warning("epub_content_not_utf8_trying_cp1252")
+        try:
+            return content.decode("windows-1252")
+        except UnicodeDecodeError:
+            log.warning("epub_content_decode_fallback_replace")
+            return content.decode("utf-8", errors="replace")
+
+
+# _sanitize_text is now imported from author_library.text_utils
+
 
 # Patterns for detecting structural elements
 _CHAPTER_HEADING_RE = re.compile(
@@ -32,6 +60,174 @@ _CHAPTER_HEADING_RE = re.compile(
     re.IGNORECASE,
 )
 _POEM_LINE_BREAK_THRESHOLD = 3  # minimum consecutive <br> to consider verse
+
+# ------------------------------------------------------------------
+# Section type detection patterns
+# ------------------------------------------------------------------
+
+# Heading text patterns that identify section types.
+# Each tuple: (compiled_regex, SectionType).  Order matters — first match wins.
+_SECTION_HEADING_PATTERNS: list[tuple[re.Pattern[str], SectionType]] = [
+    # Table of Contents
+    (re.compile(
+        r"^(table\s+of\s+)?contents$",
+        re.IGNORECASE,
+    ), SectionType.TABLE_OF_CONTENTS),
+    # Bibliography / References
+    (re.compile(
+        r"^(bibliography|works?\s+cited|references|further\s+reading|"
+        r"select\s+bibliography|selected\s+bibliography|"
+        r"notes\s+on\s+sources|sources|endnotes\s+and\s+bibliography)$",
+        re.IGNORECASE,
+    ), SectionType.BIBLIOGRAPHY),
+    # Index
+    (re.compile(
+        r"^(index|general\s+index|subject\s+index|name\s+index|"
+        r"index\s+of\s+names|index\s+of\s+subjects|"
+        r"index\s+of\s+first\s+lines|index\s+of\s+authors|"
+        r"combined\s+index|scripture\s+index|biblical?\s+index)$",
+        re.IGNORECASE,
+    ), SectionType.INDEX),
+    # Front matter
+    (re.compile(
+        r"^(copyright(\s+page)?|"
+        r"first\s+published|all\s+rights\s+reserved|"
+        r"dedication|"
+        r"acknowledgements?|"
+        r"epigraph|"
+        r"about\s+the\s+author|about\s+the\s+editor|"
+        r"also\s+by|other\s+books?\s+by|"
+        r"title\s+page|half\s+title)$",
+        re.IGNORECASE,
+    ), SectionType.FRONT_MATTER),
+    # Preface (treat as content) — allow optional subtitle after colon
+    (re.compile(
+        r"^(preface|foreword|introduction|author'?s?\s+note|"
+        r"editor'?s?\s+note|prologue)(:\s+.*)?$",
+        re.IGNORECASE,
+    ), SectionType.PREFACE),
+    # Back matter — allow optional subtitle after colon
+    (re.compile(
+        r"^(appendix(\s+[a-z0-9]+)?|endnotes|notes|"
+        r"glossary|abbreviations|list\s+of\s+(illustrations|figures|tables)|"
+        r"epilogue|afterword|postscript)(:\s+.*)?$",
+        re.IGNORECASE,
+    ), SectionType.BACK_MATTER),
+]
+
+# Content patterns for body-level detection (when headings are absent).
+# These match within the full text of a spine item.
+_INDEX_ENTRY_RE = re.compile(
+    r"^[A-Z][a-z]+(?:\s[A-Za-z]+)*\s*,?\s*\d+(?:[,\-\u2013]\s*\d+)*$",
+    re.MULTILINE,
+)
+_BIB_ENTRY_RE = re.compile(
+    r"^[A-Z][a-z]+,\s+[A-Z].*\(\d{4}\)|^[A-Z][a-z]+,\s+[A-Z].*\d{4}\.",
+    re.MULTILINE,
+)
+
+
+def _detect_section_type_from_heading(heading_text: str) -> SectionType | None:
+    """Match heading text against known section patterns.
+
+    Returns the detected SectionType or None if no pattern matches.
+    """
+    cleaned = heading_text.strip()
+    for pattern, section_type in _SECTION_HEADING_PATTERNS:
+        if pattern.match(cleaned):
+            return section_type
+    return None
+
+
+def _detect_section_type_from_content(text: str) -> SectionType | None:
+    """Detect section type from body content when headings are absent.
+
+    Uses content heuristics: index-like entries (term + page numbers),
+    bibliography-like entries (Author, Title (Year)).
+    """
+    lines = [line.strip() for line in text.strip().split("\n") if line.strip()]
+    if not lines:
+        return None
+
+    # Count index-like lines (term followed by page numbers)
+    index_matches = sum(1 for line in lines if _INDEX_ENTRY_RE.match(line))
+    if len(lines) >= 5 and index_matches / len(lines) > 0.4:
+        return SectionType.INDEX
+
+    # Count bibliography-like lines
+    bib_matches = sum(1 for line in lines if _BIB_ENTRY_RE.match(line))
+    if len(lines) >= 3 and bib_matches / len(lines) > 0.3:
+        return SectionType.BIBLIOGRAPHY
+
+    return None
+
+
+def _detect_section_type_from_position(
+    spine_index: int,
+    total_spine_items: int,
+) -> SectionType | None:
+    """Infer section type from position in the EPUB spine.
+
+    The first 2 items are often front matter (title page, copyright).
+    This is a weak heuristic used only when heading/content detection fails.
+    """
+    # Only tag the very first item (title page / half title) as front matter.
+    # Being too aggressive here would misclassify actual chapters.
+    if total_spine_items >= 5 and spine_index == 0:
+        return SectionType.FRONT_MATTER
+    return None
+
+
+def _extract_title_from_alt(alt_text: str) -> str | None:
+    """Parse a structured image alt-text string for the book title.
+
+    Publisher title-page images often encode metadata in alt text like::
+
+        Book title, Fred Rogers: The Last Interview, subtitle, and Other
+        Conversations, author, Fred Rogers, imprint, Melville House
+
+    Returns the combined "main title: subtitle" or ``None``.
+    """
+    # Split on comma-separated label/value pairs
+    parts = [p.strip() for p in alt_text.split(",")]
+
+    title_value: str | None = None
+    subtitle_value: str | None = None
+    capture_title = False
+    capture_subtitle = False
+    title_parts: list[str] = []
+    subtitle_parts: list[str] = []
+
+    for part in parts:
+        lower = part.lower()
+        if lower in ("book title", "title"):
+            capture_title = True
+            capture_subtitle = False
+            continue
+        if lower == "subtitle":
+            capture_subtitle = True
+            capture_title = False
+            continue
+        if lower in ("author", "imprint", "publisher", "series"):
+            capture_title = False
+            capture_subtitle = False
+            continue
+        if capture_title:
+            title_parts.append(part)
+        elif capture_subtitle:
+            subtitle_parts.append(part)
+
+    if title_parts:
+        title_value = ", ".join(title_parts).strip()
+    if subtitle_parts:
+        subtitle_value = ", ".join(subtitle_parts).strip()
+
+    if title_value and subtitle_value:
+        # If subtitle starts with a conjunction, join with space not colon
+        if subtitle_value.lower().startswith(("and ", "or ", "& ")):
+            return f"{title_value} {subtitle_value}"
+        return f"{title_value}: {subtitle_value}"
+    return title_value
 
 
 class EpubParser(DocumentParser):
@@ -67,19 +263,37 @@ class EpubParser(DocumentParser):
         root = DocumentNode(node_type=NodeType.BOOK, metadata={"title": metadata.title or ""})
         raw_text_parts: list[str] = []
 
-        spine_items = list(book.get_items_of_type(ITEM_DOCUMENT))
+        spine_items = self._spine_items(book)
         if not spine_items:
             warnings.append("No document items found in EPUB spine")
 
-        for item in spine_items:
+        seen_content_hashes: set[str] = set()
+        total_spine = len(spine_items)
+        for spine_index, item in enumerate(spine_items):
             content = item.get_content()
             if not content:
                 continue
 
+            # Deduplicate: some EPUBs have duplicate spine entries or
+            # manifest items that reference the same content.
+            content_hash = hashlib.sha256(content).hexdigest()
+            if content_hash in seen_content_hashes:
+                log.debug(
+                    "epub_skipping_duplicate_spine_item",
+                    item=item.get_name(),
+                )
+                continue
+            seen_content_hashes.add(content_hash)
+
+            # Decode bytes → str with encoding fallback before BS4 parsing.
+            # This ensures we control the encoding rather than relying on
+            # lxml's auto-detection, which can silently drop characters.
+            decoded_content = _decode_epub_content(content)
+
             try:
                 with _warnings_mod.catch_warnings():
                     _warnings_mod.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-                    soup = BeautifulSoup(content, "lxml")
+                    soup = BeautifulSoup(decoded_content, "lxml")
             except Exception as exc:
                 warnings.append(f"Failed to parse HTML for {item.get_name()}: {exc}")
                 continue
@@ -90,6 +304,11 @@ class EpubParser(DocumentParser):
 
             result_node = self._parse_body(body, raw_text_parts, warnings)
             if result_node is not None:
+                # Classify the section type of each top-level node
+                self._classify_section_type(
+                    result_node, spine_index, total_spine, body
+                )
+
                 if (
                     result_node.node_type == NodeType.BOOK
                     and result_node.metadata.get("synthetic")
@@ -119,7 +338,7 @@ class EpubParser(DocumentParser):
     def _extract_metadata(
         self, book: epub.EpubBook, warnings: list[str]
     ) -> DocumentMetadata:
-        title = book.get_metadata("DC", "title")
+        title_entries = book.get_metadata("DC", "title")
         author = book.get_metadata("DC", "creator")
         publisher = book.get_metadata("DC", "publisher")
         date = book.get_metadata("DC", "date")
@@ -134,14 +353,140 @@ class EpubParser(DocumentParser):
                 isbn = str(val)
                 break
 
+        author_name = author[0][0] if author else None
+        extracted_title = self._resolve_title(title_entries, author_name, book)
+
+        if extracted_title and author_name:
+            # Guard: if the title (or its main component before any subtitle
+            # separator) matches the author name, the EPUB metadata is almost
+            # certainly wrong — fall back to content-based extraction.
+            title_main = extracted_title.split(":")[0].strip()
+            title_lower = title_main.lower()
+            author_lower = author_name.lower().strip()
+            if title_lower == author_lower or title_lower in author_lower:
+                fallback = self._title_from_content(book)
+                if fallback:
+                    log.info(
+                        "epub_title_fallback",
+                        original=extracted_title,
+                        fallback=fallback,
+                    )
+                    extracted_title = fallback
+                else:
+                    warnings.append(
+                        f"Extracted title '{extracted_title}' matches author name; "
+                        "no alternative found"
+                    )
+
         return DocumentMetadata(
-            title=title[0][0] if title else None,
-            author=author[0][0] if author else None,
+            title=extracted_title,
+            author=author_name,
             publisher=publisher[0][0] if publisher else None,
             publication_date=date[0][0] if date else None,
             isbn=isbn,
             language=language[0][0] if language else "en",
         )
+
+    @staticmethod
+    def _resolve_title(
+        title_entries: list[tuple[str, dict[str, str]]],
+        author_name: str | None,
+        book: epub.EpubBook,
+    ) -> str | None:
+        """Combine dc:title entries (main + subtitle) into a single title string.
+
+        EPUB 3 allows multiple ``dc:title`` elements distinguished by
+        ``title-type`` refines (main, subtitle, etc.).  Many publisher
+        EPUBs split the title this way — e.g. "Fred Rogers" (main) +
+        "and Other Conversations" (subtitle).
+        """
+        if not title_entries:
+            return None
+
+        if len(title_entries) == 1:
+            return title_entries[0][0]
+
+        # Multiple title entries — check OPF refines for title-type hints
+        opf_ns = "http://www.idpf.org/2007/opf"
+        meta_entries = book.metadata.get(opf_ns, {}).get("meta", [])
+
+        title_types: dict[str, str] = {}  # id → title-type
+        for value, attrs in meta_entries:
+            prop = attrs.get("property", "")
+            refines = attrs.get("refines", "")
+            if prop == "title-type" and refines.startswith("#") and value:
+                title_types[refines[1:]] = str(value)
+
+        main_parts: list[str] = []
+        subtitle_parts: list[str] = []
+
+        for entry_val, entry_attrs in title_entries:
+            entry_id = entry_attrs.get("id", "")
+            ttype = title_types.get(entry_id, "")
+            if ttype == "subtitle":
+                subtitle_parts.append(entry_val)
+            else:
+                main_parts.append(entry_val)
+
+        combined = ": ".join(main_parts) if main_parts else ""
+        if subtitle_parts:
+            sub = " ".join(subtitle_parts)
+            # Avoid doubling a colon if the main title already ends with one
+            if combined and not combined.rstrip().endswith(":"):
+                combined += ": " + sub
+            elif combined:
+                combined += " " + sub
+            else:
+                combined = sub
+
+        return combined or title_entries[0][0]
+
+    def _title_from_content(self, book: epub.EpubBook) -> str | None:
+        """Try to extract the book title from spine content.
+
+        Looks at the first few spine items for image alt text (title-page
+        images) or the copyright page for a full-title line, or the first
+        ``<h1>`` heading in the content.
+        """
+        spine_items = self._spine_items(book)
+
+        for item in spine_items[:5]:
+            content = item.get_content()
+            if not content:
+                continue
+            try:
+                decoded_content = _decode_epub_content(content)
+                with _warnings_mod.catch_warnings():
+                    _warnings_mod.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+                    soup = BeautifulSoup(decoded_content, "lxml")
+            except Exception:
+                continue
+
+            # Strategy 1: title-page image alt text (common in publisher EPUBs)
+            for img in soup.find_all("img"):
+                alt = str(img.get("alt", ""))
+                if "book title" in alt.lower() or "title" in alt.lower():
+                    # Parse structured alt text like "Book title, Fred Rogers:
+                    # The Last Interview, subtitle, and Other Conversations, ..."
+                    title = _extract_title_from_alt(alt)
+                    if title:
+                        return title
+
+            # Strategy 2: copyright page often has the full title
+            body = soup.find("body")
+            if body:
+                first_p = body.find("p")
+                if first_p:
+                    first_text = first_p.get_text(strip=True)
+                    # Copyright pages often start with the full title
+                    if ":" in first_text and len(first_text) < 200:
+                        # Trim at "Copyright" if present
+                        if "Copyright" in first_text:
+                            first_text = first_text[: first_text.index("Copyright")].strip()
+                        if first_text:
+                            return first_text
+
+        return None
 
     def _extract_toc(self, book: epub.EpubBook) -> list[str]:
         toc = book.toc
@@ -160,6 +505,141 @@ class EpubParser(DocumentParser):
                     self._walk_toc(children, titles)
             elif hasattr(item, "title"):
                 titles.append(str(item.title))
+
+    @staticmethod
+    def _spine_items(book: epub.EpubBook) -> list[epub.EpubItem]:
+        """Return document items in spine reading order, excluding nav docs.
+
+        ``book.get_items_of_type(ITEM_DOCUMENT)`` returns *all* manifest
+        items of type ITEM_DOCUMENT regardless of whether they are in the
+        spine.  That set often includes the EPUB navigation document
+        (nav.xhtml) which duplicates the table of contents and should not
+        be chunked as prose.
+
+        This method resolves the spine to actual item objects and skips
+        navigation items (both EPUB 3 ``EpubNav`` and EPUB 2 NCX).  If
+        the spine is empty or cannot be resolved, falls back to manifest
+        items (excluding navigation) for robustness.
+        """
+        items: list[epub.EpubItem] = []
+        seen_ids: set[str] = set()
+
+        for spine_id, _ in book.spine:
+            if spine_id in seen_ids:
+                continue
+            seen_ids.add(spine_id)
+            item = book.get_item_with_id(spine_id)
+            if item is None:
+                continue
+            # Skip navigation documents: EpubNav (EPUB3) or non-chapter items
+            if isinstance(item, epub.EpubNav):
+                continue
+            items.append(item)
+
+        if items:
+            return items
+
+        # Fallback: spine unresolvable — use manifest items minus nav
+        log.warning("epub_spine_unresolvable_using_manifest")
+        return [
+            item
+            for item in book.get_items_of_type(ITEM_DOCUMENT)
+            if not isinstance(item, epub.EpubNav)
+        ]
+
+    # ------------------------------------------------------------------
+    # Section type classification
+    # ------------------------------------------------------------------
+
+    def _classify_section_type(
+        self,
+        node: DocumentNode,
+        spine_index: int,
+        total_spine: int,
+        body: Tag,
+    ) -> None:
+        """Classify the section type of a parsed DocumentNode.
+
+        Uses a cascade of detection strategies:
+        1. Heading text patterns (strongest signal)
+        2. Body content patterns (index entries, bibliography entries)
+        3. Spine position heuristic (weakest signal, first item only)
+
+        For synthetic BOOK nodes (multiple chapters in one body), each child
+        chapter is classified independently.
+        """
+        if (
+            node.node_type == NodeType.BOOK
+            and node.metadata.get("synthetic")
+        ):
+            # Multi-chapter body: classify each child separately
+            for child in node.children:
+                self._classify_single_node(child, spine_index, total_spine)
+            return
+
+        self._classify_single_node(node, spine_index, total_spine)
+
+    def _classify_single_node(
+        self,
+        node: DocumentNode,
+        spine_index: int,
+        total_spine: int,
+    ) -> None:
+        """Classify a single chapter/section node's section_type."""
+        # Strategy 1: Check the chapter title / first heading
+        title = str(node.metadata.get("title", ""))
+        if title:
+            detected = _detect_section_type_from_heading(title)
+            if detected is not None:
+                node.section_type = detected
+                log.debug(
+                    "section_type_detected_from_heading",
+                    title=title,
+                    section_type=detected.value,
+                )
+                return
+
+        # Also check first heading child if no title metadata
+        for child in node.children:
+            if child.node_type == NodeType.HEADING:
+                detected = _detect_section_type_from_heading(child.text)
+                if detected is not None:
+                    node.section_type = detected
+                    log.debug(
+                        "section_type_detected_from_child_heading",
+                        heading=child.text,
+                        section_type=detected.value,
+                    )
+                    return
+                break  # only check the first heading
+
+        # Strategy 2: Content-based detection
+        from author_library.chunking._tree_utils import collect_text
+
+        full_text = collect_text(node)
+        if full_text.strip():
+            detected = _detect_section_type_from_content(full_text)
+            if detected is not None:
+                node.section_type = detected
+                log.debug(
+                    "section_type_detected_from_content",
+                    section_type=detected.value,
+                    text_preview=full_text[:80],
+                )
+                return
+
+        # Strategy 3: Spine position heuristic
+        detected = _detect_section_type_from_position(spine_index, total_spine)
+        if detected is not None:
+            node.section_type = detected
+            log.debug(
+                "section_type_detected_from_position",
+                spine_index=spine_index,
+                section_type=detected.value,
+            )
+            return
+
+        # Default: CHAPTER (already the field default)
 
     # ------------------------------------------------------------------
     # HTML body → DocumentNode tree
@@ -187,7 +667,7 @@ class EpubParser(DocumentParser):
 
         for element in effective_body.children:
             if not isinstance(element, Tag):
-                text = str(element).strip()
+                text = _sanitize_text(str(element).strip())
                 if text:
                     raw_text_parts.append(text)
                     target = current_section if current_section else chapter
@@ -202,11 +682,11 @@ class EpubParser(DocumentParser):
 
             # If it's a heading, determine whether to create a chapter title or section
             if node.node_type == NodeType.HEADING:
-                level = element.name  # h1, h2, etc.
-                if level in ("h1", "h2") and not chapter.metadata.get("title"):
+                heading_level = node.metadata.get("level", 0)
+                if heading_level in (1, 2) and not chapter.metadata.get("title"):
                     chapter.metadata["title"] = node.text
                     chapter.children.append(node)
-                elif level == "h1" and chapter.metadata.get("title"):
+                elif heading_level == 1 and chapter.metadata.get("title"):
                     # New h1 while we already have a titled chapter —
                     # finalize the current chapter and start a new one.
                     if chapter.children:
@@ -217,7 +697,7 @@ class EpubParser(DocumentParser):
                     )
                     chapter.children.append(node)
                     current_section = None
-                elif level in ("h2", "h3", "h4", "h5", "h6"):
+                elif heading_level in (2, 3, 4, 5, 6):
                     current_section = DocumentNode(
                         node_type=NodeType.SECTION,
                         metadata={"title": node.text},
@@ -252,30 +732,30 @@ class EpubParser(DocumentParser):
 
     @staticmethod
     def _unwrap_container(body: Tag) -> Tag:
-        """If *body* is a thin wrapper around a single structural div, return that div.
+        """Unwrap thin structural wrappers around the actual chapter content.
 
-        Many EPUBs (especially those converted from other formats) wrap the
-        entire content in ``<body><div>…</div></body>`` where the ``<div>``
-        contains headings and paragraphs.  In that case we want to iterate
-        over the div's children rather than treating the div as one opaque
-        element.
+        Many EPUBs wrap content in single-child containers like
+        ``<body><div>…</div></body>`` or
+        ``<body><article><section>…</section></article></body>``.
+        Recursively unwrap up to 3 levels so that ``_parse_body`` can iterate
+        directly over headings and paragraphs.
         """
-        # Collect direct Tag children of body, skipping whitespace-only text
-        direct_tags = [c for c in body.children if isinstance(c, Tag)]
-
-        if len(direct_tags) != 1:
-            return body
-
-        wrapper = direct_tags[0]
-        if wrapper.name != "div":
-            return body
-
-        # Check if the wrapper div contains heading tags — a strong signal
-        # that it is structural content, not a styled container
-        if wrapper.find(["h1", "h2", "h3"]):
-            return wrapper
-
-        return body
+        _WRAPPER_TAGS = {"div", "section", "article"}
+        effective = body
+        for _ in range(3):
+            direct_tags = [c for c in effective.children if isinstance(c, Tag)]
+            if len(direct_tags) != 1:
+                break
+            wrapper = direct_tags[0]
+            if wrapper.name not in _WRAPPER_TAGS:
+                break
+            # Only unwrap if the wrapper contains heading tags — a strong
+            # signal that it is structural content, not a styled container.
+            if wrapper.find(["h1", "h2", "h3"]):
+                effective = wrapper
+            else:
+                break
+        return effective
 
     def _element_to_node(
         self,
@@ -287,7 +767,7 @@ class EpubParser(DocumentParser):
         tag = element.name
 
         if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if text:
                 raw_text_parts.append(text)
                 return DocumentNode(
@@ -298,14 +778,14 @@ class EpubParser(DocumentParser):
             return None
 
         if tag == "p":
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if not text:
                 return None
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
 
         if tag == "blockquote":
-            text = element.get_text(strip=True)
+            text = _sanitize_text(element.get_text(strip=True))
             if text:
                 raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.BLOCK_QUOTE, text=text)
@@ -313,7 +793,7 @@ class EpubParser(DocumentParser):
         if tag in ("ul", "ol"):
             list_node = DocumentNode(node_type=NodeType.LIST)
             for li in element.find_all("li", recursive=False):
-                li_text = li.get_text(strip=True)
+                li_text = _sanitize_text(li.get_text(strip=True))
                 if li_text:
                     raw_text_parts.append(li_text)
                     list_node.children.append(
@@ -322,7 +802,7 @@ class EpubParser(DocumentParser):
             return list_node if list_node.children else None
 
         if tag == "table":
-            text = element.get_text(separator=" | ", strip=True)
+            text = _sanitize_text(element.get_text(separator=" | ", strip=True))
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.TABLE, text=text)
 
@@ -334,6 +814,34 @@ class EpubParser(DocumentParser):
                 metadata={"alt": str(alt), "src": str(src)},
             )
 
+        if tag == "header":
+            # HTML5 <header> elements often wrap headings in EPUB documents.
+            # Extract all heading children and combine them into a single
+            # HEADING node (e.g. "Chapter 1" + "Seeing through Dreams" →
+            # "Chapter 1: Seeing through Dreams").
+            headings = element.find_all(["h1", "h2", "h3", "h4", "h5", "h6"])
+            if headings:
+                best_level = min(int(h.name[1]) for h in headings)
+                texts: list[str] = []
+                for h in headings:
+                    text = h.get_text(strip=True)
+                    if text:
+                        texts.append(text)
+                        raw_text_parts.append(text)
+                combined = ": ".join(texts)
+                if combined:
+                    return DocumentNode(
+                        node_type=NodeType.HEADING,
+                        text=combined,
+                        metadata={"level": best_level},
+                    )
+            # No headings found — extract as paragraph fallback
+            text = element.get_text(strip=True)
+            if text:
+                raw_text_parts.append(text)
+                return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
+            return None
+
         if tag in ("aside", "div"):
             # Check for footnote / endnote patterns
             role = str(element.get("role") or element.get("epub:type") or "")
@@ -343,12 +851,12 @@ class EpubParser(DocumentParser):
             else:
                 classes = str(class_attr or "")
             if "footnote" in str(role).lower() or "footnote" in classes.lower():
-                text = element.get_text(strip=True)
+                text = _sanitize_text(element.get_text(strip=True))
                 if text:
                     raw_text_parts.append(text)
                 return DocumentNode(node_type=NodeType.FOOTNOTE, text=text if text else "")
             if "endnote" in str(role).lower() or "endnote" in classes.lower():
-                text = element.get_text(strip=True)
+                text = _sanitize_text(element.get_text(strip=True))
                 if text:
                     raw_text_parts.append(text)
                 return DocumentNode(node_type=NodeType.ENDNOTE, text=text if text else "")
@@ -363,8 +871,39 @@ class EpubParser(DocumentParser):
                 if br_count >= _POEM_LINE_BREAK_THRESHOLD:
                     return self._parse_poem(element, raw_text_parts)
 
+        # Structural container: a div/aside/section/article that wraps
+        # paragraphs, headings, or other block-level content.  Recurse
+        # into children so individual paragraphs are preserved instead of
+        # being collapsed into a single PARAGRAPH node.
+        _STRUCTURAL_TAGS = {
+            "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "header",
+        }
+        if tag in ("div", "aside", "section", "article"):
+            has_structural = element.find(list(_STRUCTURAL_TAGS), recursive=False)
+            if has_structural:
+                container = DocumentNode(node_type=NodeType.SECTION)
+                for child in element.children:
+                    if isinstance(child, Tag):
+                        child_node = self._element_to_node(child, raw_text_parts, warnings)
+                        if child_node is not None:
+                            container.children.append(child_node)
+                            # Extract section title from first heading child
+                            if (
+                                child_node.node_type == NodeType.HEADING
+                                and "title" not in container.metadata
+                            ):
+                                container.metadata["title"] = child_node.text
+                    else:
+                        text = _sanitize_text(str(child).strip())
+                        if text:
+                            raw_text_parts.append(text)
+                            container.children.append(
+                                DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
+                            )
+                return container if container.children else None
+
         # Fallback: extract text from any other element
-        text = element.get_text(strip=True)
+        text = _sanitize_text(element.get_text(strip=True))
         if text:
             raw_text_parts.append(text)
             return DocumentNode(node_type=NodeType.PARAGRAPH, text=text)
@@ -382,7 +921,7 @@ class EpubParser(DocumentParser):
         for part in stanza_parts:
             stanza_soup = BeautifulSoup(part, "lxml")
             text = stanza_soup.get_text()
-            lines = [line.strip() for line in text.split("\n") if line.strip()]
+            lines = [_sanitize_text(line.strip()) for line in text.split("\n") if line.strip()]
             if not lines:
                 continue
             stanza = DocumentNode(node_type=NodeType.STANZA)

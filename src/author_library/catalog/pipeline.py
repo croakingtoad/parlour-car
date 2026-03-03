@@ -21,6 +21,7 @@ from author_library.catalog.models import (
     ClassificationResult,
     ContextualCatalogEntry,
     FormatIngested,
+    PersonalCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
     SecondaryCatalogEntry,
@@ -241,12 +242,17 @@ class ClassificationPipeline:
                     engagement_works=overrides.get("engagement_works"),
                     engagement_frequency=overrides.get("engagement_frequency"),
                 )
-            else:
-                # Tertiary
+            elif source_class == SourceClass.TERTIARY:
                 return TertiaryCatalogEntry(
                     **core,
                     reference_type=overrides.get("reference_type", "bibliography"),
                     coverage_note=overrides.get("coverage_note"),
+                )
+            else:
+                # Personal
+                return PersonalCatalogEntry(
+                    **core,
+                    user_id=overrides.get("user_id", "marty"),
                 )
         except Exception as exc:
             raise ClassificationError(
@@ -298,6 +304,14 @@ class ClassificationPipeline:
             "ocr_quality": overrides.get("ocr_quality"),
             "ingestion_date": overrides.get("ingestion_date", date.today()),
             "notes": overrides.get("notes"),
+            # Media/source fields (A5)
+            "url": overrides.get("url"),
+            "duration": overrides.get("duration"),
+            "speakers": overrides.get("speakers", []),
+            "date_published": overrides.get("date_published"),
+            "date_consumed": overrides.get("date_consumed"),
+            "transcript_cached": overrides.get("transcript_cached", False),
+            "media": overrides.get("media"),
         }
 
     @staticmethod
@@ -402,6 +416,14 @@ class ClassificationPipeline:
             "ocr_quality",
             "ingestion_date",
             "notes",
+            # Media/source fields (A5)
+            "url",
+            "duration",
+            "speakers",
+            "date_published",
+            "date_consumed",
+            "transcript_cached",
+            "media",
         }
 
         # Separate core fields from source-class-specific fields

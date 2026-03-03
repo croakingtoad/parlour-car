@@ -1,4 +1,4 @@
-.PHONY: dev dev-down test lint format typecheck run clean
+.PHONY: dev dev-down test lint format typecheck run worker clean
 
 # Start development infrastructure (PostgreSQL + Neo4j)
 dev:
@@ -31,6 +31,10 @@ typecheck:
 # Start the MCP server
 run:
 	uv run python -m author_library
+
+# Start the arq background worker
+worker:
+	uv run arq author_library.worker.WorkerSettings
 
 # Remove build artifacts
 clean:

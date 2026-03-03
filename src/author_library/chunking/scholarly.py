@@ -10,6 +10,8 @@ Special handling for footnotes, block quotations, and bibliographies.
 
 from __future__ import annotations
 
+import re
+
 import structlog
 
 from author_library.chunking._tree_utils import (
@@ -21,7 +23,7 @@ from author_library.chunking._tree_utils import (
 )
 from author_library.chunking.base import ChunkingStrategy
 from author_library.chunking.models import Chunk, ChunkGranularity
-from author_library.parsing.models import DocumentNode, NodeType, ParsedDocument
+from author_library.parsing.models import DocumentNode, NodeType, ParsedDocument, SectionType
 
 logger = structlog.get_logger()
 
@@ -61,6 +63,9 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 chapter_title = chapter_node.text.split("\n")[0][:100]
             chapter_title_str = str(chapter_title) if chapter_title else None
 
+            # Propagate the section_type from the document node
+            section_type_val = chapter_node.section_type.value
+
             # --- MACRO: chapter-level summary text ---
             chapter_text = collect_text(chapter_node)
             if not chapter_text.strip():
@@ -72,6 +77,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 work_id=work_id,
                 source_class=source_class,
                 chapter=chapter_title_str,
+                section_type=section_type_val,
                 position=position_counters[ChunkGranularity.MACRO],
                 metadata={"genre": "scholarly_prose"},
             )
@@ -90,6 +96,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                     work_id=work_id,
                     source_class=source_class,
                     chapter=chapter_title_str,
+                    section_type=section_type_val,
                     parent_id=macro_chunk.id,
                     footnotes=footnotes,
                     position_counters=position_counters,
@@ -116,6 +123,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             parent_id=macro_chunk.id,
                             footnotes=footnotes,
                             position_counters=position_counters,
@@ -129,6 +137,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             position=position_counters[ChunkGranularity.MESO],
                             parent_chunk_id=macro_chunk.id,
                             metadata={"genre": "scholarly_prose"},
@@ -143,11 +152,18 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                             source_class=source_class,
                             chapter=chapter_title_str,
                             section=section_title_str,
+                            section_type=section_type_val,
                             parent_id=meso_chunk.id,
                             footnotes=footnotes,
                             position_counters=position_counters,
                         )
                         chunks.extend(micro_chunks)
+
+        # Filter out micro chunks under the minimum character threshold.
+        # These are typically index entries, single-word fragments, or noise.
+        pre_filter = len(chunks)
+        chunks = filter_min_chunk_size(chunks)
+        filtered_out = pre_filter - len(chunks)
 
         logger.info(
             "scholarly_chunking_complete",
@@ -156,6 +172,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
             macro=sum(1 for c in chunks if c.granularity == ChunkGranularity.MACRO),
             meso=sum(1 for c in chunks if c.granularity == ChunkGranularity.MESO),
             micro=sum(1 for c in chunks if c.granularity == ChunkGranularity.MICRO),
+            filtered_micro_chunks=filtered_out,
         )
         return chunks
 
@@ -171,6 +188,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
         source_class: str,
         chapter: str | None,
         section: str | None = None,
+        section_type: str = "chapter",
         parent_id: str | None = None,
         footnotes: dict[str, str],
         position_counters: dict[ChunkGranularity, int],
@@ -197,6 +215,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 source_class=source_class,
                 chapter=chapter,
                 section=section,
+                section_type=section_type,
                 position=position_counters[ChunkGranularity.MESO],
                 parent_chunk_id=parent_id,
                 metadata={"genre": "scholarly_prose"},
@@ -223,6 +242,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                     source_class=source_class,
                     chapter=chapter,
                     section=section,
+                    section_type=section_type,
                     position=position_counters[ChunkGranularity.MICRO],
                     parent_chunk_id=meso_chunk.id,
                     metadata=meta,
@@ -239,6 +259,26 @@ class ScholarlyProseStrategy(ChunkingStrategy):
             if not para_text.strip():
                 continue
             wc = word_count(para_text)
+
+            # If a single paragraph exceeds the meso ceiling, split it at
+            # sentence boundaries into smaller synthetic paragraphs so the
+            # meso/micro counts reflect the actual content volume.
+            if wc > 500:
+                if buffer:
+                    flush_buffer()
+                for fragment in _split_text_at_sentences(para_text, target_words=400):
+                    syn_node = DocumentNode(
+                        node_type=para_node.node_type,
+                        text=fragment,
+                        metadata=dict(para_node.metadata),
+                    )
+                    frag_wc = word_count(fragment)
+                    if buffer_words + frag_wc > 500 and buffer:
+                        flush_buffer()
+                    buffer.append(fragment)
+                    buffer_paragraphs.append(syn_node)
+                    buffer_words += frag_wc
+                continue
 
             # If adding this paragraph would push past 500 words, flush first
             if buffer_words + wc > 500 and buffer:
@@ -269,6 +309,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                         source_class=source_class,
                         chapter=chapter,
                         section=section,
+                        section_type=section_type,
                         position=position_counters[ChunkGranularity.MICRO],
                         parent_chunk_id=last_meso.id,
                         metadata={"genre": "scholarly_prose"},
@@ -290,6 +331,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
         source_class: str,
         chapter: str | None,
         section: str | None,
+        section_type: str = "chapter",
         parent_id: str,
         footnotes: dict[str, str],
         position_counters: dict[ChunkGranularity, int],
@@ -313,6 +355,7 @@ class ScholarlyProseStrategy(ChunkingStrategy):
                 source_class=source_class,
                 chapter=chapter,
                 section=section,
+                section_type=section_type,
                 position=position_counters[ChunkGranularity.MICRO],
                 parent_chunk_id=parent_id,
                 metadata=meta,
@@ -320,6 +363,53 @@ class ScholarlyProseStrategy(ChunkingStrategy):
             position_counters[ChunkGranularity.MICRO] += 1
             chunks.append(micro)
         return chunks
+
+
+# ------------------------------------------------------------------
+# Minimum chunk size filter
+# ------------------------------------------------------------------
+
+#: Minimum character length for a chunk to be retained.  Chunks shorter
+#: than this (typically index entries, single words, page-number fragments)
+#: are merged into their nearest sibling or dropped.
+MIN_CHUNK_CHARS = 50
+
+
+def filter_min_chunk_size(
+    chunks: list[Chunk],
+    min_chars: int = MIN_CHUNK_CHARS,
+) -> list[Chunk]:
+    """Remove micro/nano chunks shorter than *min_chars* characters.
+
+    Macro and meso chunks are never filtered (they aggregate children).
+    Micro/nano chunks below the threshold are dropped — their text is
+    already represented in their parent meso/macro chunk.
+
+    Args:
+        chunks: The full list of chunks at all granularity levels.
+        min_chars: Minimum character count for micro/nano chunks.
+
+    Returns:
+        Filtered list with tiny chunks removed.
+    """
+    kept: list[Chunk] = []
+    dropped = 0
+    for chunk in chunks:
+        # Only filter micro and nano — macro/meso are aggregates
+        if chunk.granularity in (ChunkGranularity.MICRO, ChunkGranularity.NANO):
+            if len(chunk.text.strip()) < min_chars:
+                dropped += 1
+                continue
+        kept.append(chunk)
+
+    if dropped:
+        logger.debug(
+            "min_chunk_size_filter",
+            dropped=dropped,
+            min_chars=min_chars,
+            remaining=len(kept),
+        )
+    return kept
 
 
 # ------------------------------------------------------------------
@@ -372,3 +462,49 @@ def _paragraph_text_with_footnotes(
                 # Substantive footnote — append
                 text += f"\n[Footnote: {fn_text}]"
     return text
+
+
+# Sentence-ending pattern: period, question mark, or exclamation followed by
+# whitespace.  Avoid splitting on abbreviations like "Mr." or "e.g." by
+# requiring the next character to be uppercase or a quote.
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'\u201C\u2018])")
+
+
+def _split_text_at_sentences(text: str, *, target_words: int = 400) -> list[str]:
+    """Split *text* at sentence boundaries into fragments of roughly *target_words*.
+
+    If the text has fewer than ``target_words * 1.5`` words it is returned
+    as a single-element list (not worth splitting).
+    """
+    total = word_count(text)
+    if total <= int(target_words * 1.5):
+        return [text]
+
+    sentences = _SENTENCE_END_RE.split(text)
+    if len(sentences) <= 1:
+        # No sentence boundaries found — fall back to the whole text
+        return [text]
+
+    fragments: list[str] = []
+    current: list[str] = []
+    current_words = 0
+
+    for sentence in sentences:
+        swc = word_count(sentence)
+        if current_words + swc > target_words and current:
+            fragments.append(" ".join(current))
+            current = [sentence]
+            current_words = swc
+        else:
+            current.append(sentence)
+            current_words += swc
+
+    if current:
+        # Merge a tiny trailing fragment with the previous one
+        trailing = " ".join(current)
+        if fragments and word_count(trailing) < target_words // 3:
+            fragments[-1] += " " + trailing
+        else:
+            fragments.append(trailing)
+
+    return fragments

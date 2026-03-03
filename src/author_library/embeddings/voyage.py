@@ -15,7 +15,13 @@ import structlog
 
 from author_library.errors import EmbeddingError
 
-from .base import BatchEmbeddingResult, EmbeddingProvider, EmbeddingResult
+from .base import (
+    BatchEmbeddingResult,
+    EmbeddingProvider,
+    EmbeddingResult,
+    build_token_aware_batches,
+    estimate_tokens,
+)
 
 logger: structlog.stdlib.BoundLogger = structlog.get_logger(__name__)
 
@@ -23,8 +29,13 @@ _VOYAGE_API_URL = "https://api.voyageai.com/v1/embeddings"
 _DEFAULT_MODEL = "voyage-3-large"
 _DEFAULT_DIMENSIONS = 1024
 _MAX_BATCH_SIZE = 128
+_MAX_TOKENS_PER_BATCH = 80_000  # Voyage limit is 120K; leave 40K headroom for underestimation
 _MAX_RETRIES = 3
 _INITIAL_BACKOFF = 1.0
+
+# Aliases for test compatibility
+_estimate_tokens = estimate_tokens
+_build_token_aware_batches = build_token_aware_batches
 
 
 class VoyageEmbeddingProvider(EmbeddingProvider):
@@ -97,8 +108,10 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
     async def embed_batch(self, texts: list[str]) -> BatchEmbeddingResult:
         """Embed a batch of texts as documents.
 
-        Voyage AI allows up to ~128 texts per request.  Larger batches are
-        automatically split into chunks and results concatenated.
+        Splits texts into sub-batches that respect both the item limit
+        (128 per request) and the Voyage token limit (120K per request,
+        with 20K headroom → 100K target).  Token counts are estimated
+        from word counts using a 1.3× multiplier.
         """
         if not texts:
             raise EmbeddingError(
@@ -109,9 +122,19 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
         all_vectors: list[list[float]] = []
         all_token_counts: list[int | None] = []
 
-        for i in range(0, len(texts), _MAX_BATCH_SIZE):
-            chunk = texts[i : i + _MAX_BATCH_SIZE]
-            result = await self._request(chunk, input_type="document")
+        # Build token-aware sub-batches
+        batches = _build_token_aware_batches(texts)
+
+        for batch_idx, batch_texts in enumerate(batches):
+            est_tokens = sum(_estimate_tokens(t) for t in batch_texts)
+            logger.info(
+                "voyage_embedding_batch",
+                batch=batch_idx + 1,
+                total_batches=len(batches),
+                texts=len(batch_texts),
+                estimated_tokens=est_tokens,
+            )
+            result = await self._request(batch_texts, input_type="document")
             # Voyage returns data sorted by index
             sorted_data = sorted(result["data"], key=lambda d: d["index"])
             all_vectors.extend(d["embedding"] for d in sorted_data)

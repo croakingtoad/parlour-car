@@ -13,8 +13,10 @@ Edge rules enforced by source classification:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -69,10 +71,10 @@ Given one or more text chunks from a literary/scholarly work, extract structured
 
 For EACH chunk, return a JSON object with:
 - "chunk_id": the chunk's id (string)
-- "themes": list of {"name": str, "canonical_name": str} — broad thematic topics
-- "arguments": list of {"claim": str, "evidence_summary": str} — specific intellectual claims
-- "concepts": list of {"name": str, "canonical_name": str} — technical/philosophical terms
-- "persons": list of {"name": str, "canonical_name": str, "role": str} — people mentioned
+- "themes": list of {"name": str, "canonical_name": str} — broad thematic topics (max 5)
+- "arguments": list of {"claim": str, "evidence_summary": str} — specific intellectual claims (max 3)
+- "concepts": list of {"name": str, "canonical_name": str} — technical/philosophical terms (max 5)
+- "persons": list of {"name": str, "canonical_name": str, "role": str} — people mentioned (max 3)
 
 Rules:
 - canonical_name: lowercase, hyphenated form for deduplication (e.g. "primary-imagination")
@@ -81,6 +83,8 @@ Rules:
 - Concepts are technical terms, not general vocabulary
 - Persons include authors, thinkers, historical figures referenced — not the work's author
 - role for persons: "referenced", "quoted", "discussed", "influenced-by"
+- Keep evidence_summary under 50 words
+- Respect the per-chunk maximums above to ensure complete JSON output
 
 Return a JSON array of extraction objects, one per chunk.
 """
@@ -146,18 +150,55 @@ class EntityExtractor:
         """Extract entities from chunks and write nodes/edges to Neo4j.
 
         Chunks are processed in batches of _BATCH_SIZE for LLM efficiency.
-        On JSON parse failure, the batch is split in half and retried up to
-        _MAX_BATCH_RETRIES times.
+        Batches run concurrently (up to ``entity_extraction_concurrency``
+        parallel API calls).  On JSON parse failure, a batch is split in
+        half and retried up to _MAX_BATCH_RETRIES times.
         """
         result = ExtractionResult()
+        if not chunks:
+            return result
 
+        concurrency = self._llm_settings.entity_extraction_concurrency
+        semaphore = asyncio.Semaphore(concurrency)
+
+        # Build (batch, batch_chunks) pairs
+        batches: list[list[Chunk]] = []
         for batch_start in range(0, len(chunks), _BATCH_SIZE):
-            batch = chunks[batch_start : batch_start + _BATCH_SIZE]
-            extractions = await self._extract_batch_with_retry(
-                batch, work_title=work_title, author=author, result=result
-            )
+            batches.append(chunks[batch_start : batch_start + _BATCH_SIZE])
 
-            for extraction in extractions:
+        total_batches = len(batches)
+        wall_start = time.monotonic()
+
+        log.info(
+            "entity_extraction_starting",
+            total_chunks=len(chunks),
+            total_batches=total_batches,
+            concurrency=concurrency,
+        )
+
+        async def _process_batch(batch: list[Chunk]) -> list[ChunkExtraction]:
+            async with semaphore:
+                return await self._extract_batch_with_retry(
+                    batch, work_title=work_title, author=author, result=result
+                )
+
+        # Run all batches concurrently (bounded by semaphore)
+        batch_results = await asyncio.gather(
+            *(_process_batch(b) for b in batches),
+            return_exceptions=True,
+        )
+
+        wall_elapsed = time.monotonic() - wall_start
+
+        # Persist results sequentially (Neo4j writes are fast, not the bottleneck)
+        for batch, batch_extractions in zip(batches, batch_results):
+            if isinstance(batch_extractions, BaseException):
+                error_msg = f"Batch extraction raised: {batch_extractions}"
+                log.error("entity_extraction_batch_exception", error=error_msg)
+                result.errors.append(error_msg)
+                continue
+
+            for extraction in batch_extractions:
                 chunk = next((c for c in batch if c.id == extraction.chunk_id), None)
                 if chunk is None:
                     continue
@@ -173,6 +214,9 @@ class EntityExtractor:
         log.info(
             "entity_extraction_complete",
             chunks_processed=len(chunks),
+            total_batches=total_batches,
+            concurrency=concurrency,
+            wall_clock_seconds=round(wall_elapsed, 1),
             nodes_created=result.nodes_created,
             edges_created=result.edges_created,
             errors=len(result.errors),
@@ -206,7 +250,7 @@ class EntityExtractor:
         """
         try:
             return await self._extract_batch(batch, work_title=work_title, author=author)
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, AttributeError, TypeError, KeyError) as exc:
             if _retry_depth >= _MAX_BATCH_RETRIES:
                 error_msg = (
                     f"Batch JSON parse failed after {_retry_depth} retries "
@@ -299,12 +343,22 @@ class EntityExtractor:
 
         response = await self._client.messages.create(
             model=self._llm_settings.ingestion_model,
-            max_tokens=4096,
+            max_tokens=16384,
             system=_EXTRACTION_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
         )
 
         response_text = response.content[0].text  # type: ignore[union-attr]
+
+        # Detect max_tokens truncation so the salvage path can fire
+        if response.stop_reason == "max_tokens":
+            log.warning(
+                "entity_extraction_response_truncated",
+                batch_size=len(chunks),
+                response_length=len(response_text),
+                max_tokens=16384,
+            )
+
         return self._parse_extraction_response(response_text)
 
     def _parse_extraction_response(self, response_text: str) -> list[ChunkExtraction]:
@@ -354,6 +408,9 @@ class EntityExtractor:
         extractions: list[ChunkExtraction] = []
 
         for raw in raw_list:
+            if not isinstance(raw, dict):
+                log.warning("entity_extraction_skip_non_dict", type=type(raw).__name__, preview=str(raw)[:100])
+                continue
             chunk_id = raw.get("chunk_id", "")
             if not chunk_id:
                 continue

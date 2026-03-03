@@ -29,6 +29,7 @@ class APIKeySettings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")
     voyage_api_key: SecretStr | None = None
     openai_api_key: SecretStr | None = None
+    parlour_api_key: SecretStr | None = None
 
 
 class EmbeddingSettings(BaseSettings):
@@ -46,8 +47,34 @@ class LLMSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_prefix="LLM_")
 
-    ingestion_model: str = "claude-sonnet-4-5-20250929"
-    query_model: str = "claude-sonnet-4-5-20250929"
+    ingestion_model: str = "claude-sonnet-4-6"
+    query_model: str = "claude-sonnet-4-6"
+
+    # Entity extraction optimisation knobs
+    entity_extraction_granularities: str = "macro,meso,micro"
+    """Comma-separated chunk granularities to run entity extraction on.
+    Micro/nano chunks are redundant because their parent meso chunks
+    already capture the same entities."""
+
+    entity_extraction_concurrency: int = 5
+    """Maximum number of concurrent LLM API calls for entity extraction."""
+
+
+class SessionSettings(BaseSettings):
+    """Session tracking configuration."""
+
+    model_config = SettingsConfigDict(env_prefix="SESSION_")
+
+    timeout_minutes: int = 60  # Inactivity timeout before auto-ending session
+    theme_change_gap_minutes: int = 30  # Gap threshold for theme-change auto-end
+
+
+class RedisSettings(BaseSettings):
+    """Redis connection settings for task queue and caching."""
+
+    model_config = SettingsConfigDict(env_prefix="")
+
+    redis_url: str = "redis://localhost:6379"
 
 
 class ServerSettings(BaseSettings):
@@ -76,6 +103,8 @@ class Settings(BaseSettings):
     embedding: EmbeddingSettings = EmbeddingSettings()
     llm: LLMSettings = LLMSettings()
     server: ServerSettings = ServerSettings()
+    session: SessionSettings = SessionSettings()
+    redis: RedisSettings = RedisSettings()
 
 
 def get_settings() -> Settings:

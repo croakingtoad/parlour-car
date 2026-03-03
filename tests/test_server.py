@@ -24,6 +24,8 @@ class TestToolDefinitions:
     """Verify the TOOLS list has correct structure and coverage."""
 
     EXPECTED_TOOLS: frozenset[str] = frozenset({
+        # Original tools (14)
+        "list_books",
         "ingest_book",
         "ingest_corpus",
         "ask_author",
@@ -35,6 +37,21 @@ class TestToolDefinitions:
         "list_works",
         "library_stats",
         "health_check",
+        "job_status",
+        "ingest_book_async",
+        # Epic B: Composable Ingestion Tools (5)
+        "classify_source",
+        "catalog_source",
+        "chunk_source",
+        "detect_passage_links",
+        "flag_acquisition",
+        # Epic C: Query Tools + Vocabulary (3)
+        "search_chunks",
+        "get_passage_links",
+        "manage_vocabulary",
+        # Epic N: Surfacing & Synthesis (2)
+        "surface_related",
+        "synthesize_my_thinking",
     })
 
     def test_all_tools_registered(self) -> None:
@@ -42,7 +59,7 @@ class TestToolDefinitions:
         assert tool_names == self.EXPECTED_TOOLS
 
     def test_tool_count(self) -> None:
-        assert len(TOOLS) == 11
+        assert len(TOOLS) == 24
 
     def test_all_tools_have_descriptions(self) -> None:
         for tool in TOOLS:
@@ -60,6 +77,12 @@ class TestToolDefinitions:
             "file_path",
             "subject_author_id",
         }
+
+    def test_ingest_book_has_auto_confirm(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "ingest_book")
+        auto = tool.inputSchema["properties"]["auto_confirm"]
+        assert auto["type"] == "boolean"
+        assert auto["default"] is True
 
     def test_ask_author_required_fields(self) -> None:
         tool = next(t for t in TOOLS if t.name == "ask_author")
@@ -114,3 +137,80 @@ class TestToolDefinitions:
     def test_ingest_corpus_requires_subject_author_id(self) -> None:
         tool = next(t for t in TOOLS if t.name == "ingest_corpus")
         assert tool.inputSchema["required"] == ["subject_author_id"]
+
+    # ----- Epic B: Composable Ingestion Tools -----
+
+    def test_classify_source_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "classify_source")
+        assert set(tool.inputSchema["required"]) == {"file_path", "subject_author"}
+
+    def test_catalog_source_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "catalog_source")
+        assert set(tool.inputSchema["required"]) == {"file_path", "source_class"}
+
+    def test_catalog_source_source_class_enum(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "catalog_source")
+        sc = tool.inputSchema["properties"]["source_class"]
+        assert set(sc["enum"]) == {
+            "primary", "secondary", "contextual", "tertiary", "personal",
+        }
+
+    def test_chunk_source_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "chunk_source")
+        assert tool.inputSchema["required"] == ["work_id"]
+
+    def test_detect_passage_links_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "detect_passage_links")
+        assert tool.inputSchema["required"] == ["work_id"]
+
+    def test_detect_passage_links_scan_types_enum(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "detect_passage_links")
+        scan_types = tool.inputSchema["properties"]["scan_types"]
+        assert set(scan_types["items"]["enum"]) == {
+            "explicit_citation", "implicit_engagement", "thematic_parallel",
+        }
+
+    def test_flag_acquisition_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "flag_acquisition")
+        assert tool.inputSchema["required"] == ["citations"]
+
+    def test_flag_acquisition_citation_priority_enum(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "flag_acquisition")
+        items = tool.inputSchema["properties"]["citations"]["items"]
+        assert set(items["properties"]["priority"]["enum"]) == {
+            "high", "medium", "low",
+        }
+
+    # ----- Epic C: Query Tools + Vocabulary -----
+
+    def test_search_chunks_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "search_chunks")
+        assert tool.inputSchema["required"] == ["query"]
+
+    def test_search_chunks_filters_schema(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "search_chunks")
+        filters = tool.inputSchema["properties"]["filters"]
+        assert "source_class" in filters["properties"]
+        assert "work_ids" in filters["properties"]
+        assert "granularity" in filters["properties"]
+
+    def test_get_passage_links_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "get_passage_links")
+        assert tool.inputSchema["required"] == ["chunk_id"]
+
+    def test_get_passage_links_depth_constraints(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "get_passage_links")
+        depth = tool.inputSchema["properties"]["depth"]
+        assert depth["minimum"] == 1
+        assert depth["maximum"] == 3
+
+    def test_manage_vocabulary_required_fields(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "manage_vocabulary")
+        assert tool.inputSchema["required"] == ["action"]
+
+    def test_manage_vocabulary_action_enum(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "manage_vocabulary")
+        action = tool.inputSchema["properties"]["action"]
+        assert set(action["enum"]) == {
+            "list", "propose", "promote", "merge", "deprecate",
+        }

@@ -100,6 +100,8 @@ class InMemoryEmbeddingRepository:
         work_id: str,
         granularity: str,
         source_class: str,
+        pass_number: int = 1,
+        speaker: str | None = None,
     ) -> UUID:
         """Store an embedding for testing."""
         emb_id = uuid4()
@@ -113,6 +115,8 @@ class InMemoryEmbeddingRepository:
             "work_id": work_id,
             "granularity": granularity,
             "source_class": source_class,
+            "pass_number": pass_number,
+            "speaker": speaker,
         }
         return emb_id
 
@@ -174,6 +178,8 @@ class InMemoryEmbeddingRepository:
                 "text": c["text"],
                 "granularity": c["granularity"],
                 "source_class": c["source_class"],
+                "pass_number": c.get("pass_number", 1),
+                "speaker": c.get("speaker"),
                 "distance": dist,
             }
             for dist, c in candidates[:limit]

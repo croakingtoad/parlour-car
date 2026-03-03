@@ -24,6 +24,8 @@ class SearchResult:
     snippet: str
     granularity: str
     source_class: str
+    pass_number: int = 1
+    speaker: str | None = None
 
 
 async def search_fulltext(
@@ -71,7 +73,9 @@ async def search_fulltext(
             ts_headline('english', c.text, websearch_to_tsquery('english', $1),
                         'StartSel=**, StopSel=**, MaxWords=60, MinWords=20') AS snippet,
             c.granularity,
-            c.source_class
+            c.source_class,
+            c.pass_number,
+            c.metadata->>'speaker' AS speaker
         FROM chunks c
         WHERE {where_clause}
         ORDER BY rank DESC
@@ -87,6 +91,8 @@ async def search_fulltext(
             snippet=row["snippet"],
             granularity=row["granularity"],
             source_class=row["source_class"],
+            pass_number=row.get("pass_number", 1) or 1,
+            speaker=row.get("speaker"),
         )
         for row in rows
     ]
@@ -137,7 +143,9 @@ async def search_phrase(
             ts_headline('english', c.text, phraseto_tsquery('english', $1),
                         'StartSel=**, StopSel=**, MaxWords=60, MinWords=20') AS snippet,
             c.granularity,
-            c.source_class
+            c.source_class,
+            c.pass_number,
+            c.metadata->>'speaker' AS speaker
         FROM chunks c
         WHERE {where_clause}
         ORDER BY rank DESC
@@ -153,6 +161,8 @@ async def search_phrase(
             snippet=row["snippet"],
             granularity=row["granularity"],
             source_class=row["source_class"],
+            pass_number=row.get("pass_number", 1) or 1,
+            speaker=row.get("speaker"),
         )
         for row in rows
     ]
