@@ -247,6 +247,12 @@ class ConnectionScanner:
         """Scan a single chunk for connections to existing content."""
         chunk_id = str(chunk.get("id", ""))
         chunk_text = chunk.get("text", "")
+        chunk_annotation = chunk.get("annotation")
+        # Prefer annotated text (annotation + text) for richer context
+        if chunk_annotation:
+            context_text = f"{chunk_annotation}\n\n{chunk_text}"
+        else:
+            context_text = chunk_text
 
         if not chunk_id or not chunk_text:
             return []
@@ -255,7 +261,7 @@ class ConnectionScanner:
         try:
             related = await self._finder.find_related(
                 chunk_id=chunk_id,
-                text_context=chunk_text[:500],
+                text_context=context_text[:500],
                 include_personal=False,
                 max_results=max_results * 2,
             )

@@ -743,6 +743,7 @@ class IngestionPipeline:
                 ChunkModel(
                     id=str(c.get("id", "")),
                     text=c.get("text", ""),
+                    annotation=c.get("annotation"),
                     granularity=c.get("granularity", "meso"),
                     work_id=c.get("work_id", ""),
                     source_class=c.get("source_class", "contextual"),
@@ -798,6 +799,7 @@ class IngestionPipeline:
                 ChunkModel(
                     id=str(c.get("id", "")),
                     text=c.get("text", ""),
+                    annotation=c.get("annotation"),
                     granularity=c.get("granularity", "meso"),
                     work_id=c.get("work_id", ""),
                     source_class=c.get("source_class", "primary"),

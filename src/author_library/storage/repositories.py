@@ -536,6 +536,7 @@ class PgEmbeddingRepository(EmbeddingRepository):
                 ce.chunk_id,
                 c.work_id,
                 c.text,
+                c.annotation,
                 c.granularity,
                 c.source_class,
                 c.pass_number,
