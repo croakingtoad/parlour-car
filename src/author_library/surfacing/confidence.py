@@ -108,6 +108,18 @@ def classify_confidence(item: RelatedItem) -> ScoredConnection:
         else:
             level = ConfidenceLevel.LOW
 
+    elif conn_type == ConnectionType.ENTITY_OVERLAP:
+        # Entity overlap connections are scored by overlap_count mapped to score
+        # score >= 0.9 means 5+ shared entities → HIGH
+        # score >= 0.7 means 3-4 shared entities → MEDIUM
+        # score >= 0.4 means 2 shared entities → LOW
+        if score >= 0.9:
+            level = ConfidenceLevel.HIGH
+        elif score >= 0.7:
+            level = ConfidenceLevel.MEDIUM
+        else:
+            level = ConfidenceLevel.LOW
+
     elif conn_type == ConnectionType.THEMATIC_PARALLEL:
         if score > 0.75:
             level = ConfidenceLevel.MEDIUM

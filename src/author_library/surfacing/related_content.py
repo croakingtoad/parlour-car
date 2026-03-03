@@ -37,6 +37,7 @@ class ConnectionType(StrEnum):
     PERSONAL_REFLECTION = "personal_reflection"
     VECTOR_SIMILARITY = "vector_similarity"
     TEMPORAL_PROXIMITY = "temporal_proximity"
+    ENTITY_OVERLAP = "entity_overlap"
 
 
 @dataclass(frozen=True, slots=True)
