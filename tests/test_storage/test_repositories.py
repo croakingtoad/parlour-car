@@ -177,6 +177,90 @@ async def test_embedding_store_and_search(pg_pool: PostgresPool) -> None:
     assert results[0]["chunk_id"] == chunk_id
 
 
+# -- Annotation Roundtrip Tests -----------------------------------------------
+
+
+async def test_chunk_annotation_persisted(pg_pool: PostgresPool) -> None:
+    """Chunk annotation field survives storage and retrieval."""
+    await run_migrations(pg_pool)
+    await _insert_author(pg_pool)
+    work_repo = PgWorkRepository(pg_pool)
+    await work_repo.create(SAMPLE_WORK)
+
+    chunk_repo = PgChunkRepository(pg_pool)
+
+    annotated_chunk = {
+        **SAMPLE_CHUNK,
+        "annotation": (
+            '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Malcolm Guite.\n'
+            "This meso covers: the role of imagination in perception."
+        ),
+    }
+    chunk_id = await chunk_repo.create(annotated_chunk)
+
+    # Verify annotation survives get()
+    chunk = await chunk_repo.get(chunk_id)
+    assert chunk is not None
+    assert chunk["annotation"] is not None
+    assert "[PRIMARY]" in chunk["annotation"]
+    assert "imagination" in chunk["annotation"]
+
+    # Verify annotation survives list_by_work()
+    chunks = await chunk_repo.list_by_work(SAMPLE_WORK["work_id"])
+    assert len(chunks) == 1
+    assert chunks[0]["annotation"] == annotated_chunk["annotation"]
+
+
+async def test_similarity_search_returns_annotation(pg_pool: PostgresPool) -> None:
+    """Similarity search results include the annotation field."""
+    await run_migrations(pg_pool)
+    await _insert_author(pg_pool)
+    work_repo = PgWorkRepository(pg_pool)
+    await work_repo.create(SAMPLE_WORK)
+
+    chunk_repo = PgChunkRepository(pg_pool)
+    annotation_text = (
+        '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Malcolm Guite.\n'
+        "This meso covers: the role of imagination in perception."
+    )
+    annotated_chunk = {**SAMPLE_CHUNK, "annotation": annotation_text}
+    chunk_id = await chunk_repo.create(annotated_chunk)
+
+    emb_repo = PgEmbeddingRepository(pg_pool)
+    test_embedding = [0.01 * i for i in range(1024)]
+    await emb_repo.store(chunk_id, test_embedding, "voyage", "voyage-3-large", 1024)
+
+    # Similarity search should return annotation
+    query_emb = [0.01 * i + 0.001 for i in range(1024)]
+    results = await emb_repo.similarity_search(
+        query_emb, provider="voyage", model="voyage-3-large", limit=5,
+    )
+    assert len(results) == 1
+    assert results[0]["annotation"] == annotation_text
+
+
+async def test_similarity_search_annotation_null_when_absent(pg_pool: PostgresPool) -> None:
+    """Similarity search returns None annotation when chunk has no annotation."""
+    await run_migrations(pg_pool)
+    await _insert_author(pg_pool)
+    work_repo = PgWorkRepository(pg_pool)
+    await work_repo.create(SAMPLE_WORK)
+
+    chunk_repo = PgChunkRepository(pg_pool)
+    chunk_id = await chunk_repo.create(SAMPLE_CHUNK)  # no annotation
+
+    emb_repo = PgEmbeddingRepository(pg_pool)
+    test_embedding = [0.01 * i for i in range(1024)]
+    await emb_repo.store(chunk_id, test_embedding, "voyage", "voyage-3-large", 1024)
+
+    query_emb = [0.01 * i + 0.001 for i in range(1024)]
+    results = await emb_repo.similarity_search(
+        query_emb, provider="voyage", model="voyage-3-large", limit=5,
+    )
+    assert len(results) == 1
+    assert results[0]["annotation"] is None
+
+
 # -- Thematic Repository Tests ------------------------------------------------
 
 
