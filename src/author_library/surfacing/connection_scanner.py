@@ -173,26 +173,33 @@ class ConnectionScanner:
         # Load existing passage links to avoid duplicates
         existing_links = await self._get_existing_links(work_id)
 
-        # Scan chunks in batches
-        for batch_start in range(0, len(chunks), batch_size):
-            batch = chunks[batch_start : batch_start + batch_size]
-            tasks = [
-                self._scan_single_chunk(
-                    chunk,
-                    work_id=work_id,
-                    existing_links=existing_links,
-                    confidence_threshold=confidence_threshold,
-                    max_results=max_per_chunk,
-                )
-                for chunk in batch
-            ]
-            batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Per-chunk vector similarity scan (only if embedding provider available)
+        if self._embedding is not None:
+            for batch_start in range(0, len(chunks), batch_size):
+                batch = chunks[batch_start : batch_start + batch_size]
+                tasks = [
+                    self._scan_single_chunk(
+                        chunk,
+                        work_id=work_id,
+                        existing_links=existing_links,
+                        confidence_threshold=confidence_threshold,
+                        max_results=max_per_chunk,
+                    )
+                    for chunk in batch
+                ]
+                batch_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            for batch_result in batch_results:
-                if isinstance(batch_result, Exception):
-                    result.errors.append(str(batch_result))
-                    continue
-                result.connections.extend(batch_result)
+                for batch_result in batch_results:
+                    if isinstance(batch_result, Exception):
+                        result.errors.append(str(batch_result))
+                        continue
+                    result.connections.extend(batch_result)
+        else:
+            log.info(
+                "connection_scan_skip_vector",
+                work_id=work_id,
+                reason="no embedding provider — using entity overlap only",
+            )
 
         # Discover cross-work connections via shared entity graph nodes
         try:
