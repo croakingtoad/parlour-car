@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import uuid
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
+
+if TYPE_CHECKING:
+    pass
 
 
 class ChunkGranularity(StrEnum):
@@ -43,6 +47,7 @@ class Chunk(BaseModel):
     section: str | None = None
     position: int  # ordering within the work at this granularity
     parent_chunk_id: str | None = None  # parent in granularity hierarchy
+    section_type: str = "chapter"  # SectionType value: chapter, preface, bibliography, index, etc.
     raw_content: str | None = None  # original unprocessed content (for nano chunks)
     raw_content_window: str | None = None  # surrounding context window identifier
     pass_number: int = 1  # engagement pass (incremented on re-ingestion)
