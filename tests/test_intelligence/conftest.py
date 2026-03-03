@@ -40,12 +40,12 @@ requires_anthropic_key = pytest.mark.skipif(
 
 @pytest.fixture(scope="session")
 def db_settings() -> DatabaseSettings:
-    """Real database settings pointing at Docker containers."""
-    return DatabaseSettings(
-        postgres_url="postgresql://author_library:author_library@localhost:5432/author_library",
-        neo4j_url="bolt://localhost:7687",
-        neo4j_user="neo4j",
-    )
+    """Database settings — reads from env vars set by root conftest.py.
+
+    DB_POSTGRES_URL is forced to the test database by tests/conftest.py
+    so these settings NEVER point at the production database.
+    """
+    return DatabaseSettings()
 
 
 @pytest.fixture(scope="session")
