@@ -142,13 +142,44 @@ class TestSubjectHeadingsValidation:
 
 
 class TestLanguageValidation:
-    def test_invalid_language_code(self) -> None:
-        with pytest.raises(ValidationError, match="2-character ISO 639-1"):
-            CatalogEntry(**_core_fields(language="eng"))
+    def test_iso_639_2_normalized_to_639_1(self) -> None:
+        """EPUBs provide 3-char ISO 639-2 codes; validator normalizes them."""
+        entry = CatalogEntry(**_core_fields(language="eng"))
+        assert entry.language == "en"
+
+    def test_iso_639_2_french(self) -> None:
+        entry = CatalogEntry(**_core_fields(language="fra"))
+        assert entry.language == "fr"
+
+    def test_iso_639_2_german(self) -> None:
+        entry = CatalogEntry(**_core_fields(language="deu"))
+        assert entry.language == "de"
+
+    def test_iso_639_2_bibliographic_variant(self) -> None:
+        """Bibliographic variants (e.g. 'ger' for German) also normalize."""
+        entry = CatalogEntry(**_core_fields(language="ger"))
+        assert entry.language == "de"
+
+    def test_unrecognized_3char_code_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="ISO 639-1"):
+            CatalogEntry(**_core_fields(language="zzz"))
 
     def test_single_char_language(self) -> None:
-        with pytest.raises(ValidationError, match="2-character ISO 639-1"):
+        with pytest.raises(ValidationError, match="ISO 639-1"):
             CatalogEntry(**_core_fields(language="e"))
+
+    def test_four_char_code_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="ISO 639-1"):
+            CatalogEntry(**_core_fields(language="engl"))
+
+    def test_bcp47_tag_normalized(self) -> None:
+        entry = CatalogEntry(**_core_fields(language="en-US"))
+        assert entry.language == "en"
+
+    def test_bcp47_with_639_2_prefix(self) -> None:
+        """BCP-47 tag with ISO 639-2 prefix like 'eng-US' normalizes correctly."""
+        entry = CatalogEntry(**_core_fields(language="eng-US"))
+        assert entry.language == "en"
 
 
 class TestWordCountValidation:

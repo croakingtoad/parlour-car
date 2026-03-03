@@ -134,6 +134,49 @@ class MediaType(StrEnum):
 NonEmptyStr = Annotated[str, Field(min_length=1)]
 ClassificationNote = Annotated[str, Field(min_length=10)]
 
+# ISO 639-2 (3-char) → ISO 639-1 (2-char) mapping for common languages.
+# EPUBs often embed 3-char codes in their OPF <dc:language> metadata.
+_ISO_639_2_TO_1: dict[str, str] = {
+    "eng": "en",
+    "fra": "fr",
+    "fre": "fr",  # bibliographic variant
+    "deu": "de",
+    "ger": "de",  # bibliographic variant
+    "spa": "es",
+    "ita": "it",
+    "por": "pt",
+    "rus": "ru",
+    "zho": "zh",
+    "chi": "zh",  # bibliographic variant
+    "jpn": "ja",
+    "kor": "ko",
+    "ara": "ar",
+    "hin": "hi",
+    "nld": "nl",
+    "dut": "nl",  # bibliographic variant
+    "swe": "sv",
+    "nor": "no",
+    "dan": "da",
+    "fin": "fi",
+    "pol": "pl",
+    "ces": "cs",
+    "cze": "cs",  # bibliographic variant
+    "ell": "el",
+    "gre": "el",  # bibliographic variant
+    "heb": "he",
+    "tur": "tr",
+    "ukr": "uk",
+    "ron": "ro",
+    "rum": "ro",  # bibliographic variant
+    "hun": "hu",
+    "cat": "ca",
+    "lat": "la",
+    "gla": "gd",
+    "cym": "cy",
+    "wel": "cy",  # bibliographic variant
+    "gle": "ga",
+}
+
 
 class CatalogEntry(BaseModel):
     """Base catalog entry with core fields required for all source classes.
@@ -193,8 +236,12 @@ class CatalogEntry(BaseModel):
     def validate_language(cls, v: str) -> str:
         # Normalize BCP-47 tags like "en-US" to ISO 639-1 "en"
         code = v.split("-")[0].strip().lower()
+        # Normalize ISO 639-2 (3-char) codes to ISO 639-1 (2-char).
+        # EPUBs commonly provide 3-char codes from their OPF metadata.
+        if len(code) == 3:
+            code = _ISO_639_2_TO_1.get(code, code)
         if len(code) != 2:
-            msg = f"language must be a 2-character ISO 639-1 code, got {v!r}"
+            msg = f"language must be a 2-character ISO 639-1 code (or recognized ISO 639-2), got {v!r}"
             raise ValueError(msg)
         return code
 
