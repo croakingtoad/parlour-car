@@ -261,6 +261,22 @@ class GraphRepository(ABC):
         """Create a USER_REFLECTS_ON edge from a personal chunk to a target."""
 
     @abstractmethod
+    async def get_passage_links_for_work(self, work_id: str) -> list[dict[str, Any]]:
+        """Get all passage link edges (ENGAGES_WITH, THEMATIC_PARALLEL) for a work.
+
+        Returns edges where either the source or target chunk belongs to the
+        specified work. Used by the ConnectionScanner to avoid creating
+        duplicate links during post-ingestion scanning.
+
+        Args:
+            work_id: The work_id to find passage links for.
+
+        Returns:
+            List of dicts with source_chunk_id, target_chunk_id, rel_type,
+            link_type, and confidence.
+        """
+
+    @abstractmethod
     async def get_reflections_for_target(
         self, target_id: str, target_key: str, target_label: str, *, limit: int = 20
     ) -> list[dict[str, Any]]:
@@ -883,6 +899,23 @@ class Neo4jGraphRepository(GraphRepository):
             """MATCH (c:Chunk {chunk_id: $chunk_id})-[:EXPLORES_THEME]->(t:Theme)
             RETURN t.name AS name, t.canonical_name AS canonical_name""",
             {"chunk_id": chunk_id},
+        )
+        return results
+
+    async def get_passage_links_for_work(self, work_id: str) -> list[dict[str, Any]]:
+        """Get all passage link edges for chunks belonging to a work.
+
+        Queries both ENGAGES_WITH and THEMATIC_PARALLEL relationship types
+        where either endpoint chunk belongs to the specified work.
+        """
+        results = await self._neo4j.execute_read(
+            """MATCH (c:Chunk {work_id: $work_id})-[r:ENGAGES_WITH|THEMATIC_PARALLEL]-(other:Chunk)
+            RETURN c.chunk_id AS source_chunk_id,
+                   other.chunk_id AS target_chunk_id,
+                   type(r) AS rel_type,
+                   r.link_type AS link_type,
+                   r.confidence AS confidence""",
+            {"work_id": work_id},
         )
         return results
 
