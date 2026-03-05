@@ -142,14 +142,16 @@ async def _classify_only(
         metadata_hints=metadata_hints,
     )
 
+    requires_human_judgment = classification.confidence < 0.8
+
     result: dict[str, Any] = {
         "status": "awaiting_confirmation",
         "file_path": str(path),
         "subject_author": subject_author,
         "suggested_class": classification.source_class.value,
         "confidence": classification.confidence,
-        "signals": classification.signals,
-        "requires_human_judgment": classification.requires_human_judgment,
+        "signals": classification.signals_detected,
+        "requires_human_judgment": requires_human_judgment,
         "next_steps": [
             f"Review the suggested source class: {classification.source_class.value}",
             "Use catalog_source to confirm (or override) the classification and catalog the work",
@@ -160,19 +162,21 @@ async def _classify_only(
     # Check for mixed authorship
     if classification.source_class.value in ("primary", "contextual"):
         try:
-            analyzer = MixedAuthorshipAnalyzer(settings)
-            mixed_result = await analyzer.analyze(
+            analyzer = MixedAuthorshipAnalyzer(subject_author)
+            mixed_result = analyzer.analyze(
                 document,
                 document_source_class=classification.source_class.value,
             )
             if mixed_result.is_mixed:
+                requires_human_judgment = True
+                result["requires_human_judgment"] = True
                 result["mixed_authorship"] = {
                     "is_mixed": True,
                     "segments": len(mixed_result.segments),
-                    "recommendation": mixed_result.recommendation,
+                    "analysis_notes": mixed_result.analysis_notes,
                 }
         except Exception:
-            log.warning("classify_only_mixed_authorship_failed", path=str(path))
+            log.warning("classify_only_mixed_authorship_failed", path=str(path), exc_info=True)
 
     return json.dumps(result, indent=2)
 
