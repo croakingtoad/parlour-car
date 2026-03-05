@@ -325,6 +325,9 @@ class IngestionPipeline:
             if chunk.parent_chunk_id is not None:
                 resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
 
+            metadata = dict(chunk.metadata)
+            metadata["section_type"] = chunk.section_type
+
             chunk_data: dict[str, Any] = {
                 "work_id": chunk.work_id,
                 "text": chunk.text,
@@ -335,7 +338,7 @@ class IngestionPipeline:
                 "section": chunk.section,
                 "position": chunk.position,
                 "parent_chunk_id": resolved_parent,
-                "metadata": chunk.metadata,
+                "metadata": metadata,
                 "raw_content": chunk.raw_content,
                 "raw_content_window": chunk.raw_content_window,
                 "pass_number": pass_number,

@@ -494,6 +494,30 @@ async def handle_chunk_source(
         by_granularity=chunks_by_gran,
     )
 
+    # Step 5b: Section-type routing — filter out non-content sections
+    # (matches IngestionPipeline._filter_by_section_type logic)
+    _CONTENT_SECTION_TYPES = {"chapter", "preface", "back_matter"}
+    pre_filter_count = len(chunks)
+    skipped_sections: dict[str, int] = {}
+    content_chunks: list[Chunk] = []
+    for chunk in chunks:
+        if chunk.section_type in _CONTENT_SECTION_TYPES:
+            content_chunks.append(chunk)
+        else:
+            skipped_sections[chunk.section_type] = (
+                skipped_sections.get(chunk.section_type, 0) + 1
+            )
+
+    if skipped_sections:
+        log.info(
+            "chunk_source_section_type_filter",
+            work_id=work_id,
+            original_chunks=pre_filter_count,
+            kept_chunks=len(content_chunks),
+            skipped_by_type=skipped_sections,
+        )
+    chunks = content_chunks
+
     # Step 6: Annotate
     annotation_ctx = _build_annotation_context_from_work(work, source_class)
     annotator = ChunkAnnotator(settings)
@@ -512,6 +536,9 @@ async def handle_chunk_source(
         if chunk.parent_chunk_id is not None:
             resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
 
+        metadata = dict(chunk.metadata)
+        metadata["section_type"] = chunk.section_type
+
         chunk_data: dict[str, Any] = {
             "work_id": chunk.work_id,
             "text": chunk.text,
@@ -522,7 +549,7 @@ async def handle_chunk_source(
             "section": chunk.section,
             "position": chunk.position,
             "parent_chunk_id": resolved_parent,
-            "metadata": chunk.metadata,
+            "metadata": metadata,
             "raw_content": chunk.raw_content,
             "raw_content_window": chunk.raw_content_window,
             "pass_number": pass_number,
