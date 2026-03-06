@@ -565,43 +565,43 @@ class EntityExtractor:
             )
             edges += 1
 
-        # Arguments — source-class-gated edges
-        for argument in extraction.arguments:
-            await self._neo4j.execute_write(
-                """MERGE (a:Argument {canonical_name: $canonical_name})
-                SET a.claim = $claim, a.evidence_summary = $evidence_summary""",
-                {
-                    "canonical_name": argument.canonical_name,
-                    "claim": argument.name,
-                    "evidence_summary": argument.properties.get("evidence_summary", ""),
-                },
-            )
-            nodes += 1
-
-            if source_class == SourceClass.PRIMARY:
-                # PRIMARY sources MAKE arguments
+        # Arguments — only create nodes when an edge will also be created.
+        # PRIMARY → MAKES_ARGUMENT, SECONDARY → ATTRIBUTED_BY_CRITIC.
+        # CONTEXTUAL/TERTIARY get no argument edges, so skip node creation too.
+        if source_class in (SourceClass.PRIMARY, SourceClass.SECONDARY):
+            for argument in extraction.arguments:
                 await self._neo4j.execute_write(
-                    """MATCH (c:Chunk {chunk_id: $chunk_id}),
-                           (a:Argument {canonical_name: $canonical_name})
-                    MERGE (c)-[:MAKES_ARGUMENT]->(a)""",
-                    {"chunk_id": chunk.id, "canonical_name": argument.canonical_name},
-                )
-                edges += 1
-            elif source_class == SourceClass.SECONDARY:
-                # SECONDARY sources ATTRIBUTE arguments to the critic
-                await self._neo4j.execute_write(
-                    """MATCH (c:Chunk {chunk_id: $chunk_id}),
-                           (a:Argument {canonical_name: $canonical_name})
-                    MERGE (c)-[r:ATTRIBUTED_BY_CRITIC]->(a)
-                    SET r.work_id = $work_id""",
+                    """MERGE (a:Argument {canonical_name: $canonical_name})
+                    SET a.claim = $claim, a.evidence_summary = $evidence_summary""",
                     {
-                        "chunk_id": chunk.id,
                         "canonical_name": argument.canonical_name,
-                        "work_id": chunk.work_id,
+                        "claim": argument.name,
+                        "evidence_summary": argument.properties.get("evidence_summary", ""),
                     },
                 )
-                edges += 1
-            # CONTEXTUAL and TERTIARY: no argument edges
+                nodes += 1
+
+                if source_class == SourceClass.PRIMARY:
+                    await self._neo4j.execute_write(
+                        """MATCH (c:Chunk {chunk_id: $chunk_id}),
+                               (a:Argument {canonical_name: $canonical_name})
+                        MERGE (c)-[:MAKES_ARGUMENT]->(a)""",
+                        {"chunk_id": chunk.id, "canonical_name": argument.canonical_name},
+                    )
+                    edges += 1
+                else:  # SECONDARY
+                    await self._neo4j.execute_write(
+                        """MATCH (c:Chunk {chunk_id: $chunk_id}),
+                               (a:Argument {canonical_name: $canonical_name})
+                        MERGE (c)-[r:ATTRIBUTED_BY_CRITIC]->(a)
+                        SET r.work_id = $work_id""",
+                        {
+                            "chunk_id": chunk.id,
+                            "canonical_name": argument.canonical_name,
+                            "work_id": chunk.work_id,
+                        },
+                    )
+                    edges += 1
 
         # Concepts — all source classes
         for concept in extraction.concepts:
