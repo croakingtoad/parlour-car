@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from author_library.intelligence.thematic_index import (
+    MAX_CHUNKS_PER_BATCH,
     KeyPassage,
     ThematicAppearance,
     ThematicEntry,
@@ -107,6 +108,25 @@ class TestBatching:
         assert len(batches) == 2
         assert len(batches[0]) == 25
         assert len(batches[1]) == 5
+
+    def test_max_chunks_per_batch_is_75(self) -> None:
+        """MAX_CHUNKS_PER_BATCH should be 75 to reduce API calls.
+
+        Meso chunks average ~150 words, so 75 * 150 = 11,250 words —
+        well within Claude's context window. This reduces the number of
+        batches from ceil(229/25)=10 to ceil(229/75)=4 per theme.
+        """
+        assert MAX_CHUNKS_PER_BATCH == 75
+
+    def test_batch_uses_default_75(self) -> None:
+        """_batch_chunks should default to 75 chunks per batch."""
+        chunks = [{"text": f"t{i}"} for i in range(229)]
+        batches = _batch_chunks(chunks)
+        assert len(batches) == 4  # ceil(229/75) = 4
+        assert len(batches[0]) == 75
+        assert len(batches[1]) == 75
+        assert len(batches[2]) == 75
+        assert len(batches[3]) == 4  # 229 - 75*3 = 4
 
 
 class TestFormatChunks:

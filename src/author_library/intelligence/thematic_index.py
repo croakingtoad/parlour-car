@@ -7,6 +7,7 @@ for efficient query-time retrieval.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -121,7 +122,7 @@ representative passages as key passages.\
 # Chunk batching
 # ---------------------------------------------------------------------------
 
-MAX_CHUNKS_PER_BATCH = 25
+MAX_CHUNKS_PER_BATCH = 75
 
 
 def _batch_chunks(
@@ -235,22 +236,27 @@ class ThematicIndexGenerator:
             themes=[t.theme for t in themes],
         )
 
-        # Phase 2: Map theme appearances across the full corpus
+        # Phase 2: Map theme appearances across the full corpus (parallel)
         mapping_errors: list[str] = []
-        for theme in themes:
-            try:
-                appearances = await self._map_theme_appearances(
-                    theme=theme,
-                    all_chunks=primary_chunks,
-                )
-                theme.appearances = appearances
-            except Exception as exc:
-                log.error(
-                    "theme_mapping_failed",
-                    theme=theme.theme,
-                    error=str(exc),
-                )
-                mapping_errors.append(f"{theme.theme}: {exc}")
+        semaphore = asyncio.Semaphore(5)
+
+        async def _map_one_theme(theme: ThematicEntry) -> None:
+            async with semaphore:
+                try:
+                    appearances = await self._map_theme_appearances(
+                        theme=theme,
+                        all_chunks=primary_chunks,
+                    )
+                    theme.appearances = appearances
+                except Exception as exc:
+                    log.error(
+                        "theme_mapping_failed",
+                        theme=theme.theme,
+                        error=str(exc),
+                    )
+                    mapping_errors.append(f"{theme.theme}: {exc}")
+
+        await asyncio.gather(*(_map_one_theme(t) for t in themes))
 
         if mapping_errors:
             log.warning(
