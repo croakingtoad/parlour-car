@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     """Running migrations ensures all migration files are tracked."""
     applied = await run_migrations(pg_pool)
-    # May be 0 (all applied) up to 12 (first run). Test DB state varies.
-    assert len(applied) <= 12
-    # Verify all 12 are recorded in the _migrations table
+    # May be 0 (all applied) up to 13 (first run). Test DB state varies.
+    assert len(applied) <= 13
+    # Verify all 13 are recorded in the _migrations table
     rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
     filenames = [r["filename"] for r in rows]
     assert "001_initial.sql" in filenames
@@ -33,6 +33,7 @@ async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     assert "010_search_vector_annotation.sql" in filenames
     assert "011_backfill_section_type.sql" in filenames
     assert "012_delete_noise_chunks.sql" in filenames
+    assert "013_ingestion_lessons.sql" in filenames
 
 
 async def test_migrations_idempotent(pg_pool: PostgresPool) -> None:

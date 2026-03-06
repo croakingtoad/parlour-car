@@ -14,6 +14,7 @@ import structlog
 from author_library.storage.migrations.runner import run_migrations
 from author_library.storage.neo4j import Neo4jConnection
 from author_library.storage.postgres import PostgresPool
+from author_library.storage.lessons import LessonRepository
 from author_library.storage.repositories import (
     Neo4jGraphRepository,
     PgChunkRepository,
@@ -118,6 +119,11 @@ class StorageManager:
     def transcript_cache(self) -> PgTranscriptCacheRepository:
         """Transcript cache repository."""
         return PgTranscriptCacheRepository(self._pg)
+
+    @property
+    def lessons(self) -> LessonRepository:
+        """Ingestion lessons repository."""
+        return LessonRepository(self._pg)
 
     @property
     def graph(self) -> Neo4jGraphRepository:

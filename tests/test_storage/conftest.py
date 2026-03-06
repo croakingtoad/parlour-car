@@ -64,6 +64,7 @@ async def _cleanup_pg(pg_pool: PostgresPool) -> AsyncIterator[None]:
     yield
     # Clean up in reverse dependency order
     for table in [
+        "ingestion_lessons",
         "transcript_cache",
         "thematic_appearances",
         "thematic_entries",
