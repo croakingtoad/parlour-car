@@ -129,6 +129,51 @@ class TestWorkIdGeneration:
         pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+)*$")
         assert pattern.match(work_id), f"work_id {work_id!r} does not match pattern"
 
+    def test_comma_format_author_normalized(self) -> None:
+        """'Guite, Malcolm' and 'Malcolm Guite' must produce the same slug."""
+        natural = ClassificationPipeline._generate_work_id(
+            "Malcolm Guite", "Mariner"
+        )
+        bibliographic = ClassificationPipeline._generate_work_id(
+            "Guite, Malcolm", "Mariner"
+        )
+        assert natural == bibliographic
+        assert natural == "malcolm-guite--mariner"
+
+    def test_comma_format_with_middle_name(self) -> None:
+        """Author with middle initial in comma format."""
+        work_id = ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor", "The Rime of the Ancient Mariner"
+        )
+        assert work_id.startswith("samuel-taylor-coleridge--")
+
+    def test_comma_format_preserves_multipart_surname(self) -> None:
+        """Comma-separated author with multi-word given name."""
+        work_id = ClassificationPipeline._generate_work_id(
+            "von Balthasar, Hans Urs", "Prayer"
+        )
+        assert work_id == "hans-urs-von-balthasar--prayer"
+
+
+class TestNormalizeAuthorName:
+    def test_natural_order_unchanged(self) -> None:
+        assert ClassificationPipeline._normalize_author_name("Malcolm Guite") == "Malcolm Guite"
+
+    def test_bibliographic_order_swapped(self) -> None:
+        assert ClassificationPipeline._normalize_author_name("Guite, Malcolm") == "Malcolm Guite"
+
+    def test_whitespace_stripped(self) -> None:
+        assert ClassificationPipeline._normalize_author_name("  Guite , Malcolm  ") == "Malcolm Guite"
+
+    def test_no_comma_no_change(self) -> None:
+        assert ClassificationPipeline._normalize_author_name("Malcolm Guite") == "Malcolm Guite"
+
+    def test_empty_parts_not_swapped(self) -> None:
+        """A trailing comma with no given name should not corrupt the output."""
+        # "Guite," has an empty second part — should not swap
+        result = ClassificationPipeline._normalize_author_name("Guite,")
+        assert result.strip() == "Guite,"
+
 
 # ---------------------------------------------------------------------------
 # Pipeline routing tests

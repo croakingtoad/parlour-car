@@ -315,6 +315,24 @@ class ClassificationPipeline:
         }
 
     @staticmethod
+    def _normalize_author_name(author: str) -> str:
+        """Normalize author name from 'Last, First' to 'First Last' format.
+
+        EPUB metadata may store author names in bibliographic order
+        (e.g. "Guite, Malcolm") or natural order ("Malcolm Guite").
+        This normalizes to natural order so that work_id slugs are
+        consistent regardless of the metadata format.
+        """
+        author = author.strip()
+        if "," in author:
+            # Split on the first comma only — handles "Guite, Malcolm"
+            # but also "Guite, Malcolm J." or "van der Berg, Jan"
+            parts = [p.strip() for p in author.split(",", 1)]
+            if len(parts) == 2 and parts[0] and parts[1]:
+                author = f"{parts[1]} {parts[0]}"
+        return author
+
+    @staticmethod
     def _generate_work_id(author: str, title: str) -> str:
         """Generate a work_id from author and title per catalog-schema.md §6."""
         import re
@@ -325,6 +343,9 @@ class ClassificationPipeline:
             slug = re.sub(r"[\s]+", "-", slug)
             slug = re.sub(r"-+", "-", slug)
             return slug.strip("-")
+
+        # Normalize "Last, First" → "First Last" before slugifying
+        author = ClassificationPipeline._normalize_author_name(author)
 
         author_slug = slugify(author)
         title_slug = slugify(title)
