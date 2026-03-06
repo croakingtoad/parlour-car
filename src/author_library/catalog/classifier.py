@@ -231,16 +231,10 @@ class SourceClassifier:
 
     def _parse_classification_response(self, response_text: str) -> ClassificationResult:
         """Parse the LLM's JSON response into a ClassificationResult."""
-        # Strip markdown code fences if present
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first line (```json) and last line (```)
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            text = "\n".join(lines)
+        from author_library.intelligence.json_parser import extract_json
 
         try:
-            data = json.loads(text)
+            data = extract_json(response_text)
         except json.JSONDecodeError as exc:
             raise ClassificationError(
                 f"Failed to parse classification response as JSON: {exc}",

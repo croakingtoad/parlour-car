@@ -456,20 +456,14 @@ class ThematicIndexGenerator:
         return self._parse_json_response(response_text)
 
     def _parse_json_response(self, response_text: str) -> dict[str, Any]:
-        """Parse a JSON response, stripping markdown fences if present."""
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            text = "\n".join(lines)
+        """Parse a JSON response from an LLM, handling common malformations."""
+        from author_library.intelligence.json_parser import extract_json
 
         try:
-            data: dict[str, Any] = json.loads(text)
+            return extract_json(response_text)
         except json.JSONDecodeError as exc:
             raise IntelligenceError(
                 f"Failed to parse thematic response as JSON: {exc}",
                 context={"response_text": response_text[:500]},
                 cause=exc,
             ) from exc
-
-        return data

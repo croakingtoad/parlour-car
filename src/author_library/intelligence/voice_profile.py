@@ -372,14 +372,10 @@ class VoiceProfileExtractor:
 
     def _parse_response(self, response_text: str) -> dict[str, Any]:
         """Parse the LLM's JSON response into voice profile data."""
-        text = response_text.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [line for line in lines if not line.strip().startswith("```")]
-            text = "\n".join(lines)
+        from author_library.intelligence.json_parser import extract_json
 
         try:
-            data: dict[str, Any] = json.loads(text)
+            data: dict[str, Any] = extract_json(response_text)
         except json.JSONDecodeError as exc:
             raise IntelligenceError(
                 f"Failed to parse voice profile response as JSON: {exc}",
