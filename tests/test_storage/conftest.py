@@ -79,7 +79,22 @@ async def _cleanup_pg(pg_pool: PostgresPool) -> AsyncIterator[None]:
 
 @pytest.fixture(autouse=True)
 async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
-    """Clean up Neo4j test data after each test."""
+    """Clean up Neo4j test data after each test.
+
+    IMPORTANT: Only deletes nodes with work_id starting with 'test--' to avoid
+    wiping production data. The previous implementation used MATCH (n) DETACH
+    DELETE n which destroyed ALL production graph data every test run.
+    """
     yield
     with contextlib.suppress(Exception):
-        await neo4j_conn.execute_write("MATCH (n) DETACH DELETE n", {})
+        await neo4j_conn.execute_write(
+            "MATCH (c:Chunk) WHERE c.work_id STARTS WITH 'test--' DETACH DELETE c", {}
+        )
+        await neo4j_conn.execute_write(
+            "MATCH (w:Work) WHERE w.work_id STARTS WITH 'test--' DETACH DELETE w", {}
+        )
+        # Clean orphaned entity nodes (no remaining relationships)
+        for label in ("Theme", "Person", "Concept", "Argument", "Author"):
+            await neo4j_conn.execute_write(
+                f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+            )

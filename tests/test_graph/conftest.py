@@ -36,19 +36,53 @@ requires_anthropic = pytest.mark.skipif(
 
 @pytest.fixture
 async def neo4j_conn() -> AsyncGenerator[Neo4jConnection]:
-    """Provide a connected Neo4j instance with clean schema."""
+    """Provide a connected Neo4j instance with clean schema.
+
+    IMPORTANT: Only cleans up test-created nodes (work_id starting with
+    'test--' or known test work_ids). The previous implementation used
+    MATCH (n) DETACH DELETE n which destroyed ALL production graph data.
+    """
+    _TEST_WORK_IDS = [
+        "guite--faith-hope-poetry",
+        "coleridge--biographia-literaria",
+        "coleridge--statesmans-manual",
+        "ward--romantic-theology",
+        "w1", "w2",  # Used by theme_dedup integration tests
+    ]
+    # Also clean up simple chunk IDs used by integration tests
+    _TEST_CHUNK_IDS = ["c1", "c2", "c3", "c4", "c5"]
+
     settings = DatabaseSettings()
     conn = Neo4jConnection(settings)
     await conn.connect()
     await conn.init_schema()
 
-    # Clean test data before each test
-    await conn.execute_write("MATCH (n) DETACH DELETE n")
+    async def _scoped_cleanup(c: Neo4jConnection) -> None:
+        """Remove only test-created nodes, preserving production data."""
+        for wid in _TEST_WORK_IDS:
+            await c.execute_write(
+                "MATCH (ch:Chunk {work_id: $wid}) DETACH DELETE ch", {"wid": wid}
+            )
+            await c.execute_write(
+                "MATCH (w:Work {work_id: $wid}) DETACH DELETE w", {"wid": wid}
+            )
+        for cid in _TEST_CHUNK_IDS:
+            await c.execute_write(
+                "MATCH (ch:Chunk {chunk_id: $cid}) DETACH DELETE ch", {"cid": cid}
+            )
+        await c.execute_write(
+            "MATCH (ch:Chunk) WHERE ch.work_id STARTS WITH 'test--' DETACH DELETE ch"
+        )
+        await c.execute_write(
+            "MATCH (w:Work) WHERE w.work_id STARTS WITH 'test--' DETACH DELETE w"
+        )
+        # Clean orphaned entity nodes left by test deletions
+        for label in ("Theme", "Person", "Concept", "Argument"):
+            await c.execute_write(f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n")
 
+    await _scoped_cleanup(conn)
     yield conn
-
-    # Clean up after test
-    await conn.execute_write("MATCH (n) DETACH DELETE n")
+    await _scoped_cleanup(conn)
     await conn.close()
 
 
