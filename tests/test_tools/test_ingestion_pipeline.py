@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import textwrap
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -210,3 +210,235 @@ class TestAuthorUpsertDuringIngestion:
         assert neo4j_params["author_id"] == "malcolm-guite"
         assert neo4j_params["name"] == "Malcolm Guite"
         assert neo4j_params["work_id"] == "guite--bibliography"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for quality-check tests
+# ---------------------------------------------------------------------------
+
+
+def _make_pipeline(
+    *,
+    neo4j_read_results: list[list[dict[str, Any]]] | None = None,
+    neo4j_write_results: list[list[dict[str, Any]]] | None = None,
+    pg_fetch_val_results: list[Any] | None = None,
+    work_record: dict[str, Any] | None = None,
+) -> IngestionPipeline:
+    """Build an IngestionPipeline with mocked storage for quality-check tests."""
+    mock_storage = MagicMock()
+
+    mock_neo4j = AsyncMock()
+    if neo4j_write_results is not None:
+        mock_neo4j.execute_write.side_effect = neo4j_write_results
+    else:
+        mock_neo4j.execute_write.return_value = [{"deleted": 0}]
+    if neo4j_read_results is not None:
+        mock_neo4j.execute_read.side_effect = neo4j_read_results
+    else:
+        mock_neo4j.execute_read.return_value = [
+            {"total_chunks": 10, "no_entity_chunks": 0}
+        ]
+    mock_storage.neo4j = mock_neo4j
+
+    mock_pg = AsyncMock()
+    if pg_fetch_val_results is not None:
+        mock_pg.fetch_val.side_effect = pg_fetch_val_results
+    else:
+        # Default: 0 noise, 10 total chunks, 10 embeddings
+        mock_pg.fetch_val.side_effect = [0, 10, 10]
+    mock_storage.pg = mock_pg
+
+    mock_works = AsyncMock()
+    mock_works.get.return_value = work_record or {
+        "work_id": "lewis--mere-christianity",
+        "author": "C.S. Lewis",
+        "source_class": "primary",
+    }
+    mock_storage.works = mock_works
+
+    mock_settings = MagicMock()
+    mock_embedding = AsyncMock()
+
+    return IngestionPipeline(
+        settings=mock_settings,
+        storage=mock_storage,
+        embedding_provider=mock_embedding,
+    )
+
+
+class TestRunQualityChecks:
+    """Tests for IngestionPipeline._run_quality_checks."""
+
+    async def test_all_pass(self) -> None:
+        """Clean work produces a 'pass' status with no warnings."""
+        pipeline = _make_pipeline()
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["status"] == "pass"
+        assert result["orphans_cleaned"] == 0
+        assert result["classification_warning"] is None
+        assert result["noise_chunks"] == 0
+        assert result["embedding_coverage_pct"] == 100.0
+        assert result["entity_coverage_pct"] == 100.0
+        assert "warnings" not in result
+
+    async def test_orphans_cleaned(self) -> None:
+        """Orphaned entity nodes are deleted and counted."""
+        pipeline = _make_pipeline(
+            neo4j_write_results=[[{"deleted": 3}]],
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["orphans_cleaned"] == 3
+
+    async def test_classification_warning_triggered(self) -> None:
+        """Author match + contextual class triggers a classification warning."""
+        pipeline = _make_pipeline(
+            work_record={
+                "work_id": "lewis--some-essay",
+                "author": "C.S. Lewis",
+                "source_class": "contextual",
+            },
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--some-essay", "contextual", "c-s-lewis",
+        )
+        assert result["classification_warning"] is not None
+        assert "reclassifying" in result["classification_warning"].lower()
+        assert result["status"] == "warnings"
+
+    async def test_no_classification_warning_for_different_author(self) -> None:
+        """Author mismatch should not trigger a classification warning."""
+        pipeline = _make_pipeline(
+            work_record={
+                "work_id": "tolkien--on-fairy-stories",
+                "author": "J.R.R. Tolkien",
+                "source_class": "contextual",
+            },
+        )
+        result = await pipeline._run_quality_checks(
+            "tolkien--on-fairy-stories", "contextual", "c-s-lewis",
+        )
+        assert result["classification_warning"] is None
+
+    async def test_noise_chunks_detected(self) -> None:
+        """Micro/nano chunks under 50 chars are flagged."""
+        pipeline = _make_pipeline(
+            pg_fetch_val_results=[5, 10, 10],  # 5 noise, 10 total, 10 embedded
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["noise_chunks"] == 5
+        assert result["status"] == "warnings"
+
+    async def test_embedding_coverage_gap(self) -> None:
+        """Missing embeddings lowers coverage below 100%."""
+        pipeline = _make_pipeline(
+            pg_fetch_val_results=[0, 20, 15],  # 0 noise, 20 chunks, 15 embedded
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["embedding_coverage_pct"] == 75.0
+        assert result["status"] == "warnings"
+
+    async def test_entity_coverage_gap(self) -> None:
+        """Chunks without entity edges trigger a warning when > 10%."""
+        pipeline = _make_pipeline(
+            neo4j_read_results=[
+                [{"total_chunks": 20, "no_entity_chunks": 5}],
+            ],
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["entity_coverage_pct"] == 75.0
+        assert result["status"] == "warnings"
+
+    async def test_entity_coverage_ok_at_threshold(self) -> None:
+        """Entity coverage at exactly 90% should not warn."""
+        pipeline = _make_pipeline(
+            neo4j_read_results=[
+                [{"total_chunks": 10, "no_entity_chunks": 1}],
+            ],
+        )
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["entity_coverage_pct"] == 90.0
+        # 90% is the threshold — at exactly 90% there should be no entity warning
+        entity_warnings = [
+            w for w in result.get("warnings", []) if "Entity coverage" in w
+        ]
+        assert entity_warnings == []
+
+    async def test_neo4j_failure_does_not_crash(self) -> None:
+        """If Neo4j is unreachable, quality checks still complete with warnings."""
+        pipeline = _make_pipeline()
+        pipeline._storage.neo4j.execute_write.side_effect = Exception("Neo4j down")
+        pipeline._storage.neo4j.execute_read.side_effect = Exception("Neo4j down")
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["status"] == "warnings"
+        assert any("Orphan check failed" in w for w in result.get("warnings", []))
+        assert any("Entity coverage check failed" in w for w in result.get("warnings", []))
+
+    async def test_pg_failure_does_not_crash(self) -> None:
+        """If PG is unreachable for noise/embedding checks, still completes."""
+        pipeline = _make_pipeline()
+        pipeline._storage.pg.fetch_val.side_effect = Exception("PG down")
+        result = await pipeline._run_quality_checks(
+            "lewis--mere-christianity", "primary", "c-s-lewis",
+        )
+        assert result["status"] == "warnings"
+        assert any("Noise check failed" in w for w in result.get("warnings", []))
+        assert any("Embedding coverage check failed" in w for w in result.get("warnings", []))
+
+
+class TestIngestionResultWithQualityChecks:
+    """Tests for IngestionResult quality_checks integration."""
+
+    def test_quality_checks_in_to_dict(self) -> None:
+        """quality_checks dict appears in to_dict output when provided."""
+        qc = {
+            "orphans_cleaned": 2,
+            "classification_warning": None,
+            "noise_chunks": 0,
+            "embedding_coverage_pct": 100.0,
+            "entity_coverage_pct": 95.0,
+            "status": "pass",
+        }
+        result = IngestionResult(
+            work_id="lewis--mere-christianity",
+            source_class="primary",
+            processing_route="full_enrichment",
+            chunks_by_granularity={"meso": 10},
+            embeddings_stored=10,
+            entity_count=5,
+            edge_count=3,
+            errors=[],
+            quality_checks=qc,
+        )
+        d = result.to_dict()
+        assert "quality_checks" in d
+        assert d["quality_checks"]["orphans_cleaned"] == 2
+        assert d["quality_checks"]["status"] == "pass"
+
+    def test_no_quality_checks_omitted(self) -> None:
+        """quality_checks key absent from to_dict when None."""
+        result = IngestionResult(
+            work_id="w1",
+            source_class="primary",
+            processing_route="full_enrichment",
+            chunks_by_granularity={"meso": 5},
+            embeddings_stored=5,
+            entity_count=0,
+            edge_count=0,
+            errors=[],
+        )
+        d = result.to_dict()
+        assert "quality_checks" not in d

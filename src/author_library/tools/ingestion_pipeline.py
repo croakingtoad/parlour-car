@@ -55,6 +55,7 @@ class IngestionResult:
         "entity_count",
         "errors",
         "processing_route",
+        "quality_checks",
         "source_class",
         "total_chunks",
         "unembedded_chunk_ids",
@@ -74,6 +75,7 @@ class IngestionResult:
         errors: list[str],
         total_chunks: int = 0,
         unembedded_chunk_ids: list[str] | None = None,
+        quality_checks: dict[str, Any] | None = None,
     ) -> None:
         self.work_id = work_id
         self.source_class = source_class
@@ -85,6 +87,7 @@ class IngestionResult:
         self.errors = errors
         self.total_chunks = total_chunks or sum(chunks_by_granularity.values())
         self.unembedded_chunk_ids = unembedded_chunk_ids or []
+        self.quality_checks = quality_checks
 
     def to_dict(self) -> dict[str, Any]:
         total = self.total_chunks
@@ -109,6 +112,8 @@ class IngestionResult:
             result["post_ingestion_stats"]["status"] = "incomplete — some chunks missing embeddings"
         else:
             result["post_ingestion_stats"]["status"] = "complete — all chunks embedded"
+        if self.quality_checks is not None:
+            result["quality_checks"] = self.quality_checks
         return result
 
 
@@ -566,6 +571,21 @@ class IngestionPipeline:
                 log.error("ingestion_surfacing_failed", error=error_msg)
                 errors.append(error_msg)
 
+        # Step 13: Post-ingestion quality checks
+        quality_checks = None
+        try:
+            quality_checks = await self._run_quality_checks(
+                work_id, source_class.value, subject_author_id,
+            )
+            if quality_checks.get("warnings"):
+                errors.extend(
+                    f"[quality] {w}" for w in quality_checks["warnings"]
+                )
+        except Exception as exc:
+            error_msg = f"Quality checks failed: {exc}"
+            log.error("ingestion_quality_checks_failed", error=error_msg)
+            errors.append(error_msg)
+
         total_elapsed = round(time.monotonic() - pipeline_start, 1)
         log.info(
             "ingestion_complete",
@@ -579,6 +599,7 @@ class IngestionPipeline:
             surfacing_connections=surfacing_result.scan_result.total_found
             if surfacing_result and surfacing_result.scan_result
             else 0,
+            quality_status=quality_checks["status"] if quality_checks else "skipped",
             errors=len(errors),
             total_elapsed_seconds=total_elapsed,
         )
@@ -601,6 +622,7 @@ class IngestionPipeline:
             errors=errors,
             total_chunks=len(chunks),
             unembedded_chunk_ids=unembedded_chunk_ids,
+            quality_checks=quality_checks,
         )
 
     async def _surface_connections(
@@ -638,6 +660,216 @@ class IngestionPipeline:
             )
 
         return result
+
+    async def _run_quality_checks(
+        self,
+        work_id: str,
+        source_class: str,
+        subject_author_id: str,
+    ) -> dict[str, Any]:
+        """Run post-ingestion quality checks for a work.
+
+        Checks:
+            1. Orphaned entity nodes (Argument/Theme/Concept/Person with zero rels)
+            2. Classification sanity (author's own work classified as contextual/tertiary)
+            3. Chunk noise (micro/nano chunks < 50 chars)
+            4. Embedding coverage (chunks vs embeddings)
+            5. Entity coverage (chunks with zero entity edges)
+
+        Returns:
+            Dict with orphans_cleaned, classification_warning, noise_chunks,
+            embedding_coverage_pct, entity_coverage_pct, and status.
+        """
+        checks: dict[str, Any] = {
+            "orphans_cleaned": 0,
+            "classification_warning": None,
+            "noise_chunks": 0,
+            "embedding_coverage_pct": 100.0,
+            "entity_coverage_pct": 100.0,
+            "status": "pass",
+        }
+        warnings: list[str] = []
+
+        # --- Check 1: Orphaned entity nodes ---
+        # Find Argument/Theme/Concept/Person nodes created from this work's
+        # chunks that have no relationships other than the extraction edge
+        # from the chunk.  "Orphaned" means the entity node has degree <= 1
+        # (only the single MENTIONS/EXPLORES_THEME edge from the chunk).
+        try:
+            orphan_query = """
+                MATCH (c:Chunk {work_id: $work_id})-[r]->(e)
+                WHERE e:Argument OR e:Theme OR e:Concept OR e:Person
+                WITH e, count{ (e)--() } AS degree
+                WHERE degree <= 1
+                DETACH DELETE e
+                RETURN count(e) AS deleted
+            """
+            result = await self._storage.neo4j.execute_write(
+                orphan_query, {"work_id": work_id}
+            )
+            orphans = result[0]["deleted"] if result else 0
+            checks["orphans_cleaned"] = orphans
+            if orphans > 0:
+                log.info(
+                    "quality_check_orphans_cleaned",
+                    work_id=work_id,
+                    orphans_deleted=orphans,
+                )
+        except Exception as exc:
+            log.error("quality_check_orphans_failed", work_id=work_id, error=str(exc))
+            warnings.append(f"Orphan check failed: {exc}")
+
+        # --- Check 2: Classification sanity ---
+        # If the work's author matches subject_author_id and source_class
+        # is contextual or tertiary, that's suspicious — primary works by
+        # the subject author should not be classified as contextual/tertiary.
+        try:
+            work_record = await self._storage.works.get(work_id)
+            if work_record:
+                import re as _re
+
+                def _normalize_name(name: str) -> str:
+                    """Strip punctuation and collapse whitespace for fuzzy comparison."""
+                    return _re.sub(r"[^a-z]+", " ", name.lower()).strip()
+
+                work_author_norm = _normalize_name(work_record.get("author") or "")
+                author_slug_norm = _normalize_name(subject_author_id)
+                author_matches = (
+                    author_slug_norm in work_author_norm
+                    or work_author_norm in author_slug_norm
+                )
+                if author_matches and source_class in ("contextual", "tertiary"):
+                    warning = (
+                        f"Work author '{work_record.get('author')}' appears to match "
+                        f"subject author '{subject_author_id}' but is classified as "
+                        f"'{source_class}'. Consider reclassifying as 'primary'."
+                    )
+                    checks["classification_warning"] = warning
+                    warnings.append(warning)
+                    log.warning(
+                        "quality_check_classification_suspect",
+                        work_id=work_id,
+                        work_author=work_record.get("author"),
+                        subject_author_id=subject_author_id,
+                        source_class=source_class,
+                    )
+        except Exception as exc:
+            log.error("quality_check_classification_failed", work_id=work_id, error=str(exc))
+            warnings.append(f"Classification check failed: {exc}")
+
+        # --- Check 3: Chunk noise ---
+        # Query PG for chunks belonging to this work with text < 50 chars.
+        try:
+            noise_count = await self._storage.pg.fetch_val(
+                "SELECT COUNT(*) FROM chunks WHERE work_id = $1 AND LENGTH(text) < 50",
+                work_id,
+            )
+            checks["noise_chunks"] = int(noise_count)
+            if noise_count > 0:
+                log.warning(
+                    "quality_check_noise_chunks",
+                    work_id=work_id,
+                    noise_chunks=int(noise_count),
+                )
+                warnings.append(f"{noise_count} chunks with text < 50 chars")
+        except Exception as exc:
+            log.error("quality_check_noise_failed", work_id=work_id, error=str(exc))
+            warnings.append(f"Noise check failed: {exc}")
+
+        # --- Check 4: Embedding coverage ---
+        # Compare chunk count to embedding count for this work.
+        try:
+            total_chunks = await self._storage.pg.fetch_val(
+                "SELECT COUNT(*) FROM chunks WHERE work_id = $1",
+                work_id,
+            )
+            total_embeddings = await self._storage.pg.fetch_val(
+                """SELECT COUNT(*) FROM chunk_embeddings ce
+                   JOIN chunks c ON c.id = ce.chunk_id
+                   WHERE c.work_id = $1""",
+                work_id,
+            )
+            total_chunks = int(total_chunks)
+            total_embeddings = int(total_embeddings)
+            if total_chunks > 0:
+                coverage = round(total_embeddings / total_chunks * 100, 1)
+            else:
+                coverage = 100.0
+            checks["embedding_coverage_pct"] = coverage
+            if coverage < 100.0:
+                log.warning(
+                    "quality_check_embedding_gap",
+                    work_id=work_id,
+                    total_chunks=total_chunks,
+                    total_embeddings=total_embeddings,
+                    coverage_pct=coverage,
+                )
+                warnings.append(
+                    f"Embedding coverage {coverage}% "
+                    f"({total_embeddings}/{total_chunks} chunks)"
+                )
+        except Exception as exc:
+            log.error("quality_check_embeddings_failed", work_id=work_id, error=str(exc))
+            warnings.append(f"Embedding coverage check failed: {exc}")
+
+        # --- Check 5: Entity coverage ---
+        # Query Neo4j for chunks from this work that have zero entity edges.
+        # Warn if more than 10% of chunks lack entities.
+        try:
+            entity_coverage_result = await self._storage.neo4j.execute_read(
+                """MATCH (c:Chunk {work_id: $work_id})
+                   OPTIONAL MATCH (c)-[:MENTIONS|EXPLORES_THEME|ARGUES|REFERENCES]->(e)
+                   WITH c, count(e) AS entity_count
+                   RETURN
+                     count(c) AS total_chunks,
+                     sum(CASE WHEN entity_count = 0 THEN 1 ELSE 0 END) AS no_entity_chunks
+                """,
+                {"work_id": work_id},
+            )
+            if entity_coverage_result:
+                row = entity_coverage_result[0]
+                neo4j_total = row.get("total_chunks", 0)
+                no_entity = row.get("no_entity_chunks", 0)
+                if neo4j_total > 0:
+                    entity_pct = round((neo4j_total - no_entity) / neo4j_total * 100, 1)
+                else:
+                    entity_pct = 100.0
+                checks["entity_coverage_pct"] = entity_pct
+                if entity_pct < 90.0:
+                    log.warning(
+                        "quality_check_entity_gap",
+                        work_id=work_id,
+                        total_chunks=neo4j_total,
+                        no_entity_chunks=no_entity,
+                        coverage_pct=entity_pct,
+                    )
+                    warnings.append(
+                        f"Entity coverage {entity_pct}% "
+                        f"({no_entity}/{neo4j_total} chunks without entities)"
+                    )
+        except Exception as exc:
+            log.error("quality_check_entity_coverage_failed", work_id=work_id, error=str(exc))
+            warnings.append(f"Entity coverage check failed: {exc}")
+
+        # Determine overall status
+        if warnings:
+            checks["status"] = "warnings"
+            checks["warnings"] = warnings
+        else:
+            checks["status"] = "pass"
+
+        log.info(
+            "quality_checks_complete",
+            work_id=work_id,
+            status=checks["status"],
+            orphans_cleaned=checks["orphans_cleaned"],
+            noise_chunks=checks["noise_chunks"],
+            embedding_coverage_pct=checks["embedding_coverage_pct"],
+            entity_coverage_pct=checks["entity_coverage_pct"],
+            has_classification_warning=checks["classification_warning"] is not None,
+        )
+
+        return checks
 
     async def _embed_batch_with_retry(
         self,

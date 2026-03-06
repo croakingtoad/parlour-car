@@ -641,6 +641,28 @@ async def handle_chunk_source(
         except Exception as exc:
             errors.append(f"Theme deduplication failed: {exc}")
 
+    # Post-ingestion quality checks
+    quality_checks = None
+    try:
+        from author_library.tools.ingestion_pipeline import IngestionPipeline
+
+        _qc_pipeline = IngestionPipeline(
+            settings=settings,
+            storage=storage,
+            embedding_provider=embedding_provider,
+        )
+        subject_author_id = (work.get("source_metadata") or {}).get(
+            "subject_author_id", ""
+        )
+        quality_checks = await _qc_pipeline._run_quality_checks(
+            work_id, source_class_str, subject_author_id,
+        )
+        if quality_checks.get("warnings"):
+            errors.extend(f"[quality] {w}" for w in quality_checks["warnings"])
+    except Exception as exc:
+        log.error("chunk_source_quality_checks_failed", work_id=work_id, error=str(exc))
+        errors.append(f"Quality checks failed: {exc}")
+
     # First macro chunk as sample for user review
     sample_macro = ""
     macro_chunks = [c for c in chunks if str(c.granularity) == "macro"]
@@ -649,7 +671,7 @@ async def handle_chunk_source(
 
     status = "complete" if not errors else "partial"
 
-    result = {
+    result: dict[str, Any] = {
         "work_id": work_id,
         "chunks_created": {
             "macro": chunks_by_gran.get("macro", 0),
@@ -666,6 +688,8 @@ async def handle_chunk_source(
         "status": status,
         "errors": errors if errors else None,
     }
+    if quality_checks is not None:
+        result["quality_checks"] = quality_checks
 
     log.info(
         "chunk_source_complete",
