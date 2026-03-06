@@ -97,24 +97,21 @@ over "Poetry")
 
 THEME_MAPPING_SYSTEM = """\
 You are a literary scholar mapping how a specific theme appears in \
-text samples from an author's work. For each sample, determine whether \
-the theme is present and how it is treated.
+text samples from an author's work.
 
-Respond with valid JSON matching this schema:
-{
-  "appearances": [
-    {
-      "sample_index": <int>,
-      "present": true/false,
-      "treatment_summary": "<how this theme is treated in this sample>",
-      "is_key_passage": true/false
-    },
-    ...
-  ]
-}
+CRITICAL: Your ENTIRE response must be a single JSON object. \
+No prose, no commentary, no markdown fences. Start with { and end with }.
 
-Only include entries where present=true. Mark 2-5 of the most \
-representative passages as key passages.\
+JSON schema:
+{"appearances": [{"sample_index": <int>, "present": true/false, \
+"treatment_summary": "<ONE sentence, max 50 words>", \
+"is_key_passage": true/false}]}
+
+Rules:
+- Only include entries where present=true
+- treatment_summary must be ONE concise sentence (not a paragraph)
+- Mark 2-5 of the most representative passages as key passages
+- Do NOT explain your reasoning — output ONLY the JSON object\
 """
 
 
@@ -447,18 +444,23 @@ class ThematicIndexGenerator:
     ) -> dict[str, Any]:
         """Call the Anthropic API and parse JSON response.
 
-        Retries once if the LLM returns prose instead of JSON.
+        Retries once with a stronger constraint if the LLM returns
+        prose instead of JSON (common for pervasive themes).
         """
         import anthropic
 
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
+
+        messages: list[dict[str, str]] = [
+            {"role": "user", "content": user_prompt},
+        ]
 
         try:
             response = await client.messages.create(
                 model=self._model,
                 max_tokens=4096,
                 system=system,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=messages,
             )
         except anthropic.APIError as exc:
             raise IntelligenceError(
