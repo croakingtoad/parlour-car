@@ -620,6 +620,27 @@ async def handle_chunk_source(
         except Exception as exc:
             errors.append(f"Entity extraction failed: {exc}")
 
+        # Theme deduplication — merge near-duplicate Theme nodes
+        try:
+            from author_library.graph.theme_dedup import deduplicate_themes
+
+            dedup_result = await deduplicate_themes(
+                storage.neo4j,
+                embedding_provider,
+            )
+            if dedup_result.merged_count > 0:
+                log.info(
+                    "chunk_source_theme_dedup",
+                    work_id=work_id,
+                    original_themes=dedup_result.original_count,
+                    canonical_themes=dedup_result.canonical_count,
+                    merged=dedup_result.merged_count,
+                )
+            if dedup_result.errors:
+                errors.extend(dedup_result.errors)
+        except Exception as exc:
+            errors.append(f"Theme deduplication failed: {exc}")
+
     # First macro chunk as sample for user review
     sample_macro = ""
     macro_chunks = [c for c in chunks if str(c.granularity) == "macro"]

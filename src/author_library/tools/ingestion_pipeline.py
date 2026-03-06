@@ -500,6 +500,30 @@ class IngestionPipeline:
                 log.error("ingestion_entity_extraction_failed", error=error_msg)
                 errors.append(error_msg)
 
+            # Step 9b: Theme deduplication — merge near-duplicate Theme nodes
+            # created by independent LLM calls across chunks.
+            try:
+                from author_library.graph.theme_dedup import deduplicate_themes
+
+                dedup_result = await deduplicate_themes(
+                    self._storage.neo4j,
+                    self._embedding,
+                )
+                if dedup_result.merged_count > 0:
+                    log.info(
+                        "ingestion_theme_dedup",
+                        work_id=work_id,
+                        original_themes=dedup_result.original_count,
+                        canonical_themes=dedup_result.canonical_count,
+                        merged=dedup_result.merged_count,
+                    )
+                if dedup_result.errors:
+                    errors.extend(dedup_result.errors)
+            except Exception as exc:
+                error_msg = f"Theme deduplication failed: {exc}"
+                log.error("ingestion_theme_dedup_failed", error=error_msg)
+                errors.append(error_msg)
+
         # Step 10: Passage linking (PRIMARY and CONTEXTUAL)
         if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_LINKS):
             try:

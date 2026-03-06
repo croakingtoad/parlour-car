@@ -78,7 +78,12 @@ For EACH chunk, return a JSON object with:
 
 Rules:
 - canonical_name: lowercase, hyphenated form for deduplication (e.g. "primary-imagination")
+- CRITICAL for themes: If an existing theme in the knowledge graph covers the same concept, \
+REUSE its exact canonical_name. Do NOT create a new variant. For example, if \
+"imagination-and-theology" already exists, do not create "imagination-and-the-divine" or \
+"imagination-as-divine-faculty" — use "imagination-and-theology" instead.
 - Themes should be broad (e.g. "poetry-as-truth-bearing", "sacramental-theology")
+- Only create a new theme if no existing theme adequately covers the concept
 - Arguments should capture specific claims or positions the author takes
 - Concepts are technical terms, not general vocabulary
 - Persons include authors, thinkers, historical figures referenced — not the work's author
@@ -140,6 +145,27 @@ class EntityExtractor:
             )
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
 
+    async def _fetch_existing_themes(self) -> list[str]:
+        """Fetch existing Theme canonical_names from Neo4j.
+
+        Used to provide the LLM with context about what themes already
+        exist so it can reuse them instead of generating near-duplicates.
+        Returns up to 500 theme names sorted by relationship count.
+        """
+        try:
+            records = await self._neo4j.execute_read(
+                """MATCH (t:Theme)
+                OPTIONAL MATCH (t)<-[r:EXPLORES_THEME]-()
+                WITH t, count(r) AS rel_count
+                RETURN t.canonical_name AS name
+                ORDER BY rel_count DESC
+                LIMIT 500"""
+            )
+            return [r["name"] for r in records if r.get("name")]
+        except Exception:
+            log.warning("entity_extraction_fetch_themes_failed", exc_info=True)
+            return []
+
     async def extract_and_persist(
         self,
         chunks: list[Chunk],
@@ -157,6 +183,9 @@ class EntityExtractor:
         result = ExtractionResult()
         if not chunks:
             return result
+
+        # Fetch existing themes to help the LLM reuse canonical names
+        existing_themes = await self._fetch_existing_themes()
 
         concurrency = self._llm_settings.entity_extraction_concurrency
         semaphore = asyncio.Semaphore(concurrency)
@@ -179,7 +208,11 @@ class EntityExtractor:
         async def _process_batch(batch: list[Chunk]) -> list[ChunkExtraction]:
             async with semaphore:
                 return await self._extract_batch_with_retry(
-                    batch, work_title=work_title, author=author, result=result
+                    batch,
+                    work_title=work_title,
+                    author=author,
+                    result=result,
+                    existing_themes=existing_themes,
                 )
 
         # Run all batches concurrently (bounded by semaphore)
@@ -230,6 +263,7 @@ class EntityExtractor:
         work_title: str,
         author: str,
         result: ExtractionResult,
+        existing_themes: list[str] | None = None,
         _retry_depth: int = 0,
     ) -> list[ChunkExtraction]:
         """Extract entities from a batch, retrying with smaller sub-batches on JSON parse failure.
@@ -243,13 +277,19 @@ class EntityExtractor:
             work_title: Title of the work being processed.
             author: Author name.
             result: Accumulator for errors.
+            existing_themes: List of existing theme canonical_names for reuse.
             _retry_depth: Current retry depth (max _MAX_BATCH_RETRIES).
 
         Returns:
             List of ChunkExtraction objects from successful parses.
         """
         try:
-            return await self._extract_batch(batch, work_title=work_title, author=author)
+            return await self._extract_batch(
+                batch,
+                work_title=work_title,
+                author=author,
+                existing_themes=existing_themes,
+            )
         except (json.JSONDecodeError, AttributeError, TypeError, KeyError) as exc:
             if _retry_depth >= _MAX_BATCH_RETRIES:
                 error_msg = (
@@ -294,6 +334,7 @@ class EntityExtractor:
                 work_title=work_title,
                 author=author,
                 result=result,
+                existing_themes=existing_themes,
                 _retry_depth=_retry_depth + 1,
             )
             right = await self._extract_batch_with_retry(
@@ -301,6 +342,7 @@ class EntityExtractor:
                 work_title=work_title,
                 author=author,
                 result=result,
+                existing_themes=existing_themes,
                 _retry_depth=_retry_depth + 1,
             )
             return left + right
@@ -316,6 +358,7 @@ class EntityExtractor:
         *,
         work_title: str,
         author: str,
+        existing_themes: list[str] | None = None,
     ) -> list[ChunkExtraction]:
         """Call Anthropic API to extract entities from a batch of chunks.
 
@@ -335,8 +378,18 @@ class EntityExtractor:
                 }
             )
 
+        # Build user message with optional existing theme context
+        theme_context = ""
+        if existing_themes:
+            theme_list = ", ".join(existing_themes[:200])  # Limit to avoid huge prompts
+            theme_context = (
+                f"\n\nExisting themes in the knowledge graph (reuse these "
+                f"canonical_names when the concept matches):\n{theme_list}\n"
+            )
+
         user_message = (
-            f"Work: {work_title}\nAuthor: {author}\n\n"
+            f"Work: {work_title}\nAuthor: {author}\n"
+            f"{theme_context}\n"
             f"Extract entities from these {len(chunks)} chunks:\n\n"
             f"{json.dumps(chunks_payload, indent=2)}"
         )
