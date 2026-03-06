@@ -236,12 +236,29 @@ class ThematicIndexGenerator:
         )
 
         # Phase 2: Map theme appearances across the full corpus
+        mapping_errors: list[str] = []
         for theme in themes:
-            appearances = await self._map_theme_appearances(
-                theme=theme,
-                all_chunks=primary_chunks,
+            try:
+                appearances = await self._map_theme_appearances(
+                    theme=theme,
+                    all_chunks=primary_chunks,
+                )
+                theme.appearances = appearances
+            except Exception as exc:
+                log.error(
+                    "theme_mapping_failed",
+                    theme=theme.theme,
+                    error=str(exc),
+                )
+                mapping_errors.append(f"{theme.theme}: {exc}")
+
+        if mapping_errors:
+            log.warning(
+                "thematic_mapping_partial",
+                mapped=len(themes) - len(mapping_errors),
+                failed=len(mapping_errors),
+                errors=mapping_errors,
             )
-            theme.appearances = appearances
 
         # Phase 3: Store in thematic repository
         await self._store_themes(
@@ -420,9 +437,12 @@ class ThematicIndexGenerator:
         return entry_ids
 
     async def _call_anthropic(
-        self, *, system: str, user_prompt: str
+        self, *, system: str, user_prompt: str, _retry: int = 0
     ) -> dict[str, Any]:
-        """Call the Anthropic API and parse JSON response."""
+        """Call the Anthropic API and parse JSON response.
+
+        Retries once if the LLM returns prose instead of JSON.
+        """
         import anthropic
 
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
@@ -453,7 +473,22 @@ class ThematicIndexGenerator:
                 context={"model": self._model},
             )
 
-        return self._parse_json_response(response_text)
+        try:
+            return self._parse_json_response(response_text)
+        except IntelligenceError:
+            if _retry >= 1:
+                raise
+            log.warning(
+                "thematic_json_retry",
+                response_length=len(response_text),
+                retry=_retry + 1,
+            )
+            # Retry with a stronger JSON instruction appended
+            return await self._call_anthropic(
+                system=system,
+                user_prompt=user_prompt + "\n\nIMPORTANT: Respond with ONLY a valid JSON object. No prose, no explanation, no markdown.",
+                _retry=_retry + 1,
+            )
 
     def _parse_json_response(self, response_text: str) -> dict[str, Any]:
         """Parse a JSON response from an LLM, handling common malformations."""
