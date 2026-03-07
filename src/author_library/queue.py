@@ -203,6 +203,46 @@ class TaskQueue:
         )
         return job.job_id
 
+
+    async def enqueue_quality_gate(
+        self,
+        *,
+        work_id: str,
+        author_id: str,
+    ) -> str | None:
+        """Enqueue post-ingestion async quality checks.
+
+        Runs theme dedup, PG-Neo4j consistency, cross-work linking,
+        and entity coverage audit in the background.
+
+        Args:
+            work_id: The newly ingested work that triggered this gate.
+            author_id: The subject author for cross-work analysis.
+
+        Returns:
+            The arq job ID if enqueued, or None if the queue is unavailable.
+        """
+        if not self._pool:
+            return None
+
+        job = await self._pool.enqueue_job(
+            "task_quality_gate",
+            work_id=work_id,
+            author_id=author_id,
+        )
+
+        if job is None:
+            log.warning("task_enqueue_failed", task="quality_gate")
+            return None
+
+        log.info(
+            "task_enqueued",
+            task="quality_gate",
+            job_id=job.job_id,
+            work_id=work_id,
+        )
+        return job.job_id
+
     async def get_job_status(self, job_id: str) -> dict[str, Any]:
         """Get the status of a queued job.
 

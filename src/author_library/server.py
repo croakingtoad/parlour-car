@@ -874,6 +874,7 @@ def create_server(settings: Settings) -> Server:
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
                     cache_manager=cache_mgr,
+                    task_queue=_state.get("task_queue"),
                 )
             elif name == "ingest_corpus":
                 result = await handle_ingest_corpus(

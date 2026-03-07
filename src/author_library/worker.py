@@ -18,6 +18,7 @@ from author_library.tasks import (
     task_ingest_book,
     task_ingest_corpus,
     task_process_capture,
+    task_quality_gate,
     task_surface_connections,
 )
 
@@ -91,7 +92,7 @@ class WorkerSettings:
     ingestion tasks are implemented (D2).
     """
 
-    functions = [task_ingest_book, task_ingest_corpus, task_process_capture, task_surface_connections]
+    functions = [task_ingest_book, task_ingest_corpus, task_process_capture, task_surface_connections, task_quality_gate]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = get_redis_settings()

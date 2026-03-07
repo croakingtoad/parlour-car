@@ -10,6 +10,7 @@ Tasks:
   - task_ingest_corpus: Bulk ingestion of multiple works with cross-work analysis
   - task_process_capture: Chrome extension capture event processing
   - task_surface_connections: Post-ingestion connection scanning + PR content generation
+  - task_quality_gate: Post-ingestion async quality checks (theme dedup, consistency, linking, coverage)
 
 The existing synchronous pipeline (IngestionPipeline.ingest) remains
 available for direct invocation when immediate results are needed
@@ -324,3 +325,127 @@ async def task_surface_connections(
     )
 
     return result_dict
+
+
+async def task_quality_gate(
+    ctx: dict[str, Any],
+    *,
+    work_id: str,
+    author_id: str,
+) -> dict[str, Any]:
+    """arq task: run expensive post-ingestion quality checks asynchronously.
+
+    Runs after ingestion completes — enqueued automatically by handle_ingest_book.
+    Performs checks too slow for inline execution:
+    1. Theme deduplication (embedding-based cosine similarity clustering)
+    2. PG-Neo4j consistency verification + structural backfill
+    3. Cross-work passage re-linking for the newly ingested work
+    4. Entity extraction coverage audit across all works
+
+    Args:
+        ctx: arq worker context with 'settings', 'storage', 'embedding_provider'.
+        work_id: The newly ingested work that triggered this gate.
+        author_id: The subject author for cross-work analysis.
+
+    Returns:
+        dict with per-check results and overall status.
+    """
+    settings = ctx["settings"]
+    storage = ctx["storage"]
+    embedding_provider = ctx["embedding_provider"]
+
+    log.info("task_quality_gate_starting", work_id=work_id, author_id=author_id)
+
+    result: dict[str, Any] = {}
+
+    # Check 1: Theme deduplication
+    try:
+        from author_library.graph.theme_dedup import deduplicate_themes
+
+        dedup = await deduplicate_themes(storage.neo4j, embedding_provider)
+        result["theme_dedup"] = {
+            "original": dedup.original_count,
+            "canonical": dedup.canonical_count,
+            "merged": dedup.merged_count,
+        }
+    except Exception as exc:
+        log.error("quality_gate_theme_dedup_failed", error=str(exc))
+        result["theme_dedup"] = {"error": str(exc)}
+
+    # Check 2: PG-Neo4j consistency
+    try:
+        from author_library.graph.backfill import (
+            backfill_missing_graph_data,
+            check_pg_neo4j_consistency,
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+        backfilled = 0
+        if report.get("missing_from_neo4j"):
+            bf_result = await backfill_missing_graph_data(
+                storage, embedding_provider, settings, run_entity_extraction=False
+            )
+            backfilled = bf_result.works_backfilled
+        result["pg_neo4j_consistency"] = {
+            "is_consistent": report["is_consistent"],
+            "backfilled": backfilled,
+        }
+    except Exception as exc:
+        log.error("quality_gate_consistency_failed", error=str(exc))
+        result["pg_neo4j_consistency"] = {"error": str(exc)}
+
+    # Check 3: Cross-work passage re-linking
+    try:
+        from author_library.graph.linking_explicit import ExplicitLinkDetector
+        from author_library.graph.linking_implicit import ImplicitEngagementDetector
+        from author_library.graph.linking_thematic import ThematicParallelDetector
+
+        new_edges = 0
+        for DetectorClass in (ExplicitLinkDetector, ImplicitEngagementDetector, ThematicParallelDetector):
+            try:
+                detector = DetectorClass(storage.neo4j, embedding_provider)
+                link_result = await detector.detect_and_link(work_id)
+                new_edges += link_result.edges_created
+            except Exception as det_exc:
+                log.warning(
+                    "quality_gate_linking_detector_failed",
+                    detector=DetectorClass.__name__,
+                    error=str(det_exc),
+                )
+        result["cross_work_links"] = {"new_edges": new_edges}
+    except Exception as exc:
+        log.error("quality_gate_linking_failed", error=str(exc))
+        result["cross_work_links"] = {"error": str(exc)}
+
+    # Check 4: Entity extraction coverage audit
+    try:
+        works = await storage.pg.fetch_all("SELECT work_id FROM works")
+        below_threshold: list[str] = []
+        for w in works:
+            wid = w["work_id"]
+            total = await storage.neo4j.driver.execute_query(
+                "MATCH (c:Chunk {work_id: $wid}) RETURN count(c) as c", wid=wid
+            )
+            with_entities = await storage.neo4j.driver.execute_query(
+                "MATCH (c:Chunk {work_id: $wid})-[]->() RETURN count(DISTINCT c) as c", wid=wid
+            )
+            total_count = total.records[0]["c"]
+            entity_count = with_entities.records[0]["c"]
+            if total_count > 0:
+                coverage = entity_count / total_count
+                if coverage < 0.9:
+                    below_threshold.append(f"{wid} ({coverage:.0%})")
+        result["entity_coverage"] = {
+            "works_audited": len(works),
+            "below_threshold": below_threshold,
+        }
+    except Exception as exc:
+        log.error("quality_gate_coverage_failed", error=str(exc))
+        result["entity_coverage"] = {"error": str(exc)}
+
+    # Overall status
+    has_errors = any("error" in v for v in result.values() if isinstance(v, dict))
+    result["status"] = "errors" if has_errors else "pass"
+
+    log.info("task_quality_gate_complete", work_id=work_id, status=result["status"])
+    return result

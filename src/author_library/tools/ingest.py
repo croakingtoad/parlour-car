@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from author_library.errors import IngestionError
+from author_library.queue import TaskQueue
 from author_library.tools.ingestion_pipeline import IngestionPipeline, IngestionResult
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ async def handle_ingest_book(
     storage: StorageManager,
     embedding_provider: EmbeddingProvider,
     cache_manager: CacheManager | None = None,
+    task_queue: TaskQueue | None = None,
 ) -> str:
     """Handle the ingest_book MCP tool call.
 
@@ -108,6 +110,18 @@ async def handle_ingest_book(
     # Invalidate caches — new content may affect query/graph/voice/thematic results
     if cache_manager is not None:
         await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
+
+    # Enqueue async quality gate (theme dedup, consistency, cross-work linking)
+    if task_queue is not None:
+        try:
+            qg_job = await task_queue.enqueue_quality_gate(
+                work_id=result.work_id,
+                author_id=subject_author_id,
+            )
+            if qg_job:
+                log.info("quality_gate_enqueued", job_id=qg_job, work_id=result.work_id)
+        except Exception as exc:
+            log.warning("quality_gate_enqueue_failed", error=str(exc))
 
     response = result.to_dict()
     if cross_work_summary:
