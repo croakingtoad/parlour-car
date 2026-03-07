@@ -7,6 +7,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -122,6 +123,9 @@ async def handle_ingest_book(
                 log.info("quality_gate_enqueued", job_id=qg_job, work_id=result.work_id)
         except Exception as exc:
             log.warning("quality_gate_enqueue_failed", error=str(exc))
+
+    # Fire-and-forget production backup after successful ingestion
+    await _run_post_ingest_backup(result.work_id)
 
     response = result.to_dict()
     if cross_work_summary:
@@ -327,6 +331,9 @@ async def handle_ingest_corpus(
     if cache_manager is not None:
         await cache_manager.invalidate_on_ingestion(author_id=subject_author_id)
 
+    # Backup after corpus ingestion
+    await _run_post_ingest_backup(f"corpus-{subject_author_id}")
+
     return json.dumps(corpus_summary, indent=2)
 
 
@@ -426,3 +433,38 @@ async def _run_cross_work_analysis(
         summary["thematic_evolution"] = {"error": str(exc)}
 
     return summary
+
+
+_BACKUP_SCRIPT = Path("/home/marty/parlour-backups/backup.sh")
+
+
+async def _run_post_ingest_backup(work_id: str) -> None:
+    """Run production database backup after successful ingestion.
+
+    Fire-and-forget: logs errors but never blocks or fails the ingestion.
+    The backup script path is hardcoded (not user input) and the work_id
+    label is passed as a single argument to the script (no shell expansion).
+    """
+    if not _BACKUP_SCRIPT.exists():
+        log.debug("post_ingest_backup_skipped", reason="backup script not found")
+        return
+    try:
+        label = f"post-ingest-{work_id}"
+        proc = await asyncio.create_subprocess_exec(
+            str(_BACKUP_SCRIPT), label,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode == 0:
+            log.info("post_ingest_backup_complete", work_id=work_id)
+        else:
+            log.warning(
+                "post_ingest_backup_failed",
+                returncode=proc.returncode,
+                stderr=stderr.decode()[:500],
+            )
+    except asyncio.TimeoutError:
+        log.warning("post_ingest_backup_timeout", work_id=work_id)
+    except Exception as exc:
+        log.warning("post_ingest_backup_error", error=str(exc))
