@@ -105,7 +105,22 @@ async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
     """Clean up Neo4j test data after each test."""
     yield
     with contextlib.suppress(Exception):
-        await neo4j_conn.execute_write("MATCH (n) DETACH DELETE n", {})
+        # Scoped cleanup — only delete test-created nodes
+        # IMPORTANT: Never use unscoped MATCH (n) DETACH DELETE n
+        # which would wipe production data if TEST_NEO4J_URL is misconfigured.
+        for prefix in ("test--", "malcolm-guite--"):
+            await neo4j_conn.execute_write(
+                "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
+                {"prefix": prefix},
+            )
+            await neo4j_conn.execute_write(
+                "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
+                {"prefix": prefix},
+            )
+        for label in ("Theme", "Person", "Concept", "Argument", "Author"):
+            await neo4j_conn.execute_write(
+                f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+            )
 
 
 # ---------------------------------------------------------------------------

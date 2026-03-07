@@ -96,5 +96,19 @@ async def _clean_all(storage: StorageManager) -> None:
     await storage.pg.execute("DELETE FROM works")
     await storage.pg.execute("DELETE FROM authors")
 
-    # Neo4j: clear all nodes and edges
-    await storage.neo4j.execute_write("MATCH (n) DETACH DELETE n")
+    # Neo4j: scoped cleanup — only delete test-created nodes
+    # IMPORTANT: Never use unscoped MATCH (n) DETACH DELETE n
+    # which would wipe production data if TEST_NEO4J_URL is misconfigured.
+    for prefix in ("test--", "shakespeare--", "guite--"):
+        await storage.neo4j.execute_write(
+            "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
+            {"prefix": prefix},
+        )
+        await storage.neo4j.execute_write(
+            "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
+            {"prefix": prefix},
+        )
+    for label in ("Theme", "Person", "Concept", "Argument", "Author"):
+        await storage.neo4j.execute_write(
+            f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+        )
