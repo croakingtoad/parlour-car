@@ -467,6 +467,11 @@ class EntityExtractor:
             chunk_id = raw.get("chunk_id", "")
             if not chunk_id:
                 continue
+            # CRITICAL: LLM sometimes returns list items as bare strings instead of
+            # dicts (e.g. themes: ["Belovedness"] instead of [{name: "Belovedness"}]).
+            # All four entity lists MUST guard with isinstance(x, dict) before calling
+            # .get() — failure to do so causes 'str object has no attribute get' which
+            # triggers the batch-retry cascade and wastes API calls.
             themes = [
                 ExtractedEntity(
                     entity_type="theme",
@@ -475,7 +480,7 @@ class EntityExtractor:
                     or t.get("name", "").lower().replace(" ", "-")[:80],
                 )
                 for t in raw.get("themes", [])
-                if t.get("name") or t.get("canonical_name")
+                if isinstance(t, dict) and (t.get("name") or t.get("canonical_name"))
             ]
             arguments = [
                 ExtractedEntity(
@@ -485,7 +490,7 @@ class EntityExtractor:
                     properties={"evidence_summary": a.get("evidence_summary", "")},
                 )
                 for a in raw.get("arguments", [])
-                if a.get("claim")
+                if isinstance(a, dict) and a.get("claim")
             ]
             concepts = [
                 ExtractedEntity(
@@ -495,7 +500,7 @@ class EntityExtractor:
                     or c.get("name", "").lower().replace(" ", "-")[:80],
                 )
                 for c in raw.get("concepts", [])
-                if c.get("name") or c.get("canonical_name")
+                if isinstance(c, dict) and (c.get("name") or c.get("canonical_name"))
             ]
             persons = [
                 ExtractedEntity(
@@ -506,8 +511,24 @@ class EntityExtractor:
                     properties={"role": p.get("role", "referenced")},
                 )
                 for p in raw.get("persons", [])
-                if p.get("name") or p.get("canonical_name")
+                if isinstance(p, dict) and (p.get("name") or p.get("canonical_name"))
             ]
+            # Warn if LLM returned non-dict items in any entity list (prompt non-compliance)
+            for field, items in (
+                ("themes", raw.get("themes", [])),
+                ("arguments", raw.get("arguments", [])),
+                ("concepts", raw.get("concepts", [])),
+                ("persons", raw.get("persons", [])),
+            ):
+                non_dicts = [x for x in items if not isinstance(x, dict)]
+                if non_dicts:
+                    log.warning(
+                        "entity_extraction_non_dict_items_skipped",
+                        chunk_id=chunk_id,
+                        field=field,
+                        count=len(non_dicts),
+                        preview=str(non_dicts[:3])[:200],
+                    )
             extractions.append(
                 ChunkExtraction(
                     chunk_id=chunk_id,
