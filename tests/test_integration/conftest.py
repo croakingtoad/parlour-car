@@ -92,6 +92,7 @@ async def _clean_all(storage: StorageManager) -> None:
     await storage.pg.execute("DELETE FROM thematic_appearances")
     await storage.pg.execute("DELETE FROM thematic_entries")
     await storage.pg.execute("DELETE FROM voice_profiles")
+    await storage.pg.execute("DELETE FROM acquisition_candidates")
     await storage.pg.execute("DELETE FROM chunks")
     await storage.pg.execute("DELETE FROM works")
     await storage.pg.execute("DELETE FROM authors")

@@ -439,7 +439,13 @@ async def handle_chunk_source(
 
     # Step 2: Re-parse document from file path stored in work metadata
     # The work record stores the original file path in source_metadata
-    source_meta = work.get("source_metadata") or {}
+    # asyncpg may return JSONB columns as a JSON string rather than a parsed dict
+    source_meta_raw = work.get("source_metadata") or {}
+    source_meta = (
+        json.loads(source_meta_raw)
+        if isinstance(source_meta_raw, str)
+        else dict(source_meta_raw)
+    )
     file_path = work.get("file_path") or source_meta.get("file_path")
 
     # If file_path not in work record, we need to re-parse from the work data
@@ -651,9 +657,9 @@ async def handle_chunk_source(
             storage=storage,
             embedding_provider=embedding_provider,
         )
-        subject_author_id = (work.get("source_metadata") or {}).get(
-            "subject_author_id", ""
-        )
+        _source_meta_raw = work.get("source_metadata") or {}
+        _source_meta = json.loads(_source_meta_raw) if isinstance(_source_meta_raw, str) else dict(_source_meta_raw)
+        subject_author_id = _source_meta.get("subject_author_id", "")
         quality_checks = await _qc_pipeline._run_quality_checks(
             work_id, source_class_str, subject_author_id,
         )
@@ -706,7 +712,13 @@ def _build_annotation_context_from_work(
     work: dict[str, Any], source_class: SourceClass
 ) -> AnnotationContext:
     """Build AnnotationContext from a work record dict."""
-    source_meta = work.get("source_metadata") or {}
+    # asyncpg may return JSONB columns as a JSON string rather than a parsed dict
+    source_meta_raw = work.get("source_metadata") or {}
+    source_meta = (
+        json.loads(source_meta_raw)
+        if isinstance(source_meta_raw, str)
+        else dict(source_meta_raw)
+    )
 
     subject_author = source_meta.get("subject_author_id", "")
     if not subject_author:
