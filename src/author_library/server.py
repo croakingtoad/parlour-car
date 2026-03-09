@@ -37,6 +37,7 @@ from author_library.tools.composable_query import (
 )
 from author_library.tools.ingest import handle_ingest_book, handle_ingest_corpus
 from author_library.tools.meta import (
+    handle_audit_library,
     handle_author_bio,
     handle_health_check,
     handle_library_stats,
@@ -331,6 +332,19 @@ TOOLS: list[Tool] = [
         description=(
             "Check connectivity and health of all backends: PostgreSQL, Neo4j, "
             "and the embedding provider. Returns per-backend status."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {},
+        },
+    ),
+    Tool(
+        name="audit_library",
+        description=(
+            "Run a full library health audit. Checks per-work chunk/embedding/entity "
+            "coverage, PG-Neo4j consistency, theme graph quality, and classification "
+            "anomalies. Returns overall_status ('healthy'|'warnings'|'errors'), "
+            "a per-work breakdown, graph stats, and actionable recommendations."
         ),
         inputSchema={
             "type": "object",
@@ -932,6 +946,8 @@ def create_server(settings: Settings) -> Server:
                     storage=storage_mgr,
                     embedding_provider=embed_provider,
                 )
+            elif name == "audit_library":
+                result = await handle_audit_library(args, storage=storage_mgr)
             elif name == "job_status":
                 result = await _handle_job_status(args, state=_state)
             elif name == "ingest_book_async":

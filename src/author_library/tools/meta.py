@@ -369,3 +369,278 @@ async def handle_health_check(
     health["overall"] = "healthy" if all_healthy else "degraded"
 
     return json.dumps(health, indent=2)
+
+
+async def handle_audit_library(
+    arguments: dict[str, Any],
+    *,
+    storage: StorageManager,
+) -> str:
+    """Handle the audit_library MCP tool call.
+
+    Runs a full library health check covering:
+    - Per-work stats (chunks, embeddings, entities, orphaned chunks)
+    - PG/Neo4j consistency
+    - Theme graph quality
+    - Classification anomalies
+    - Chunk noise (micro/nano below threshold)
+
+    Returns:
+        JSON report with overall_status, per-work breakdown, and recommendations.
+    """
+    from author_library.graph.backfill import check_pg_neo4j_consistency
+
+    recommendations: list[str] = []
+    work_audit: list[dict[str, Any]] = []
+    has_errors = False
+    has_warnings = False
+
+    # ------------------------------------------------------------------
+    # 1. Per-work stats: chunks, embeddings, entity edges, orphaned chunks
+    # ------------------------------------------------------------------
+    works_rows = await storage.pg.fetch_all(
+        "SELECT work_id, title, source_class, author FROM works ORDER BY work_id"
+    )
+
+    if not works_rows:
+        return json.dumps({
+            "overall_status": "healthy",
+            "works": [],
+            "graph": {},
+            "pg_neo4j": {"is_consistent": True, "missing_works": [], "chunk_delta": []},
+            "recommendations": ["Library is empty — no works have been ingested."],
+        }, indent=2)
+
+    # Chunk counts per work
+    chunk_rows = await storage.pg.fetch_all(
+        "SELECT work_id, COUNT(*) AS chunk_count FROM chunks GROUP BY work_id"
+    )
+    chunk_counts = {r["work_id"]: int(r["chunk_count"]) for r in chunk_rows}
+
+    # Embedding coverage per work (distinct chunk ids with embeddings)
+    embed_rows = await storage.pg.fetch_all(
+        """SELECT c.work_id, COUNT(DISTINCT ce.chunk_id) AS embedded_chunks
+           FROM chunks c
+           LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+           GROUP BY c.work_id"""
+    )
+    embed_counts = {r["work_id"]: int(r["embedded_chunks"]) for r in embed_rows}
+
+    # Micro/nano chunk noise per work (< 50 chars)
+    noise_rows = await storage.pg.fetch_all(
+        """SELECT work_id, COUNT(*) AS noise_count
+           FROM chunks
+           WHERE length(text) < 50
+           GROUP BY work_id"""
+    )
+    noise_counts = {r["work_id"]: int(r["noise_count"]) for r in noise_rows}
+
+    # Entity edge counts per work in Neo4j (EXPLORES_THEME + MAKES_ARGUMENT)
+    entity_counts: dict[str, int] = {}
+    orphan_counts: dict[str, int] = {}
+    try:
+        entity_rows = await storage.neo4j.execute_read(
+            """MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT]->()
+               RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"""
+        )
+        for r in entity_rows:
+            entity_counts[r["work_id"]] = int(r["entity_edges"])
+
+        # Orphaned chunks: in Neo4j but no entity relationships
+        orphan_rows = await storage.neo4j.execute_read(
+            """MATCH (c:Chunk)
+               WHERE NOT (c)-[:EXPLORES_THEME]->() AND NOT (c)-[:MAKES_ARGUMENT]->()
+               RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"""
+        )
+        for r in orphan_rows:
+            orphan_counts[r["work_id"]] = int(r["orphan_count"])
+    except Exception as exc:
+        log.warning("audit_entity_counts_failed", error=str(exc))
+
+    for w in works_rows:
+        work_id = w["work_id"]
+        total = chunk_counts.get(work_id, 0)
+        embedded = embed_counts.get(work_id, 0)
+        entities = entity_counts.get(work_id, 0)
+        orphans = orphan_counts.get(work_id, 0)
+        noise = noise_counts.get(work_id, 0)
+
+        work_warnings: list[str] = []
+
+        if total == 0:
+            work_warnings.append("no_chunks")
+            has_errors = True
+        elif embedded == 0:
+            work_warnings.append("no_embeddings")
+            has_errors = True
+        elif embedded < total:
+            work_warnings.append(f"partial_embeddings ({embedded}/{total})")
+            has_warnings = True
+
+        if total > 0 and entities == 0:
+            work_warnings.append("no_entity_extraction")
+            has_warnings = True
+
+        if noise > 0:
+            work_warnings.append(f"noise_chunks ({noise} chunks < 50 chars)")
+            if noise > total * 0.1:
+                has_warnings = True
+
+        work_audit.append({
+            "work_id": work_id,
+            "title": w.get("title", ""),
+            "source_class": w.get("source_class", ""),
+            "chunks": total,
+            "embeddings": embedded,
+            "entities": entities,
+            "orphaned_neo4j_chunks": orphans,
+            "noise_chunks": noise,
+            "warnings": work_warnings,
+        })
+
+    # ------------------------------------------------------------------
+    # 2. PG / Neo4j consistency
+    # ------------------------------------------------------------------
+    pg_neo4j: dict[str, Any] = {}
+    try:
+        consistency = await check_pg_neo4j_consistency(storage)
+        missing = consistency.get("missing_from_neo4j", [])
+        extra = consistency.get("extra_in_neo4j", [])
+        chunk_delta = [
+            c for c in consistency.get("chunk_counts", [])
+            if not c.get("in_sync")
+        ]
+        pg_neo4j = {
+            "is_consistent": consistency.get("is_consistent", False),
+            "pg_works": consistency.get("pg_work_count", 0),
+            "neo4j_works": consistency.get("neo4j_work_count", 0),
+            "missing_from_neo4j": missing,
+            "extra_in_neo4j": extra,
+            "chunk_delta": chunk_delta,
+        }
+        if missing or extra or chunk_delta:
+            has_warnings = True
+            if missing:
+                recommendations.append(
+                    f"{len(missing)} works in PG are missing from Neo4j — run backfill."
+                )
+            if extra:
+                recommendations.append(
+                    f"{len(extra)} Neo4j works have no PG record — check for orphaned graph data."
+                )
+    except Exception as exc:
+        log.warning("audit_consistency_failed", error=str(exc))
+        pg_neo4j = {"error": str(exc)}
+        has_warnings = True
+
+    # ------------------------------------------------------------------
+    # 3. Theme graph quality
+    # ------------------------------------------------------------------
+    graph_audit: dict[str, Any] = {}
+    try:
+        theme_rows = await storage.neo4j.execute_read(
+            """MATCH (t:Theme)
+               OPTIONAL MATCH (c:Chunk)-[:EXPLORES_THEME]->(t)
+               RETURN t.canonical_name AS theme,
+                      COUNT(c) AS chunk_count
+               ORDER BY chunk_count DESC"""
+        )
+        total_themes = len(theme_rows)
+        singletons = [r["theme"] for r in theme_rows if int(r["chunk_count"]) <= 1]
+        avg_connectivity = (
+            sum(int(r["chunk_count"]) for r in theme_rows) / total_themes
+            if total_themes > 0 else 0.0
+        )
+
+        # Person and Concept nodes
+        entity_type_rows = await storage.neo4j.execute_read(
+            """MATCH (n)
+               WHERE n:Person OR n:Concept OR n:Argument
+               RETURN labels(n)[0] AS type, COUNT(n) AS count"""
+        )
+        entity_type_counts: dict[str, int] = {
+            r["type"]: int(r["count"]) for r in entity_type_rows
+        }
+
+        graph_audit = {
+            "total_themes": total_themes,
+            "singleton_themes": len(singletons),
+            "avg_chunk_connectivity": round(avg_connectivity, 2),
+            "entity_counts": entity_type_counts,
+        }
+        if singletons and len(singletons) > total_themes * 0.3:
+            has_warnings = True
+            recommendations.append(
+                f"{len(singletons)} singleton themes detected — consider deduplication."
+            )
+    except Exception as exc:
+        log.warning("audit_graph_quality_failed", error=str(exc))
+        graph_audit = {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 4. Classification anomalies: author == subject but not primary
+    # ------------------------------------------------------------------
+    try:
+        anomaly_rows = await storage.pg.fetch_all(
+            """SELECT work_id, title, author, source_class,
+                      source_metadata->>'subject_author_id' AS subject_author_id
+               FROM works
+               WHERE source_class != 'primary'
+                 AND source_metadata->>'subject_author_id' IS NOT NULL
+                 AND lower(author) = lower(source_metadata->>'subject_author_id')"""
+        )
+        if anomaly_rows:
+            has_warnings = True
+            for row in anomaly_rows:
+                recommendations.append(
+                    f"Classification anomaly: '{row['work_id']}' — author matches "
+                    f"subject_author_id but source_class='{row['source_class']}'."
+                )
+    except Exception as exc:
+        log.warning("audit_classification_anomaly_check_failed", error=str(exc))
+
+    # ------------------------------------------------------------------
+    # 5. Global recommendations
+    # ------------------------------------------------------------------
+    works_missing_embeddings = [
+        w["work_id"] for w in work_audit if "no_embeddings" in w["warnings"]
+    ]
+    if works_missing_embeddings:
+        recommendations.append(
+            f"{len(works_missing_embeddings)} works have no embeddings — "
+            f"re-run embed step: {', '.join(works_missing_embeddings[:3])}"
+            + (" ..." if len(works_missing_embeddings) > 3 else "")
+        )
+
+    works_no_entities = [
+        w["work_id"] for w in work_audit if "no_entity_extraction" in w["warnings"]
+    ]
+    if works_no_entities:
+        recommendations.append(
+            f"{len(works_no_entities)} works have no entity extraction — "
+            f"run backfill_entities.py: {', '.join(works_no_entities[:3])}"
+            + (" ..." if len(works_no_entities) > 3 else "")
+        )
+
+    if not recommendations:
+        recommendations.append("Library is healthy — no issues detected.")
+
+    # ------------------------------------------------------------------
+    # Overall status
+    # ------------------------------------------------------------------
+    if has_errors:
+        overall_status = "errors"
+    elif has_warnings:
+        overall_status = "warnings"
+    else:
+        overall_status = "healthy"
+
+    report = {
+        "overall_status": overall_status,
+        "works": work_audit,
+        "graph": graph_audit,
+        "pg_neo4j": pg_neo4j,
+        "recommendations": recommendations,
+    }
+
+    return json.dumps(report, indent=2, default=str)
