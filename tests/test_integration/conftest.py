@@ -96,6 +96,7 @@ async def _clean_all(storage: StorageManager) -> None:
     await storage.pg.execute("DELETE FROM chunks")
     await storage.pg.execute("DELETE FROM works")
     await storage.pg.execute("DELETE FROM authors")
+    await storage.pg.execute("DELETE FROM ingestion_lessons")
 
     # Neo4j: scoped cleanup — only delete test-created nodes
     # IMPORTANT: Never use unscoped MATCH (n) DETACH DELETE n

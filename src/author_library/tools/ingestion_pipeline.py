@@ -715,6 +715,26 @@ class IngestionPipeline:
                     work_id=work_id,
                     orphans_deleted=orphans,
                 )
+                try:
+                    from author_library.intelligence.lesson_writer import record_lesson
+                    await record_lesson(
+                        self._storage,
+                        problem_type="orphan_nodes",
+                        detection_method="qg1_inline",
+                        trigger_context={"work_id": work_id, "source_class": source_class},
+                        problem_description=(
+                            f"{orphans} orphaned entity nodes found for work '{work_id}' "
+                            f"(nodes with degree <= 1 after entity extraction)."
+                        ),
+                        fix_applied=f"DETACH DELETE {orphans} orphaned entity nodes.",
+                        prevention_rule=(
+                            "Entity extraction should yield connected nodes; "
+                            "lone entities with no cross-chunk relationships are noise."
+                        ),
+                        prevention_step="entity_extraction",
+                    )
+                except Exception as _lesson_exc:
+                    log.warning("qg1_lesson_write_failed", problem_type="orphan_nodes", error=str(_lesson_exc))
         except Exception as exc:
             log.error("quality_check_orphans_failed", work_id=work_id, error=str(exc))
             warnings.append(f"Orphan check failed: {exc}")
@@ -753,6 +773,32 @@ class IngestionPipeline:
                         subject_author_id=subject_author_id,
                         source_class=source_class,
                     )
+                    try:
+                        from author_library.intelligence.lesson_writer import record_lesson
+                        await record_lesson(
+                            self._storage,
+                            problem_type="misclassification",
+                            detection_method="qg1_inline",
+                            trigger_context={
+                                "work_id": work_id,
+                                "source_class": source_class,
+                                "subject_author_id": subject_author_id,
+                            },
+                            problem_description=(
+                                f"Work '{work_id}' by '{work_record.get('author')}' "
+                                f"classified as '{source_class}' but author matches "
+                                f"subject_author_id '{subject_author_id}'."
+                            ),
+                            fix_applied="Flagged for manual reclassification review.",
+                            prevention_rule=(
+                                "When author name matches subject_author_id slug, "
+                                "default classification should be 'primary' not "
+                                "'contextual' or 'tertiary'."
+                            ),
+                            prevention_step="classification",
+                        )
+                    except Exception as _lesson_exc:
+                        log.warning("qg1_lesson_write_failed", problem_type="misclassification", error=str(_lesson_exc))
         except Exception as exc:
             log.error("quality_check_classification_failed", work_id=work_id, error=str(exc))
             warnings.append(f"Classification check failed: {exc}")
@@ -772,6 +818,32 @@ class IngestionPipeline:
                     noise_chunks=int(noise_count),
                 )
                 warnings.append(f"{noise_count} chunks with text < 50 chars")
+                try:
+                    from author_library.intelligence.lesson_writer import record_lesson
+                    # Get genre_tags for richer context
+                    work_rec = await self._storage.works.get(work_id)
+                    genre_tags = (work_rec or {}).get("genre_tags", []) if work_rec else []
+                    await record_lesson(
+                        self._storage,
+                        problem_type="chunk_noise",
+                        detection_method="qg1_inline",
+                        trigger_context={
+                            "work_id": work_id,
+                            "source_class": source_class,
+                            "genre_tags": genre_tags,
+                        },
+                        problem_description=(
+                            f"{noise_count} chunks with text < 50 chars in work '{work_id}'."
+                        ),
+                        fix_applied="Noise chunks detected and flagged; not deleted.",
+                        prevention_rule=(
+                            "Consider raising the minimum chunk size filter from 50 "
+                            "to eliminate noise during chunking rather than post-hoc."
+                        ),
+                        prevention_step="chunking",
+                    )
+                except Exception as _lesson_exc:
+                    log.warning("qg1_lesson_write_failed", problem_type="chunk_noise", error=str(_lesson_exc))
         except Exception as exc:
             log.error("quality_check_noise_failed", work_id=work_id, error=str(exc))
             warnings.append(f"Noise check failed: {exc}")

@@ -368,6 +368,31 @@ async def task_quality_gate(
             "canonical": dedup.canonical_count,
             "merged": dedup.merged_count,
         }
+        if dedup.merged_count > 0:
+            try:
+                from author_library.intelligence.lesson_writer import record_lesson
+                await record_lesson(
+                    storage,
+                    problem_type="theme_explosion",
+                    detection_method="qg2_async",
+                    trigger_context={"work_id": work_id, "author_id": author_id},
+                    problem_description=(
+                        f"Theme deduplication merged {dedup.merged_count} near-duplicate "
+                        f"themes (from {dedup.original_count} to {dedup.canonical_count}) "
+                        f"after ingesting work '{work_id}'."
+                    ),
+                    fix_applied=(
+                        f"Merged {dedup.merged_count} themes via cosine similarity clustering."
+                    ),
+                    prevention_rule=(
+                        "LLM theme extraction tends to produce near-duplicate themes "
+                        "(e.g. 'faith' vs 'faithful trust'). Consider using canonical "
+                        "theme matching before insertion."
+                    ),
+                    prevention_step="entity_extraction",
+                )
+            except Exception as _lesson_exc:
+                log.warning("qg2_lesson_write_failed", problem_type="theme_explosion", error=str(_lesson_exc))
     except Exception as exc:
         log.error("quality_gate_theme_dedup_failed", error=str(exc))
         result["theme_dedup"] = {"error": str(exc)}
@@ -381,11 +406,36 @@ async def task_quality_gate(
 
         report = await check_pg_neo4j_consistency(storage)
         backfilled = 0
-        if report.get("missing_from_neo4j"):
+        missing = report.get("missing_from_neo4j", [])
+        if missing:
             bf_result = await backfill_missing_graph_data(
                 storage, embedding_provider, settings, run_entity_extraction=False
             )
             backfilled = bf_result.works_backfilled
+            try:
+                from author_library.intelligence.lesson_writer import record_lesson
+                await record_lesson(
+                    storage,
+                    problem_type="pg_neo4j_desync",
+                    detection_method="qg2_async",
+                    trigger_context={"work_id": work_id, "author_id": author_id},
+                    problem_description=(
+                        f"{len(missing)} works in PG are missing from Neo4j "
+                        f"after ingesting work '{work_id}': {missing[:3]}"
+                        + (" ..." if len(missing) > 3 else "")
+                    ),
+                    fix_applied=(
+                        f"Structural backfill ran and created Neo4j nodes for "
+                        f"{backfilled} missing works."
+                    ),
+                    prevention_rule=(
+                        "PG and Neo4j should stay in sync; missing Neo4j nodes "
+                        "indicate a failed graph write during prior ingestion."
+                    ),
+                    prevention_step="graph_storage",
+                )
+            except Exception as _lesson_exc:
+                log.warning("qg2_lesson_write_failed", problem_type="pg_neo4j_desync", error=str(_lesson_exc))
         result["pg_neo4j_consistency"] = {
             "is_consistent": report["is_consistent"],
             "backfilled": backfilled,
