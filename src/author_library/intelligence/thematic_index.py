@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from author_library.config import Settings
+    from author_library.storage.manager import StorageManager
     from author_library.storage.repositories import (
         ChunkRepository,
         ThematicRepository,
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     )
 
 from pydantic import BaseModel, Field
+
+from author_library.intelligence.lesson_writer import get_lesson_context
 
 log = structlog.get_logger(__name__)
 
@@ -164,8 +167,13 @@ class ThematicIndexGenerator:
     Phase 3: Store results via ThematicRepository.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        storage: StorageManager | None = None,
+    ) -> None:
         self._settings = settings
+        self._storage = storage
         self._api_key = settings.api_keys.anthropic_api_key.get_secret_value()
         self._model = settings.llm.ingestion_model
 
@@ -316,10 +324,34 @@ class ThematicIndexGenerator:
             "Identify the major recurring themes. Respond with JSON only."
         )
 
+        # Inject lesson context for theme identification
+        lesson_context = ""
+        lesson_ids = []
+        if self._storage is not None:
+            lesson_context, lesson_ids = await get_lesson_context(
+                self._storage, "thematic_index"
+            )
+
+        system = THEME_IDENTIFICATION_SYSTEM
+        if lesson_context:
+            system = f"{system}\n\n{lesson_context}"
+
         data = await self._call_anthropic(
-            system=THEME_IDENTIFICATION_SYSTEM,
+            system=system,
             user_prompt=user_prompt,
         )
+
+        # Track applied lessons
+        if lesson_ids and self._storage is not None:
+            for lid in lesson_ids:
+                try:
+                    await self._storage.lessons.increment_applied(lid)
+                except Exception as exc:
+                    log.warning(
+                        "lesson_increment_applied_failed",
+                        lesson_id=str(lid),
+                        error=str(exc),
+                    )
 
         raw_themes = data.get("themes", [])
         entries: list[ThematicEntry] = []

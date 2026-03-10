@@ -26,9 +26,12 @@ import structlog
 from author_library.catalog.models import SourceClass
 from author_library.errors import IngestionError
 
+from author_library.intelligence.lesson_writer import get_lesson_context
+
 if TYPE_CHECKING:
     from author_library.chunking.models import Chunk
     from author_library.config import APIKeySettings, LLMSettings
+    from author_library.storage.manager import StorageManager
     from author_library.storage.neo4j import Neo4jConnection
 
 log = structlog.get_logger(__name__)
@@ -134,9 +137,11 @@ class EntityExtractor:
         neo4j: Neo4jConnection,
         api_keys: APIKeySettings,
         llm_settings: LLMSettings,
+        storage: StorageManager | None = None,
     ) -> None:
         self._neo4j = neo4j
         self._llm_settings = llm_settings
+        self._storage = storage
         api_key = api_keys.anthropic_api_key.get_secret_value()
         if not api_key:
             raise IngestionError(
@@ -187,6 +192,14 @@ class EntityExtractor:
         # Fetch existing themes to help the LLM reuse canonical names
         existing_themes = await self._fetch_existing_themes()
 
+        # Fetch lesson context once for all batches
+        lesson_context = ""
+        lesson_ids = []
+        if self._storage is not None:
+            lesson_context, lesson_ids = await get_lesson_context(
+                self._storage, "entity_extraction"
+            )
+
         concurrency = self._llm_settings.entity_extraction_concurrency
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -213,6 +226,7 @@ class EntityExtractor:
                     author=author,
                     result=result,
                     existing_themes=existing_themes,
+                    lesson_context=lesson_context,
                 )
 
         # Run all batches concurrently (bounded by semaphore)
@@ -244,6 +258,18 @@ class EntityExtractor:
                     log.error("entity_persist_failed", chunk_id=extraction.chunk_id, error=str(exc))
                     result.errors.append(error_msg)
 
+        # Track that these lessons were applied
+        if lesson_ids and self._storage is not None:
+            for lid in lesson_ids:
+                try:
+                    await self._storage.lessons.increment_applied(lid)
+                except Exception as exc:
+                    log.warning(
+                        "lesson_increment_applied_failed",
+                        lesson_id=str(lid),
+                        error=str(exc),
+                    )
+
         log.info(
             "entity_extraction_complete",
             chunks_processed=len(chunks),
@@ -253,6 +279,7 @@ class EntityExtractor:
             nodes_created=result.nodes_created,
             edges_created=result.edges_created,
             errors=len(result.errors),
+            lessons_injected=len(lesson_ids),
         )
         return result
 
@@ -264,6 +291,7 @@ class EntityExtractor:
         author: str,
         result: ExtractionResult,
         existing_themes: list[str] | None = None,
+        lesson_context: str = "",
         _retry_depth: int = 0,
     ) -> list[ChunkExtraction]:
         """Extract entities from a batch, retrying with smaller sub-batches on JSON parse failure.
@@ -289,6 +317,7 @@ class EntityExtractor:
                 work_title=work_title,
                 author=author,
                 existing_themes=existing_themes,
+                lesson_context=lesson_context,
             )
         except (json.JSONDecodeError, AttributeError, TypeError, KeyError) as exc:
             if _retry_depth >= _MAX_BATCH_RETRIES:
@@ -335,6 +364,7 @@ class EntityExtractor:
                 author=author,
                 result=result,
                 existing_themes=existing_themes,
+                lesson_context=lesson_context,
                 _retry_depth=_retry_depth + 1,
             )
             right = await self._extract_batch_with_retry(
@@ -343,6 +373,7 @@ class EntityExtractor:
                 author=author,
                 result=result,
                 existing_themes=existing_themes,
+                lesson_context=lesson_context,
                 _retry_depth=_retry_depth + 1,
             )
             return left + right
@@ -359,6 +390,7 @@ class EntityExtractor:
         work_title: str,
         author: str,
         existing_themes: list[str] | None = None,
+        lesson_context: str = "",
     ) -> list[ChunkExtraction]:
         """Call Anthropic API to extract entities from a batch of chunks.
 
@@ -394,10 +426,14 @@ class EntityExtractor:
             f"{json.dumps(chunks_payload, indent=2)}"
         )
 
+        system = _EXTRACTION_SYSTEM_PROMPT
+        if lesson_context:
+            system = f"{system}\n\n{lesson_context}"
+
         response = await self._client.messages.create(
             model=self._llm_settings.ingestion_model,
             max_tokens=16384,
-            system=_EXTRACTION_SYSTEM_PROMPT,
+            system=system,
             messages=[{"role": "user", "content": user_message}],
         )
 

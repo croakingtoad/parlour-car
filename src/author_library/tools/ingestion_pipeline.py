@@ -185,6 +185,7 @@ class IngestionPipeline:
             work_repository=self._storage.works,
             subject_author=subject_author_id,
             pg_pool=self._storage.pg,
+            storage=self._storage,
         )
 
         pipeline_result = await classification_pipeline.process(
@@ -490,6 +491,7 @@ class IngestionPipeline:
                     self._storage.neo4j,
                     self._settings.api_keys,
                     self._settings.llm,
+                    storage=self._storage,
                 )
                 extraction_result = await extractor.extract_and_persist(
                     extraction_chunks,

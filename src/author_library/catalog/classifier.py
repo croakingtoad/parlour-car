@@ -14,10 +14,12 @@ import structlog
 
 from author_library.catalog.models import ClassificationResult, SourceClass
 from author_library.errors import ClassificationError
+from author_library.intelligence.lesson_writer import get_lesson_context
 
 if TYPE_CHECKING:
     from author_library.config import Settings
     from author_library.parsing.models import ParsedDocument
+    from author_library.storage.manager import StorageManager
 
 log = structlog.get_logger(__name__)
 
@@ -120,8 +122,13 @@ class SourceClassifier:
     safety rule when confidence is below threshold.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        storage: StorageManager | None = None,
+    ) -> None:
         self._settings = settings
+        self._storage = storage
         self._api_key = settings.api_keys.anthropic_api_key.get_secret_value()
         self._model = settings.llm.ingestion_model
 
@@ -163,16 +170,25 @@ class SourceClassifier:
             metadata_hints=metadata_hints,
         )
 
+        # Fetch lesson context for injection into system prompt
+        lesson_context = ""
+        lesson_ids = []
+        if self._storage is not None:
+            lesson_context, lesson_ids = await get_lesson_context(
+                self._storage, "classification"
+            )
+
         log.info(
             "classifying_document",
             title=document.metadata.title,
             author=document.metadata.author,
             subject_author=subject_author,
             model=self._model,
+            lessons_injected=len(lesson_ids),
         )
 
         try:
-            result = await self._call_anthropic(user_prompt)
+            result = await self._call_anthropic(user_prompt, lesson_context=lesson_context)
         except ClassificationError:
             raise
         except Exception as exc:
@@ -185,6 +201,18 @@ class SourceClassifier:
                 cause=exc,
             ) from exc
 
+        # Track that these lessons were applied
+        if lesson_ids and self._storage is not None:
+            for lid in lesson_ids:
+                try:
+                    await self._storage.lessons.increment_applied(lid)
+                except Exception as exc:
+                    log.warning(
+                        "lesson_increment_applied_failed",
+                        lesson_id=str(lid),
+                        error=str(exc),
+                    )
+
         log.info(
             "classification_complete",
             title=document.metadata.title,
@@ -194,17 +222,23 @@ class SourceClassifier:
 
         return result
 
-    async def _call_anthropic(self, user_prompt: str) -> ClassificationResult:
+    async def _call_anthropic(
+        self, user_prompt: str, *, lesson_context: str = ""
+    ) -> ClassificationResult:
         """Call the Anthropic API and parse the structured response."""
         import anthropic
 
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
 
+        system = CLASSIFICATION_SYSTEM_PROMPT
+        if lesson_context:
+            system = f"{system}\n\n{lesson_context}"
+
         try:
             response = await client.messages.create(
                 model=self._model,
                 max_tokens=1024,
-                system=CLASSIFICATION_SYSTEM_PROMPT,
+                system=system,
                 messages=[{"role": "user", "content": user_prompt}],
             )
         except anthropic.APIError as exc:

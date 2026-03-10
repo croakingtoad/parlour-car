@@ -28,6 +28,51 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
+async def get_lesson_context(
+    storage: StorageManager,
+    step: str,
+    *,
+    max_lessons: int = 5,
+    min_confidence: float = 0.6,
+) -> tuple[str, list[UUID]]:
+    """Build lesson context for injection into an LLM system prompt.
+
+    Queries active lessons for the given pipeline step, filtered to those
+    with confidence >= min_confidence, capped at max_lessons.
+
+    Returns:
+        (context_str, lesson_ids) — context_str is empty if no relevant
+        lessons exist; lesson_ids are UUIDs for increment_applied() tracking.
+    """
+    try:
+        lessons = await storage.lessons.get_lessons_for_step(
+            step,
+            active_only=True,
+            min_confidence=min_confidence,
+        )
+    except Exception as exc:
+        log.warning("get_lesson_context_failed", step=step, error=str(exc))
+        return "", []
+
+    if not lessons:
+        return "", []
+
+    top = lessons[:max_lessons]
+    lesson_ids = [UUID(str(lesson["id"])) for lesson in top]
+
+    lines = ["KNOWN ISSUES FROM PREVIOUS INGESTIONS:"]
+    for i, lesson in enumerate(top, 1):
+        problem_type = lesson.get("problem_type", "unknown")
+        description = lesson.get("problem_description", "")
+        prevention = lesson.get("prevention_rule") or ""
+        line = f"{i}. [{problem_type}]: {description}"
+        if prevention:
+            line += f" Prevention: {prevention}"
+        lines.append(line)
+
+    return "\n".join(lines), lesson_ids
+
+
 async def record_lesson(
     storage: StorageManager,
     *,

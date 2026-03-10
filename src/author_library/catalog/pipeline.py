@@ -34,6 +34,7 @@ from author_library.errors import ClassificationError
 if TYPE_CHECKING:
     from author_library.config import Settings
     from author_library.parsing.models import ParsedDocument
+    from author_library.storage.manager import StorageManager
     from author_library.storage.postgres import PostgresPool
     from author_library.storage.repositories import WorkRepository
 
@@ -90,8 +91,9 @@ class ClassificationPipeline:
         work_repository: WorkRepository,
         subject_author: str,
         pg_pool: PostgresPool | None = None,
+        storage: StorageManager | None = None,
     ) -> None:
-        self._classifier = SourceClassifier(settings)
+        self._classifier = SourceClassifier(settings, storage=storage)
         self._work_repo = work_repository
         self._subject_author = subject_author
         self._pg_pool = pg_pool

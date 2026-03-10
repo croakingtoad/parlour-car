@@ -20,9 +20,12 @@ from author_library.errors import IntelligenceError
 
 if TYPE_CHECKING:
     from author_library.config import Settings
+    from author_library.storage.manager import StorageManager
     from author_library.storage.repositories import ChunkRepository, WorkRepository
 
 from pydantic import BaseModel, Field
+
+from author_library.intelligence.lesson_writer import get_lesson_context
 
 log = structlog.get_logger(__name__)
 
@@ -207,8 +210,13 @@ class VoiceProfileExtractor:
     from primary sources (voice_profile_eligible=true only).
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        storage: StorageManager | None = None,
+    ) -> None:
         self._settings = settings
+        self._storage = storage
         self._api_key = settings.api_keys.anthropic_api_key.get_secret_value()
         self._model = settings.llm.ingestion_model
 
@@ -270,8 +278,18 @@ class VoiceProfileExtractor:
             chunks=sampled,
         )
 
+        # Fetch lesson context for injection
+        lesson_context = ""
+        lesson_ids = []
+        if self._storage is not None:
+            lesson_context, lesson_ids = await get_lesson_context(
+                self._storage, "voice_profile"
+            )
+
         try:
-            profile_data = await self._call_anthropic(user_prompt)
+            profile_data = await self._call_anthropic(
+                user_prompt, lesson_context=lesson_context
+            )
         except IntelligenceError:
             raise
         except Exception as exc:
@@ -280,6 +298,18 @@ class VoiceProfileExtractor:
                 context={"author_id": author_id},
                 cause=exc,
             ) from exc
+
+        # Track applied lessons
+        if lesson_ids and self._storage is not None:
+            for lid in lesson_ids:
+                try:
+                    await self._storage.lessons.increment_applied(lid)
+                except Exception as exc:
+                    log.warning(
+                        "lesson_increment_applied_failed",
+                        lesson_id=str(lid),
+                        error=str(exc),
+                    )
 
         profile = VoiceProfile(
             author_id=author_id,
@@ -336,17 +366,23 @@ class VoiceProfileExtractor:
 
         return all_chunks
 
-    async def _call_anthropic(self, user_prompt: str) -> dict[str, Any]:
+    async def _call_anthropic(
+        self, user_prompt: str, *, lesson_context: str = ""
+    ) -> dict[str, Any]:
         """Call the Anthropic API and parse the voice profile response."""
         import anthropic
 
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
 
+        system = VOICE_EXTRACTION_SYSTEM
+        if lesson_context:
+            system = f"{system}\n\n{lesson_context}"
+
         try:
             response = await client.messages.create(
                 model=self._model,
                 max_tokens=4096,
-                system=VOICE_EXTRACTION_SYSTEM,
+                system=system,
                 messages=[{"role": "user", "content": user_prompt}],
             )
         except anthropic.APIError as exc:

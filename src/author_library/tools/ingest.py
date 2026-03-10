@@ -358,7 +358,7 @@ async def _run_cross_work_analysis(
 
     # 1. Thematic index generation
     try:
-        generator = ThematicIndexGenerator(settings)
+        generator = ThematicIndexGenerator(settings, storage=storage)
         themes = await generator.generate(
             author_id=subject_author_id,
             author_name=subject_author_id,
@@ -376,7 +376,7 @@ async def _run_cross_work_analysis(
 
     # 2. Voice profile extraction
     try:
-        extractor = VoiceProfileExtractor(settings)
+        extractor = VoiceProfileExtractor(settings, storage=storage)
         profile = await extractor.extract(
             author_id=subject_author_id,
             author_name=subject_author_id,
