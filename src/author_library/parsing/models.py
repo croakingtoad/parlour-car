@@ -17,7 +17,8 @@ class SectionType(StrEnum):
     """Classification of document sections for pipeline routing.
 
     Controls how each section is processed during ingestion:
-    - CHAPTER/PREFACE/BACK_MATTER: full pipeline (chunk, annotate, embed, extract)
+    - CHAPTER/BACK_MATTER: full pipeline (chunk, annotate, embed, extract, voice)
+    - PREFACE: chunk, annotate, embed, entity extract — but NOT voice profiling
     - BIBLIOGRAPHY: skip chunking; parse cited works for acquisition candidates
     - INDEX: skip chunking; parse terms for vocabulary proposals
     - TOC: skip all processing; use for structural metadata only

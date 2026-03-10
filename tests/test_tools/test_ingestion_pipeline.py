@@ -442,3 +442,210 @@ class TestIngestionResultWithQualityChecks:
         )
         d = result.to_dict()
         assert "quality_checks" not in d
+
+
+# ---------------------------------------------------------------------------
+# Section-type routing tests (td-4e1d64)
+# ---------------------------------------------------------------------------
+
+
+def _make_chunk(section_type: str, text: str = "sample text", position: int = 0):
+    """Build a minimal Chunk for section-routing tests."""
+    from author_library.chunking.models import Chunk, ChunkGranularity
+
+    return Chunk(
+        text=text,
+        granularity=ChunkGranularity.MACRO,
+        work_id="guite--test-work",
+        source_class="primary",
+        position=position,
+        section_type=section_type,
+    )
+
+
+class TestFilterBySectionType:
+    """Unit tests for IngestionPipeline._filter_by_section_type."""
+
+    def _pipeline(self) -> IngestionPipeline:
+        mock_storage = MagicMock()
+        mock_storage.pg = AsyncMock()
+        return IngestionPipeline(
+            settings=MagicMock(),
+            storage=mock_storage,
+            embedding_provider=AsyncMock(),
+        )
+
+    def test_chapter_chunks_kept(self) -> None:
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("chapter"), _make_chunk("chapter")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 2
+        assert skipped == {}
+        assert structural == {}
+
+    def test_preface_chunks_kept(self) -> None:
+        """Preface is author voice — kept in full pipeline."""
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("preface")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 1
+        assert skipped == {}
+
+    def test_index_chunks_excluded_and_routed(self) -> None:
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("index"), _make_chunk("chapter")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 1
+        assert content[0].section_type == "chapter"
+        assert skipped.get("index") == 1
+        assert "index" in structural
+        assert len(structural["index"]) == 1
+
+    def test_bibliography_chunks_excluded_and_routed(self) -> None:
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("bibliography"), _make_chunk("bibliography")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 0
+        assert skipped.get("bibliography") == 2
+        assert "bibliography" in structural
+        assert len(structural["bibliography"]) == 2
+
+    def test_toc_excluded_not_routed(self) -> None:
+        """ToC is dropped entirely — no downstream routing."""
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("toc")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 0
+        assert skipped.get("toc") == 1
+        assert "toc" not in structural  # no routing for ToC
+
+    def test_front_matter_excluded_not_routed(self) -> None:
+        """Front matter is dropped — no downstream routing."""
+        pipeline = self._pipeline()
+        chunks = [_make_chunk("front_matter")]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 0
+        assert "front_matter" not in structural
+
+    def test_mixed_sections(self) -> None:
+        """Mixed section types are correctly partitioned."""
+        pipeline = self._pipeline()
+        chunks = [
+            _make_chunk("chapter", position=0),
+            _make_chunk("index", position=1),
+            _make_chunk("bibliography", position=2),
+            _make_chunk("toc", position=3),
+            _make_chunk("preface", position=4),
+        ]
+        content, skipped, structural = pipeline._filter_by_section_type(chunks, "work-1")
+        assert len(content) == 2  # chapter + preface
+        assert set(c.section_type for c in content) == {"chapter", "preface"}
+        assert skipped == {"index": 1, "bibliography": 1, "toc": 1}
+        assert set(structural.keys()) == {"index", "bibliography"}
+
+
+class TestRouteStructuralSections:
+    """Unit tests for IngestionPipeline._route_structural_sections."""
+
+    def _pipeline_with_mocks(self):
+        mock_storage = MagicMock()
+        mock_storage.pg = AsyncMock()
+        pipeline = IngestionPipeline(
+            settings=MagicMock(),
+            storage=mock_storage,
+            embedding_provider=AsyncMock(),
+        )
+        return pipeline, mock_storage
+
+    async def test_index_routes_to_vocabulary(self) -> None:
+        """Index chunks have their lines proposed as vocabulary terms."""
+        pipeline, mock_storage = self._pipeline_with_mocks()
+
+        index_chunk = _make_chunk("index", text="grace\nforgiveness\nlove")
+        structural = {"index": [index_chunk]}
+
+        with patch(
+            "author_library.vocabulary.VocabularyManager"
+        ) as mock_vocab_cls:
+            mock_vocab = AsyncMock()
+            mock_vocab.propose.return_value = {"term": "grace", "already_exists": False}
+            mock_vocab_cls.return_value = mock_vocab
+
+            await pipeline._route_structural_sections(structural, "guite--test")
+
+        # Should have called propose for each non-trivial line
+        assert mock_vocab.propose.call_count == 3
+
+    async def test_bibliography_routes_to_acquisition(self) -> None:
+        """Bibliography chunks have their lines flagged as acquisition candidates."""
+        pipeline, mock_storage = self._pipeline_with_mocks()
+
+        bib_chunk = _make_chunk(
+            "bibliography",
+            text="Lewis, C.S. Mere Christianity. 1952.\nTolkien, J.R.R. The Lord of the Rings. 1954.",
+        )
+        structural = {"bibliography": [bib_chunk]}
+
+        with patch(
+            "author_library.catalog.acquisition.AcquisitionManager"
+        ) as mock_acq_cls:
+            mock_acq = AsyncMock()
+            mock_acq.flag.return_value = True
+            mock_acq_cls.return_value = mock_acq
+
+            await pipeline._route_structural_sections(structural, "guite--test")
+
+        assert mock_acq.flag.call_count == 2
+
+    async def test_index_skips_blank_lines_and_page_numbers(self) -> None:
+        """Blank lines and pure page numbers are filtered out."""
+        pipeline, mock_storage = self._pipeline_with_mocks()
+
+        index_chunk = _make_chunk("index", text="\ngrace\n123, 456\n  \nforgiveness")
+        structural = {"index": [index_chunk]}
+
+        with patch(
+            "author_library.vocabulary.VocabularyManager"
+        ) as mock_vocab_cls:
+            mock_vocab = AsyncMock()
+            mock_vocab.propose.return_value = {"term": "grace", "already_exists": False}
+            mock_vocab_cls.return_value = mock_vocab
+
+            await pipeline._route_structural_sections(structural, "guite--test")
+
+        # Only "grace" and "forgiveness" pass — blank lines and page numbers filtered
+        assert mock_vocab.propose.call_count == 2
+
+    async def test_empty_structural_dict_is_noop(self) -> None:
+        """Empty structural_chunks dict calls neither manager."""
+        pipeline, mock_storage = self._pipeline_with_mocks()
+
+        with (
+            patch("author_library.vocabulary.VocabularyManager") as mock_v,
+            patch("author_library.catalog.acquisition.AcquisitionManager") as mock_a,
+        ):
+            await pipeline._route_structural_sections({}, "guite--test")
+
+        mock_v.assert_not_called()
+        mock_a.assert_not_called()
+
+    async def test_already_known_term_counted_correctly(self) -> None:
+        """Terms already in vocabulary are counted as already_known, not proposed."""
+        pipeline, mock_storage = self._pipeline_with_mocks()
+
+        index_chunk = _make_chunk("index", text="grace\nforgiveness")
+        structural = {"index": [index_chunk]}
+
+        with patch(
+            "author_library.vocabulary.VocabularyManager"
+        ) as mock_vocab_cls:
+            mock_vocab = AsyncMock()
+            # grace already exists, forgiveness is new
+            mock_vocab.propose.side_effect = [
+                {"term": "grace", "already_exists": True},
+                {"term": "forgiveness", "already_exists": False},
+            ]
+            mock_vocab_cls.return_value = mock_vocab
+
+            # Should not raise — completes without error
+            await pipeline._route_structural_sections(structural, "guite--test")

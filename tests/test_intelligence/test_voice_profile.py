@@ -162,6 +162,209 @@ async def test_voice_extraction_integration(
 
 
 # ---------------------------------------------------------------------------
+# Voice profile section-type filtering tests
+# ---------------------------------------------------------------------------
+
+
+def _make_chunk_dict(
+    section_type: str,
+    source_class: str = "primary",
+    work_id: str = "guite--test",
+) -> dict:
+    """Create a minimal chunk dict as returned by chunk_repo.list_by_work."""
+    return {
+        "id": f"{section_type}-chunk",
+        "work_id": work_id,
+        "text": f"Sample text for {section_type}",
+        "granularity": "meso",
+        "source_class": source_class,
+        "position": 0,
+        "metadata": {"section_type": section_type},
+    }
+
+
+class TestVoiceProfileSectionTypeFiltering:
+    """Tests that voice profiling excludes preface and structural section types."""
+
+    def _extractor(self) -> VoiceProfileExtractor:
+        from unittest.mock import MagicMock
+
+        settings = MagicMock()
+        settings.api_keys.anthropic = "sk-ant-test"
+        return VoiceProfileExtractor(settings)
+
+    async def test_chapter_chunks_included(self) -> None:
+        """Chapter meso chunks from eligible works are included in voice profiling."""
+        from unittest.mock import AsyncMock
+
+        extractor = self._extractor()
+        work = {
+            "work_id": "guite--faith-hope",
+            "source_class": "primary",
+            "source_metadata": {"voice_profile_eligible": True},
+        }
+        work_repo = AsyncMock()
+        work_repo.list_by_author.return_value = [work]
+
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            _make_chunk_dict("chapter"),
+            _make_chunk_dict("chapter"),
+        ]
+
+        chunks = await extractor._gather_eligible_chunks(
+            author_id="malcolm-guite",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        assert len(chunks) == 2
+        assert all(c["metadata"]["section_type"] == "chapter" for c in chunks)
+
+    async def test_preface_chunks_excluded(self) -> None:
+        """Preface meso chunks are NOT included in voice profiling."""
+        from unittest.mock import AsyncMock
+
+        extractor = self._extractor()
+        work = {
+            "work_id": "guite--faith-hope",
+            "source_class": "primary",
+            "source_metadata": {"voice_profile_eligible": True},
+        }
+        work_repo = AsyncMock()
+        work_repo.list_by_author.return_value = [work]
+
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            _make_chunk_dict("chapter"),
+            _make_chunk_dict("preface"),  # should be excluded
+            _make_chunk_dict("back_matter"),
+        ]
+
+        chunks = await extractor._gather_eligible_chunks(
+            author_id="malcolm-guite",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        assert len(chunks) == 2
+        section_types = {c["metadata"]["section_type"] for c in chunks}
+        assert "preface" not in section_types
+        assert "chapter" in section_types
+        assert "back_matter" in section_types
+
+    async def test_structural_sections_excluded(self) -> None:
+        """Bibliography, index, toc, and front_matter chunks are excluded."""
+        from unittest.mock import AsyncMock
+
+        extractor = self._extractor()
+        work = {
+            "work_id": "guite--faith-hope",
+            "source_class": "primary",
+            "source_metadata": {"voice_profile_eligible": True},
+        }
+        work_repo = AsyncMock()
+        work_repo.list_by_author.return_value = [work]
+
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            _make_chunk_dict("chapter"),
+            _make_chunk_dict("bibliography"),
+            _make_chunk_dict("index"),
+            _make_chunk_dict("toc"),
+            _make_chunk_dict("front_matter"),
+        ]
+
+        chunks = await extractor._gather_eligible_chunks(
+            author_id="malcolm-guite",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        assert len(chunks) == 1
+        assert chunks[0]["metadata"]["section_type"] == "chapter"
+
+    async def test_metadata_as_json_string(self) -> None:
+        """Handles metadata stored as a JSON string (asyncpg JSONB variance)."""
+        import json
+        from unittest.mock import AsyncMock
+
+        extractor = self._extractor()
+        work = {
+            "work_id": "guite--faith-hope",
+            "source_class": "primary",
+            "source_metadata": {"voice_profile_eligible": True},
+        }
+        work_repo = AsyncMock()
+        work_repo.list_by_author.return_value = [work]
+
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            {
+                "id": "c1",
+                "work_id": "guite--faith-hope",
+                "text": "text",
+                "granularity": "meso",
+                "source_class": "primary",
+                "position": 0,
+                "metadata": json.dumps({"section_type": "chapter"}),
+            },
+            {
+                "id": "c2",
+                "work_id": "guite--faith-hope",
+                "text": "text",
+                "granularity": "meso",
+                "source_class": "primary",
+                "position": 1,
+                "metadata": json.dumps({"section_type": "preface"}),
+            },
+        ]
+
+        chunks = await extractor._gather_eligible_chunks(
+            author_id="malcolm-guite",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        # Only chapter included; preface excluded even when metadata is a JSON string
+        assert len(chunks) == 1
+
+    async def test_missing_section_type_defaults_to_chapter(self) -> None:
+        """Chunks with no section_type in metadata default to 'chapter' (voice-eligible)."""
+        from unittest.mock import AsyncMock
+
+        extractor = self._extractor()
+        work = {
+            "work_id": "guite--faith-hope",
+            "source_class": "primary",
+            "source_metadata": {"voice_profile_eligible": True},
+        }
+        work_repo = AsyncMock()
+        work_repo.list_by_author.return_value = [work]
+
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            {
+                "id": "c1",
+                "work_id": "guite--faith-hope",
+                "text": "text",
+                "granularity": "meso",
+                "source_class": "primary",
+                "position": 0,
+                "metadata": {},  # no section_type key
+            }
+        ]
+
+        chunks = await extractor._gather_eligible_chunks(
+            author_id="malcolm-guite",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        assert len(chunks) == 1
+
+
+# ---------------------------------------------------------------------------
 # Error handling tests
 # ---------------------------------------------------------------------------
 

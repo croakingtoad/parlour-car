@@ -292,8 +292,9 @@ class IngestionPipeline:
             elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
 
-        # Step 4b: Section-type routing — filter out non-content sections
-        chunks, skipped_sections = self._filter_by_section_type(chunks, work_id)
+        # Step 4b: Section-type routing — filter out non-content sections,
+        # then route structural sections to vocabulary/acquisition managers.
+        chunks, skipped_sections, structural_chunks = self._filter_by_section_type(chunks, work_id)
 
         # Recount after filtering
         if skipped_sections:
@@ -301,6 +302,11 @@ class IngestionPipeline:
             for chunk in chunks:
                 gran = str(chunk.granularity)
                 chunks_by_gran[gran] = chunks_by_gran.get(gran, 0) + 1
+
+        # Route structural sections: index → vocabulary proposals,
+        # bibliography → acquisition candidates.
+        if structural_chunks:
+            await self._route_structural_sections(structural_chunks, work_id)
 
         # Step 5: Annotate
         stage_start = time.monotonic()
@@ -473,8 +479,20 @@ class IngestionPipeline:
                 g.strip()
                 for g in self._settings.llm.entity_extraction_granularities.split(",")
             }
+            # Structural sections are excluded from entity extraction.
+            # These are already filtered by _filter_by_section_type, but we
+            # apply the check here as well for defense-in-depth.
+            _ENTITY_EXTRACT_EXCLUDED = {
+                SectionType.BIBLIOGRAPHY.value,
+                SectionType.INDEX.value,
+                SectionType.TABLE_OF_CONTENTS.value,
+                SectionType.FRONT_MATTER.value,
+            }
             extraction_chunks = [
-                c for c in chunks if str(c.granularity) in allowed_grans
+                c
+                for c in chunks
+                if str(c.granularity) in allowed_grans
+                and c.section_type not in _ENTITY_EXTRACT_EXCLUDED
             ]
             skipped = len(chunks) - len(extraction_chunks)
             if skipped:
@@ -1155,19 +1173,22 @@ class IngestionPipeline:
         self,
         chunks: list[Chunk],
         work_id: str,
-    ) -> tuple[list[Chunk], dict[str, int]]:
+    ) -> tuple[list[Chunk], dict[str, int], dict[str, list[Chunk]]]:
         """Filter chunks by section type, removing non-content sections.
 
         Section types that get FULL pipeline processing:
-        - chapter, preface, back_matter: full pipeline
-        Section types that are EXCLUDED from chunking/annotation/embedding:
-        - bibliography: skip (future: parse for acquisition candidates)
-        - index: skip (future: parse for vocabulary proposals)
-        - toc: skip entirely
-        - front_matter: skip (future: extract catalog metadata)
+        - chapter, back_matter: full pipeline
+        Section types that are EXCLUDED from main pipeline but routed elsewhere:
+        - index: route to vocabulary proposals (propose terms via VocabularyManager)
+        - bibliography: route to acquisition candidates (flag via AcquisitionManager)
+        - toc: structural metadata only (no additional routing)
+        - front_matter: structural metadata only (no additional routing)
+        - preface: kept in full pipeline (author voice, personal reflection content)
 
         Returns:
-            Tuple of (filtered_chunks, skipped_counts_by_section_type).
+            Tuple of (content_chunks, skipped_counts_by_type, structural_chunks_by_type).
+            structural_chunks_by_type only contains section types with routing logic
+            (currently: index, bibliography).
         """
         # Section types that receive full pipeline processing
         _CONTENT_SECTION_TYPES = {
@@ -1176,14 +1197,23 @@ class IngestionPipeline:
             SectionType.BACK_MATTER.value,
         }
 
+        # Section types that have downstream routing (index → vocab, bibliography → acquisition)
+        _ROUTABLE_SECTION_TYPES = {
+            SectionType.INDEX.value,
+            SectionType.BIBLIOGRAPHY.value,
+        }
+
         content_chunks: list[Chunk] = []
         skipped: dict[str, int] = {}
+        structural_chunks: dict[str, list[Chunk]] = {}
 
         for chunk in chunks:
             if chunk.section_type in _CONTENT_SECTION_TYPES:
                 content_chunks.append(chunk)
             else:
                 skipped[chunk.section_type] = skipped.get(chunk.section_type, 0) + 1
+                if chunk.section_type in _ROUTABLE_SECTION_TYPES:
+                    structural_chunks.setdefault(chunk.section_type, []).append(chunk)
 
         if skipped:
             total_skipped = sum(skipped.values())
@@ -1194,9 +1224,96 @@ class IngestionPipeline:
                 kept_chunks=len(content_chunks),
                 skipped_chunks=total_skipped,
                 skipped_by_type=skipped,
+                routed_chunks=sum(len(v) for v in structural_chunks.values()),
             )
 
-        return content_chunks, skipped
+        return content_chunks, skipped, structural_chunks
+
+    async def _route_structural_sections(
+        self,
+        structural_chunks: dict[str, list[Chunk]],
+        work_id: str,
+    ) -> None:
+        """Route structural section chunks to appropriate downstream managers.
+
+        - Index sections → VocabularyManager.propose() for each term extracted
+          from chunk text (one term per line, stripped).
+        - Bibliography sections → AcquisitionManager.flag() for each entry
+          extracted from chunk text (one citation per line, stripped).
+
+        Both managers are lazy — they create their tables on first use if absent.
+        Errors here are non-fatal: logged and swallowed so the main pipeline
+        can complete successfully.
+        """
+        from author_library.catalog.acquisition import AcquisitionManager
+        from author_library.vocabulary import VocabularyManager
+
+        index_chunks = structural_chunks.get(SectionType.INDEX.value, [])
+        bibliography_chunks = structural_chunks.get(SectionType.BIBLIOGRAPHY.value, [])
+
+        if index_chunks:
+            vocab = VocabularyManager(self._storage.pg)
+            proposed = 0
+            already_known = 0
+            for chunk in index_chunks:
+                for line in chunk.text.splitlines():
+                    term = line.strip()
+                    # Skip blank lines, section headings (all-caps short), page refs
+                    if not term or len(term) < 3 or len(term) > 120:
+                        continue
+                    # Skip pure numeric strings (page numbers)
+                    if term.replace(",", "").replace(" ", "").isdigit():
+                        continue
+                    try:
+                        record = await vocab.propose(
+                            term,
+                            note=f"Auto-proposed from index section of {work_id}",
+                        )
+                        if record.get("already_exists"):
+                            already_known += 1
+                        else:
+                            proposed += 1
+                    except Exception:
+                        pass
+
+            log.info(
+                "ingestion_index_vocab_routing",
+                work_id=work_id,
+                index_chunks=len(index_chunks),
+                terms_proposed=proposed,
+                terms_already_known=already_known,
+            )
+
+        if bibliography_chunks:
+            acquisition = AcquisitionManager(self._storage.pg)
+            flagged = 0
+            already_flagged = 0
+            for chunk in bibliography_chunks:
+                for line in chunk.text.splitlines():
+                    citation = line.strip()
+                    # Skip blank lines and very short fragments
+                    if not citation or len(citation) < 10:
+                        continue
+                    try:
+                        was_added = await acquisition.flag(
+                            citation_text=citation,
+                            note=f"Auto-flagged from bibliography section of {work_id}",
+                            priority="low",
+                        )
+                        if was_added:
+                            flagged += 1
+                        else:
+                            already_flagged += 1
+                    except Exception:
+                        already_flagged += 1
+
+            log.info(
+                "ingestion_bibliography_acquisition_routing",
+                work_id=work_id,
+                bibliography_chunks=len(bibliography_chunks),
+                citations_flagged=flagged,
+                citations_already_flagged=already_flagged,
+            )
 
     def _build_annotation_context(
         self,

@@ -34,6 +34,7 @@ from author_library.graph.linking_explicit import ExplicitLinkDetector
 from author_library.graph.linking_implicit import ImplicitEngagementDetector
 from author_library.graph.linking_thematic import ThematicParallelDetector
 from author_library.parsing import get_parser
+from author_library.parsing.models import SectionType
 
 if TYPE_CHECKING:
     from author_library.cache import CacheManager
@@ -607,8 +608,19 @@ async def handle_chunk_source(
         await storage.graph.upsert_chunk_node(chunk_node)
 
     # Entity extraction (PRIMARY and SECONDARY only)
+    # Structural sections are excluded even though they are already filtered out
+    # by the section_type filter above; this is defense-in-depth.
+    _ENTITY_EXTRACT_EXCLUDED = {
+        SectionType.BIBLIOGRAPHY.value,
+        SectionType.INDEX.value,
+        SectionType.TABLE_OF_CONTENTS.value,
+        SectionType.FRONT_MATTER.value,
+    }
     entity_count = 0
     if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_GRAPH):
+        extraction_chunks = [
+            c for c in chunks if c.section_type not in _ENTITY_EXTRACT_EXCLUDED
+        ]
         try:
             extractor = EntityExtractor(
                 storage.neo4j,
@@ -616,7 +628,7 @@ async def handle_chunk_source(
                 settings.llm,
             )
             extraction_result = await extractor.extract_and_persist(
-                chunks,
+                extraction_chunks,
                 work_title=work.get("title", ""),
                 author=work.get("author", ""),
             )

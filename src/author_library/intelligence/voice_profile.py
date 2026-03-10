@@ -356,13 +356,26 @@ class VoiceProfileExtractor:
             eligible=len(eligible_work_ids),
         )
 
+        # Section types that contribute to voice profiling.
+        # Structural sections (bibliography, index, toc, front_matter) are never
+        # stored in the DB, but we also exclude preface as it is introductory
+        # material rather than the author's primary expressive voice.
+        _VOICE_ELIGIBLE_SECTION_TYPES = {"chapter", "back_matter"}
+
         # Fetch meso-level chunks from eligible works
         all_chunks: list[dict[str, Any]] = []
         for work_id in eligible_work_ids:
             chunks = await chunk_repo.list_by_work(work_id, granularity="meso")
-            # Only include primary source chunks
-            primary_chunks = [c for c in chunks if c.get("source_class") == "primary"]
-            all_chunks.extend(primary_chunks)
+            # Only include primary source chunks with voice-eligible section types
+            for c in chunks:
+                if c.get("source_class") != "primary":
+                    continue
+                meta = c.get("metadata") or {}
+                if isinstance(meta, str):
+                    meta = json.loads(meta)
+                section_type = meta.get("section_type", "chapter") if isinstance(meta, dict) else "chapter"
+                if section_type in _VOICE_ELIGIBLE_SECTION_TYPES:
+                    all_chunks.append(c)
 
         return all_chunks
 
