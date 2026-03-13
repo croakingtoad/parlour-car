@@ -1283,8 +1283,15 @@ async def _run_http(server: Server, settings: Settings) -> None:
     from starlette.applications import Starlette
     from starlette.routing import Mount, Route
 
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
     from author_library.captures.endpoint import handle_capture, handle_capture_status
     from mcp.server.sse import SseServerTransport
+
+    async def _handle_rest_health(request: Request) -> JSONResponse:
+        """Simple health endpoint for Chrome extension 'Test Connection' button."""
+        return JSONResponse({"status": "ok", "server": "parlour-car"})
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Streamable HTTP transport (recommended — stateless, no session stickiness issues)
@@ -1319,7 +1326,8 @@ async def _run_http(server: Server, settings: Settings) -> None:
             # Legacy SSE transport
             Route("/sse", endpoint=handle_sse),
             Mount("/sse/messages", app=sse_transport.handle_post_message),
-            # Chrome extension capture endpoints
+            # Chrome extension REST endpoints
+            Route("/api/v1/health", endpoint=_handle_rest_health, methods=["GET"]),
             Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
             Route(
                 "/api/v1/captures/status/{job_id:str}",
@@ -1330,10 +1338,11 @@ async def _run_http(server: Server, settings: Settings) -> None:
         lifespan=lifespan,
     )
 
-    # Inject shared state for capture endpoint
+    # Inject shared state for capture endpoint using proper Starlette state API.
+    # Must be set after app creation (not via app.state._state which is internal).
     api_key_secret = settings.api_keys.parlour_api_key
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
-    app.state._state = {  # type: ignore[union-attr]
+    app.state.capture_state = {
         "api_key": api_key,
         "task_queue": server._tool_state.get("task_queue"),  # type: ignore[attr-defined]
         "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]

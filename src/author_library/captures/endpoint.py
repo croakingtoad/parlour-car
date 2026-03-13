@@ -42,7 +42,7 @@ async def handle_capture(request: Request) -> JSONResponse:
         - api_key: str — the expected PARLOUR_API_KEY
         - task_queue: TaskQueue — for enqueuing capture jobs
     """
-    state: dict[str, Any] = request.app.state._state  # type: ignore[union-attr]
+    state: dict[str, Any] = request.app.state.capture_state
 
     # Authenticate
     api_key = state.get("api_key", "")
@@ -117,7 +117,7 @@ async def handle_capture_status(request: Request) -> JSONResponse:
 
     Returns the current status of a capture processing job.
     """
-    state: dict[str, Any] = request.app.state._state  # type: ignore[union-attr]
+    state: dict[str, Any] = request.app.state.capture_state
 
     # Authenticate
     api_key = state.get("api_key", "")
