@@ -159,7 +159,14 @@ class ClassificationPipeline:
             work_data = self._catalog_entry_to_work_dict(catalog_entry, classification)
             existing = await self._work_repo.get(catalog_entry.work_id)
             if existing:
-                await self._work_repo.update(catalog_entry.work_id, work_data)
+                # Only update fields safe for re-ingestion (skip PK and date types
+                # that asyncpg requires as date objects, not strings)
+                safe_fields = {
+                    k: v for k, v in work_data.items()
+                    if k not in ("work_id", "ingestion_date", "created_at", "updated_at",
+                                 "date_published", "date_consumed")
+                }
+                await self._work_repo.update(catalog_entry.work_id, safe_fields)
                 log.info("pipeline_entry_updated", work_id=catalog_entry.work_id)
             else:
                 await self._work_repo.create(work_data)
