@@ -154,10 +154,15 @@ class ClassificationPipeline:
             overrides=overrides,
         )
 
-        # Step 3: Store in the works table
+        # Step 3: Store in the works table (upsert for idempotent re-ingestion)
         try:
             work_data = self._catalog_entry_to_work_dict(catalog_entry, classification)
-            await self._work_repo.create(work_data)
+            existing = await self._work_repo.get(catalog_entry.work_id)
+            if existing:
+                await self._work_repo.update(catalog_entry.work_id, work_data)
+                log.info("pipeline_entry_updated", work_id=catalog_entry.work_id)
+            else:
+                await self._work_repo.create(work_data)
         except Exception as exc:
             raise ClassificationError(
                 f"Failed to store catalog entry: {exc}",
