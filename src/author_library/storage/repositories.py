@@ -79,6 +79,27 @@ class ChunkRepository(ABC):
         """Delete all chunks for a work. Returns count deleted."""
 
     @abstractmethod
+    async def list_by_work_paginated(
+        self,
+        work_id: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        granularity: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List chunks for a work with LIMIT/OFFSET pagination.
+
+        Args:
+            work_id: The work to list chunks for.
+            limit: Maximum number of chunks to return.
+            offset: Number of chunks to skip.
+            granularity: Optional granularity filter.
+
+        Returns:
+            List of chunk dicts, ordered by position.
+        """
+
+    @abstractmethod
     async def get_max_pass_number(self, work_id: str) -> int:
         """Get the maximum pass_number for a work's chunks."""
 
@@ -448,6 +469,31 @@ class PgChunkRepository(ChunkRepository):
             rows = await self._pool.fetch_all(
                 "SELECT * FROM chunks WHERE work_id = $1 ORDER BY position",
                 work_id,
+            )
+        return [dict(r) for r in rows]
+
+    async def list_by_work_paginated(
+        self,
+        work_id: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        granularity: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if granularity:
+            rows = await self._pool.fetch_all(
+                "SELECT * FROM chunks WHERE work_id = $1 AND granularity = $2 ORDER BY position LIMIT $3 OFFSET $4",
+                work_id,
+                granularity,
+                limit,
+                offset,
+            )
+        else:
+            rows = await self._pool.fetch_all(
+                "SELECT * FROM chunks WHERE work_id = $1 ORDER BY position LIMIT $2 OFFSET $3",
+                work_id,
+                limit,
+                offset,
             )
         return [dict(r) for r in rows]
 

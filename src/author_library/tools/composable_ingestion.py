@@ -537,7 +537,9 @@ async def handle_chunk_source(
         key=lambda c: (_gran_order.get(str(c.granularity), 9), c.position),
     )
 
+    errors: list[str] = []
     chunk_id_map: dict[str, UUID] = {}
+    pg_chunk_errors = 0
     for chunk in sorted_chunks:
         resolved_parent: UUID | None = None
         if chunk.parent_chunk_id is not None:
@@ -561,40 +563,103 @@ async def handle_chunk_source(
             "raw_content_window": chunk.raw_content_window,
             "pass_number": pass_number,
         }
-        pg_id = await storage.chunks.create(chunk_data)
-        chunk_id_map[chunk.id] = pg_id
+        try:
+            pg_id = await storage.chunks.create(chunk_data)
+            chunk_id_map[chunk.id] = pg_id
+        except Exception as exc:
+            pg_chunk_errors += 1
+            if pg_chunk_errors <= 3:
+                log.error(
+                    "pg_chunk_store_failed",
+                    work_id=work_id,
+                    chunk_id=chunk.id,
+                    error=str(exc),
+                    position=chunk.position,
+                )
+            elif pg_chunk_errors == 4:
+                log.error(
+                    "pg_chunk_store_failed_suppressed",
+                    work_id=work_id,
+                    message="Further PG chunk store errors will be suppressed",
+                )
+
+    if pg_chunk_errors > 0:
+        log.error(
+            "pg_chunk_store_summary",
+            work_id=work_id,
+            stored=len(chunk_id_map),
+            failed=pg_chunk_errors,
+            total=len(sorted_chunks),
+        )
+        errors.append(
+            f"PG chunk storage: {pg_chunk_errors}/{len(sorted_chunks)} chunks failed"
+        )
 
     # Update engagement_passes on the work record
     await storage.works.update(work_id, {"engagement_passes": pass_number})
 
     # Step 8: Embed chunks
+    import asyncio as _asyncio
+
     embeddings_stored = 0
-    errors: list[str] = []
     batch_size = 50
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i : i + batch_size]
         texts = [c.annotated_text for c in batch]
         try:
             batch_result = await embedding_provider.embed_batch(texts)
+            pg_store_errors = 0
             for chunk, vector in zip(batch, batch_result.vectors, strict=True):
                 maybe_id = chunk_id_map.get(chunk.id)
                 if maybe_id is None:
                     continue
                 pg_id = maybe_id
-                await storage.embeddings.store(
-                    pg_id,
-                    vector,
-                    embedding_provider.provider_name,
-                    embedding_provider.model_name,
-                    embedding_provider.dimensions,
+                try:
+                    await storage.embeddings.store(
+                        pg_id,
+                        vector,
+                        embedding_provider.provider_name,
+                        embedding_provider.model_name,
+                        embedding_provider.dimensions,
+                    )
+                    embeddings_stored += 1
+                except Exception:
+                    try:
+                        await _asyncio.sleep(0.5)
+                        await storage.embeddings.store(
+                            pg_id,
+                            vector,
+                            embedding_provider.provider_name,
+                            embedding_provider.model_name,
+                            embedding_provider.dimensions,
+                        )
+                        embeddings_stored += 1
+                    except Exception as retry_exc:
+                        pg_store_errors += 1
+                        if pg_store_errors <= 3:
+                            log.error(
+                                "pg_embedding_store_failed",
+                                work_id=work_id,
+                                chunk_id=chunk.id,
+                                error=str(retry_exc),
+                            )
+                        elif pg_store_errors == 4:
+                            log.error(
+                                "pg_embedding_store_failed_suppressed",
+                                work_id=work_id,
+                                message="Further PG embedding store errors will be suppressed",
+                            )
+            if pg_store_errors > 0:
+                errors.append(
+                    f"PG embedding store: {pg_store_errors} chunks failed in batch {i}"
                 )
-                embeddings_stored += 1
         except Exception as exc:
             error_msg = f"Embedding batch {i}-{i + len(batch)} failed: {exc}"
             log.error("chunk_source_embedding_failed", error=error_msg)
             errors.append(error_msg)
 
     # Step 9: Upsert chunk nodes in Neo4j
+    neo4j_chunk_errors = 0
     for chunk in chunks:
         chunk_node: dict[str, Any] = {
             "chunk_id": chunk.id,
@@ -605,7 +670,23 @@ async def handle_chunk_source(
         }
         if source_class == SourceClass.PERSONAL:
             chunk_node["user_id"] = "marty"
-        await storage.graph.upsert_chunk_node(chunk_node)
+        try:
+            await storage.graph.upsert_chunk_node(chunk_node)
+        except Exception as exc:
+            neo4j_chunk_errors += 1
+            if neo4j_chunk_errors <= 3:
+                log.error(
+                    "neo4j_chunk_upsert_failed",
+                    work_id=work_id,
+                    chunk_id=chunk.id,
+                    error=str(exc),
+                )
+            elif neo4j_chunk_errors == 4:
+                log.error(
+                    "neo4j_chunk_upsert_failed_suppressed",
+                    work_id=work_id,
+                    message="Further Neo4j chunk upsert errors will be suppressed",
+                )
 
     # Entity extraction (PRIMARY and SECONDARY only)
     # Structural sections are excluded even though they are already filtered out

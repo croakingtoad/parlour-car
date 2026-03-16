@@ -124,6 +124,8 @@ class IngestionPipeline:
     entity extraction, and passage linking according to source class routing.
     """
 
+    _PASSAGE_LINK_BATCH_SIZE = 500
+
     def __init__(
         self,
         *,
@@ -222,13 +224,21 @@ class IngestionPipeline:
             )
 
         # Upsert work node in Neo4j
-        await self._storage.graph.upsert_work_node({
-            "work_id": work_id,
-            "title": catalog_entry.title,
-            "author": catalog_entry.author,
-            "source_class": source_class.value,
-            "publication_year": catalog_entry.publication_year,
-        })
+        try:
+            await self._storage.graph.upsert_work_node({
+                "work_id": work_id,
+                "title": catalog_entry.title,
+                "author": catalog_entry.author,
+                "source_class": source_class.value,
+                "publication_year": catalog_entry.publication_year,
+            })
+        except Exception as exc:
+            log.warning(
+                "neo4j_work_upsert_failed",
+                work_id=work_id,
+                error=str(exc),
+                message="Pipeline continues without Neo4j work node",
+            )
 
         # Upsert author record in PG (authors table)
         await self._storage.pg.execute(
@@ -239,18 +249,27 @@ class IngestionPipeline:
         )
 
         # Upsert Author node in Neo4j and create AUTHORED->Work edge
-        await self._storage.neo4j.execute_write(
-            """MERGE (a:Author {author_id: $author_id})
-            SET a.canonical_name = $name
-            WITH a
-            MATCH (w:Work {work_id: $work_id})
-            MERGE (a)-[:AUTHORED]->(w)""",
-            {
-                "author_id": subject_author_id,
-                "name": catalog_entry.author,
-                "work_id": work_id,
-            },
-        )
+        try:
+            await self._storage.neo4j.execute_write(
+                """MERGE (a:Author {author_id: $author_id})
+                SET a.canonical_name = $name
+                WITH a
+                MATCH (w:Work {work_id: $work_id})
+                MERGE (a)-[:AUTHORED]->(w)""",
+                {
+                    "author_id": subject_author_id,
+                    "name": catalog_entry.author,
+                    "work_id": work_id,
+                },
+            )
+        except Exception as exc:
+            log.warning(
+                "neo4j_author_upsert_failed",
+                author_id=subject_author_id,
+                work_id=work_id,
+                error=str(exc),
+                message="Pipeline continues without Neo4j author node",
+            )
 
         log.info(
             "ingestion_author_upserted",
@@ -331,6 +350,7 @@ class IngestionPipeline:
         )
 
         chunk_id_map: dict[str, UUID] = {}
+        pg_chunk_errors = 0
         for chunk in sorted_chunks:
             # Translate in-memory parent_chunk_id to DB-generated UUID
             resolved_parent: UUID | None = None
@@ -356,8 +376,37 @@ class IngestionPipeline:
                 "pass_number": pass_number,
             }
 
-            pg_id = await self._storage.chunks.create(chunk_data)
-            chunk_id_map[chunk.id] = pg_id
+            try:
+                pg_id = await self._storage.chunks.create(chunk_data)
+                chunk_id_map[chunk.id] = pg_id
+            except Exception as exc:
+                pg_chunk_errors += 1
+                if pg_chunk_errors <= 3:
+                    log.error(
+                        "pg_chunk_store_failed",
+                        work_id=work_id,
+                        chunk_id=chunk.id,
+                        error=str(exc),
+                        position=chunk.position,
+                    )
+                elif pg_chunk_errors == 4:
+                    log.error(
+                        "pg_chunk_store_failed_suppressed",
+                        work_id=work_id,
+                        message="Further PG chunk store errors will be suppressed",
+                    )
+
+        if pg_chunk_errors > 0:
+            log.error(
+                "pg_chunk_store_summary",
+                work_id=work_id,
+                stored=len(chunk_id_map),
+                failed=pg_chunk_errors,
+                total=len(sorted_chunks),
+            )
+            errors.append(
+                f"PG chunk storage: {pg_chunk_errors}/{len(sorted_chunks)} chunks failed"
+            )
 
         log.info(
             "ingestion_chunks_stored",
@@ -991,6 +1040,7 @@ class IngestionPipeline:
         for attempt in range(max_retries + 1):
             try:
                 batch_result = await self._embedding.embed_batch(texts)
+                pg_store_errors = 0
                 for chunk, vector in zip(
                     batch_chunks, batch_result.vectors, strict=True
                 ):
@@ -998,14 +1048,45 @@ class IngestionPipeline:
                     if maybe_id is None:
                         continue
                     pg_id = maybe_id
-                    await self._storage.embeddings.store(
-                        pg_id,
-                        vector,
-                        self._embedding.provider_name,
-                        self._embedding.model_name,
-                        self._embedding.dimensions,
+                    try:
+                        await self._storage.embeddings.store(
+                            pg_id,
+                            vector,
+                            self._embedding.provider_name,
+                            self._embedding.model_name,
+                            self._embedding.dimensions,
+                        )
+                        stored += 1
+                    except Exception as store_exc:
+                        try:
+                            await _asyncio.sleep(0.5)
+                            await self._storage.embeddings.store(
+                                pg_id,
+                                vector,
+                                self._embedding.provider_name,
+                                self._embedding.model_name,
+                                self._embedding.dimensions,
+                            )
+                            stored += 1
+                        except Exception as retry_exc:
+                            pg_store_errors += 1
+                            if pg_store_errors <= 3:
+                                log.error(
+                                    "pg_embedding_store_failed",
+                                    work_id=work_id,
+                                    chunk_id=chunk.id,
+                                    error=str(retry_exc),
+                                )
+                            elif pg_store_errors == 4:
+                                log.error(
+                                    "pg_embedding_store_failed_suppressed",
+                                    work_id=work_id,
+                                    message="Further PG embedding store errors will be suppressed",
+                                )
+                if pg_store_errors > 0:
+                    errors.append(
+                        f"PG embedding store: {pg_store_errors} chunks failed in batch {batch_num}"
                     )
-                    stored += 1
                 return stored
             except Exception as exc:
                 if attempt < max_retries:
@@ -1059,6 +1140,47 @@ class IngestionPipeline:
 
         return stored
 
+    async def _load_chunks_paginated(
+        self,
+        work_ids: list[str],
+        granularity: str = "meso",
+        default_source_class: str = "primary",
+    ) -> list[Any]:
+        """Load chunks from multiple works using LIMIT/OFFSET pagination.
+
+        Returns Chunk model objects suitable for passage linking.
+        """
+        from author_library.chunking.models import Chunk as ChunkModel
+
+        result_chunks: list[Any] = []
+        batch_size = self._PASSAGE_LINK_BATCH_SIZE
+
+        for wid in work_ids:
+            offset = 0
+            while True:
+                batch = await self._storage.chunks.list_by_work_paginated(
+                    wid, limit=batch_size, offset=offset, granularity=granularity,
+                )
+                if not batch:
+                    break
+                for c in batch:
+                    result_chunks.append(
+                        ChunkModel(
+                            id=str(c.get("id", "")),
+                            text=c.get("text", ""),
+                            annotation=c.get("annotation"),
+                            granularity=c.get("granularity", granularity),
+                            work_id=c.get("work_id", ""),
+                            source_class=c.get("source_class", default_source_class),
+                            position=c.get("position", 0),
+                        )
+                    )
+                if len(batch) < batch_size:
+                    break
+                offset += batch_size
+
+        return result_chunks
+
     async def _create_passage_links(
         self,
         chunks: list[Chunk],
@@ -1066,7 +1188,8 @@ class IngestionPipeline:
     ) -> int:
         """Create cross-resource passage links for the work's chunks.
 
-        Loads contextual chunks from the database to link against.
+        Loads contextual chunks from the database using paginated queries
+        to avoid loading all cross-work chunks at once.
         Returns the total number of edges created.
         """
         edges_created = 0
@@ -1075,33 +1198,16 @@ class IngestionPipeline:
 
         # For primary sources, we need to load existing contextual chunks to link against
         if source_class == SourceClass.PRIMARY and primary_chunks:
-            # Load all contextual chunks from the database
             all_works = await self._storage.works.list_by_author(
                 primary_chunks[0].work_id.split("--")[0]
             )
             ctx_work_ids = [
                 w["work_id"] for w in all_works if w.get("source_class") == "contextual"
             ]
-            db_contextual: list[Any] = []
-            for ctx_wid in ctx_work_ids:
-                db_chunks = await self._storage.chunks.list_by_work(ctx_wid, granularity="meso")
-                db_contextual.extend(db_chunks)
 
-            # Convert to Chunk objects for the linkers
-            from author_library.chunking.models import Chunk as ChunkModel
-
-            contextual_for_linking = [
-                ChunkModel(
-                    id=str(c.get("id", "")),
-                    text=c.get("text", ""),
-                    annotation=c.get("annotation"),
-                    granularity=c.get("granularity", "meso"),
-                    work_id=c.get("work_id", ""),
-                    source_class=c.get("source_class", "contextual"),
-                    position=c.get("position", 0),
-                )
-                for c in db_contextual
-            ]
+            contextual_for_linking = await self._load_chunks_paginated(
+                ctx_work_ids, granularity="meso", default_source_class="contextual",
+            )
 
             if contextual_for_linking:
                 # Tier 1: Explicit citations
@@ -1139,25 +1245,10 @@ class IngestionPipeline:
             prim_work_ids = [
                 w["work_id"] for w in all_works if w.get("source_class") == "primary"
             ]
-            db_primary: list[Any] = []
-            for prim_wid in prim_work_ids:
-                db_chunks = await self._storage.chunks.list_by_work(prim_wid, granularity="meso")
-                db_primary.extend(db_chunks)
 
-            from author_library.chunking.models import Chunk as ChunkModel
-
-            primary_for_linking = [
-                ChunkModel(
-                    id=str(c.get("id", "")),
-                    text=c.get("text", ""),
-                    annotation=c.get("annotation"),
-                    granularity=c.get("granularity", "meso"),
-                    work_id=c.get("work_id", ""),
-                    source_class=c.get("source_class", "primary"),
-                    position=c.get("position", 0),
-                )
-                for c in db_primary
-            ]
+            primary_for_linking = await self._load_chunks_paginated(
+                prim_work_ids, granularity="meso", default_source_class="primary",
+            )
 
             if primary_for_linking:
                 explicit = ExplicitLinkDetector(self._storage.neo4j)
@@ -1255,6 +1346,7 @@ class IngestionPipeline:
             vocab = VocabularyManager(self._storage.pg)
             proposed = 0
             already_known = 0
+            vocab_errors = 0
             for chunk in index_chunks:
                 for line in chunk.text.splitlines():
                     term = line.strip()
@@ -1273,8 +1365,21 @@ class IngestionPipeline:
                             already_known += 1
                         else:
                             proposed += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        vocab_errors += 1
+                        if vocab_errors <= 3:
+                            log.error(
+                                "vocab_propose_failed",
+                                work_id=work_id,
+                                term=term,
+                                error=str(exc),
+                            )
+                        elif vocab_errors == 4:
+                            log.error(
+                                "vocab_propose_failed_suppressed",
+                                work_id=work_id,
+                                message="Further vocab propose errors will be suppressed",
+                            )
 
             log.info(
                 "ingestion_index_vocab_routing",
@@ -1282,12 +1387,14 @@ class IngestionPipeline:
                 index_chunks=len(index_chunks),
                 terms_proposed=proposed,
                 terms_already_known=already_known,
+                errors=vocab_errors,
             )
 
         if bibliography_chunks:
             acquisition = AcquisitionManager(self._storage.pg)
             flagged = 0
             already_flagged = 0
+            acq_errors = 0
             for chunk in bibliography_chunks:
                 for line in chunk.text.splitlines():
                     citation = line.strip()
@@ -1304,8 +1411,21 @@ class IngestionPipeline:
                             flagged += 1
                         else:
                             already_flagged += 1
-                    except Exception:
-                        already_flagged += 1
+                    except Exception as exc:
+                        acq_errors += 1
+                        if acq_errors <= 3:
+                            log.error(
+                                "acq_flag_failed",
+                                work_id=work_id,
+                                citation=citation[:100],
+                                error=str(exc),
+                            )
+                        elif acq_errors == 4:
+                            log.error(
+                                "acq_flag_failed_suppressed",
+                                work_id=work_id,
+                                message="Further acquisition flag errors will be suppressed",
+                            )
 
             log.info(
                 "ingestion_bibliography_acquisition_routing",
@@ -1313,6 +1433,7 @@ class IngestionPipeline:
                 bibliography_chunks=len(bibliography_chunks),
                 citations_flagged=flagged,
                 citations_already_flagged=already_flagged,
+                errors=acq_errors,
             )
 
     def _build_annotation_context(

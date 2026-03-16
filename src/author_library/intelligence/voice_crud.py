@@ -79,6 +79,7 @@ class VoiceProfileManager:
         *,
         profile: VoiceProfile,
         voice_repo: VoiceProfileRepository,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Store a new voice profile as the next version.
 
@@ -88,6 +89,10 @@ class VoiceProfileManager:
         Args:
             profile: The voice profile to store.
             voice_repo: Voice profile repository.
+            extra_metadata: Optional dict of extra fields to persist alongside
+                the profile (e.g. ``_primary_chunk_count``). These are merged
+                into the top-level profile JSONB but excluded from the
+                Pydantic model.
 
         Returns:
             UUID of the stored profile record.
@@ -100,9 +105,13 @@ class VoiceProfileManager:
             versions = await voice_repo.list_versions(profile.author_id)
             next_version = max((v.get("version", 0) for v in versions), default=0) + 1
 
+            profile_dict = profile.model_dump(exclude={"author_id"})
+            if extra_metadata:
+                profile_dict.update(extra_metadata)
+
             profile_id = await voice_repo.store(
                 profile.author_id,
-                profile.model_dump(exclude={"author_id"}),
+                profile_dict,
                 next_version,
             )
 

@@ -68,6 +68,7 @@ async def deduplicate_themes(
     embedding_provider: EmbeddingProvider,
     *,
     similarity_threshold: float = _DEFAULT_SIMILARITY_THRESHOLD,
+    work_id: str | None = None,
 ) -> ThemeDedupResult:
     """Deduplicate Theme nodes in Neo4j using embedding similarity.
 
@@ -86,10 +87,16 @@ async def deduplicate_themes(
 
     This is idempotent: if there are no duplicates, nothing changes.
 
+    When ``work_id`` is provided, only clusters containing at least one theme
+    connected to that work's chunks are processed (merged). All themes are
+    still fetched globally for accurate clustering, but the merge phase is
+    scoped to the current work's themes.
+
     Args:
         neo4j: Active Neo4j connection.
         embedding_provider: Provider for generating theme name embeddings.
         similarity_threshold: Cosine similarity above which themes merge.
+        work_id: Optional work_id to scope dedup to themes relevant to this work.
 
     Returns:
         ThemeDedupResult with counts of what was merged.
@@ -112,6 +119,24 @@ async def deduplicate_themes(
         log.info("theme_dedup_no_themes", message="No Theme nodes found")
         result.elapsed_seconds = round(time.monotonic() - wall_start, 2)
         return result
+
+    # If work_id is provided, fetch themes connected to this work's chunks
+    work_theme_names: set[str] | None = None
+    if work_id is not None:
+        work_theme_records = await neo4j.execute_read(
+            """MATCH (c:Chunk {work_id: $work_id})-[:EXPLORES_THEME]->(t:Theme)
+            RETURN DISTINCT t.canonical_name AS canonical_name""",
+            {"work_id": work_id},
+        )
+        work_theme_names = {r["canonical_name"] for r in work_theme_records}
+        if not work_theme_names:
+            log.info(
+                "theme_dedup_no_work_themes",
+                work_id=work_id,
+                message="No themes connected to this work's chunks",
+            )
+            result.elapsed_seconds = round(time.monotonic() - wall_start, 2)
+            return result
 
     result.original_count = len(theme_records)
 
@@ -203,6 +228,13 @@ async def deduplicate_themes(
     for cluster in clusters:
         if len(cluster) <= 1:
             continue
+
+        # When scoped to a work, skip clusters that don't contain any
+        # of the work's themes.
+        if work_theme_names is not None:
+            cluster_names = {canonical_names[idx] for idx in cluster}
+            if not cluster_names & work_theme_names:
+                continue
 
         # First element is the canonical (most-connected, due to sort order)
         canonical_idx = cluster[0]

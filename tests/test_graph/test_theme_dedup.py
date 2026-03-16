@@ -396,6 +396,169 @@ class TestDeduplicateThemesUnit:
 
 
 # ---------------------------------------------------------------------------
+# Unit tests: work-scoped deduplication
+# ---------------------------------------------------------------------------
+
+
+class TestDeduplicateThemesScopedUnit:
+    """Test work-scoped dedup with mocked dependencies."""
+
+    @pytest.mark.asyncio
+    async def test_scoped_skips_unrelated_clusters(self) -> None:
+        """Clusters without any of the work's themes should be skipped."""
+        neo4j = AsyncMock()
+        # First call: fetch all themes globally
+        # Second call: fetch work-scoped themes
+        neo4j.execute_read = AsyncMock(side_effect=[
+            # Global themes
+            [
+                {"canonical_name": "imagination-theology", "name": "Imagination Theology", "rel_count": 10},
+                {"canonical_name": "imagination-divine", "name": "Imagination Divine", "rel_count": 3},
+                {"canonical_name": "biography", "name": "Biography", "rel_count": 8},
+                {"canonical_name": "life-story", "name": "Life Story", "rel_count": 2},
+            ],
+            # Work themes — only biography cluster
+            [
+                {"canonical_name": "biography"},
+                {"canonical_name": "life-story"},
+            ],
+        ])
+
+        embedding = AsyncMock()
+        from author_library.embeddings.base import BatchEmbeddingResult
+        # Cluster 1: imagination (indices 0,1) — not in work
+        # Cluster 2: biography (indices 2,3) — in work
+        embedding.embed_batch = AsyncMock(return_value=BatchEmbeddingResult(
+            vectors=[
+                [1.0, 0.0, 0.0],
+                [0.99, 0.01, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.99, 0.01],
+            ],
+            model="test",
+            provider="test",
+            dimensions=3,
+        ))
+        neo4j.execute_write = AsyncMock(return_value=[])
+
+        result = await deduplicate_themes(neo4j, embedding, work_id="w1")
+
+        # Only biography cluster merged (1 merge), imagination cluster skipped
+        assert result.merged_count == 1
+        # execute_write: 2 calls for the single merge (move edges + delete)
+        assert neo4j.execute_write.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_scoped_no_work_themes_returns_early(self) -> None:
+        """If the work has no themes connected, return early with zero counts."""
+        neo4j = AsyncMock()
+        neo4j.execute_read = AsyncMock(side_effect=[
+            # Global themes exist
+            [
+                {"canonical_name": "theme-a", "name": "Theme A", "rel_count": 5},
+            ],
+            # But no themes for this work
+            [],
+        ])
+        embedding = AsyncMock()
+
+        result = await deduplicate_themes(neo4j, embedding, work_id="w1")
+
+        assert result.original_count == 0
+        assert result.merged_count == 0
+        embedding.embed_batch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_scoped_merges_cluster_with_work_theme(self) -> None:
+        """A cluster containing a work theme should be fully merged."""
+        neo4j = AsyncMock()
+        neo4j.execute_read = AsyncMock(side_effect=[
+            # Global themes — 3 similar
+            [
+                {"canonical_name": "grace-theology", "name": "Grace Theology", "rel_count": 10},
+                {"canonical_name": "grace-divine", "name": "Grace Divine", "rel_count": 5},
+                {"canonical_name": "grace-redemption", "name": "Grace Redemption", "rel_count": 1},
+            ],
+            # Work has only grace-divine, but the whole cluster should merge
+            [
+                {"canonical_name": "grace-divine"},
+            ],
+        ])
+
+        embedding = AsyncMock()
+        from author_library.embeddings.base import BatchEmbeddingResult
+        embedding.embed_batch = AsyncMock(return_value=BatchEmbeddingResult(
+            vectors=[
+                [1.0, 0.1, 0.0],
+                [1.0, 0.12, 0.0],
+                [1.0, 0.08, 0.0],
+            ],
+            model="test",
+            provider="test",
+            dimensions=3,
+        ))
+        neo4j.execute_write = AsyncMock(return_value=[])
+
+        result = await deduplicate_themes(neo4j, embedding, work_id="w1")
+
+        assert result.merged_count == 2  # Both duplicates merged
+
+    @pytest.mark.asyncio
+    async def test_unscoped_merges_all_clusters(self) -> None:
+        """Without work_id, all clusters should be merged (backwards compat)."""
+        neo4j = AsyncMock()
+        neo4j.execute_read = AsyncMock(return_value=[
+            {"canonical_name": "theme-a", "name": "Theme A", "rel_count": 10},
+            {"canonical_name": "theme-a2", "name": "Theme A2", "rel_count": 3},
+        ])
+
+        embedding = AsyncMock()
+        from author_library.embeddings.base import BatchEmbeddingResult
+        embedding.embed_batch = AsyncMock(return_value=BatchEmbeddingResult(
+            vectors=[[1.0, 0.0], [0.99, 0.01]],
+            model="test",
+            provider="test",
+            dimensions=2,
+        ))
+        neo4j.execute_write = AsyncMock(return_value=[])
+
+        result = await deduplicate_themes(neo4j, embedding)
+
+        assert result.merged_count == 1
+
+    @pytest.mark.asyncio
+    async def test_scoped_with_single_theme_no_merge(self) -> None:
+        """If work has a single theme that forms its own cluster, no merge needed."""
+        neo4j = AsyncMock()
+        neo4j.execute_read = AsyncMock(side_effect=[
+            # Global: two distinct themes
+            [
+                {"canonical_name": "imagination", "name": "Imagination", "rel_count": 10},
+                {"canonical_name": "biography", "name": "Biography", "rel_count": 5},
+            ],
+            # Work has only imagination
+            [
+                {"canonical_name": "imagination"},
+            ],
+        ])
+
+        embedding = AsyncMock()
+        from author_library.embeddings.base import BatchEmbeddingResult
+        # Orthogonal — no clusters to merge
+        embedding.embed_batch = AsyncMock(return_value=BatchEmbeddingResult(
+            vectors=[[1.0, 0.0], [0.0, 1.0]],
+            model="test",
+            provider="test",
+            dimensions=2,
+        ))
+
+        result = await deduplicate_themes(neo4j, embedding, work_id="w1")
+
+        assert result.merged_count == 0
+        neo4j.execute_write.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Integration tests: merge operations (requires Neo4j)
 # ---------------------------------------------------------------------------
 

@@ -374,25 +374,67 @@ async def _run_cross_work_analysis(
         log.error("cross_work_thematic_failed", error=str(exc))
         summary["thematic_index"] = {"error": str(exc)}
 
-    # 2. Voice profile extraction
+    # 2. Voice profile extraction (with staleness check to avoid redundant LLM calls)
     try:
+        voice_skipped = False
         extractor = VoiceProfileExtractor(settings, storage=storage)
-        profile = await extractor.extract(
+
+        # Check if re-extraction is actually needed.  We store a
+        # ``_primary_chunk_count`` marker inside the profile JSONB so we
+        # can compare the corpus size at last extraction vs now.
+        current_eligible_chunks = await extractor._gather_eligible_chunks(
             author_id=subject_author_id,
-            author_name=subject_author_id,
             work_repo=storage.works,
             chunk_repo=storage.chunks,
         )
-        manager = VoiceProfileManager(settings)
-        await manager.store_profile(
-            profile=profile,
-            voice_repo=storage.voice_profiles,
-        )
-        summary["voice_profile"] = {
-            "confidence": profile.confidence,
-            "register": profile.register,
-            "characteristic_phrases": len(profile.characteristic_phrases),
-        }
+        current_chunk_count = len(current_eligible_chunks)
+
+        existing_profile_row = await storage.voice_profiles.get_current(subject_author_id)
+        if existing_profile_row is not None:
+            profile_data = existing_profile_row.get("profile", {})
+            if isinstance(profile_data, str):
+                import json as _json
+                profile_data = _json.loads(profile_data)
+            prev_chunk_count = profile_data.get("_primary_chunk_count", 0)
+
+            if prev_chunk_count > 0 and current_chunk_count > 0:
+                increase_ratio = (current_chunk_count - prev_chunk_count) / prev_chunk_count
+                if increase_ratio < 0.10:
+                    voice_skipped = True
+                    log.info(
+                        "voice_profile_skip_not_stale",
+                        author_id=subject_author_id,
+                        prev_chunks=prev_chunk_count,
+                        current_chunks=current_chunk_count,
+                        increase_pct=round(increase_ratio * 100, 1),
+                    )
+                    summary["voice_profile"] = {
+                        "skipped": True,
+                        "reason": "profile not stale",
+                        "prev_chunks": prev_chunk_count,
+                        "current_chunks": current_chunk_count,
+                    }
+
+        if not voice_skipped:
+            profile = await extractor.extract(
+                author_id=subject_author_id,
+                author_name=subject_author_id,
+                work_repo=storage.works,
+                chunk_repo=storage.chunks,
+            )
+            manager = VoiceProfileManager(settings)
+            # Persist the chunk count used for this extraction so future
+            # runs can compare and decide whether re-extraction is needed.
+            await manager.store_profile(
+                profile=profile,
+                voice_repo=storage.voice_profiles,
+                extra_metadata={"_primary_chunk_count": current_chunk_count},
+            )
+            summary["voice_profile"] = {
+                "confidence": profile.confidence,
+                "register": profile.register,
+                "characteristic_phrases": len(profile.characteristic_phrases),
+            }
     except Exception as exc:
         log.error("cross_work_voice_failed", error=str(exc))
         summary["voice_profile"] = {"error": str(exc)}

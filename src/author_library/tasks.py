@@ -362,7 +362,7 @@ async def task_quality_gate(
     try:
         from author_library.graph.theme_dedup import deduplicate_themes
 
-        dedup = await deduplicate_themes(storage.neo4j, embedding_provider)
+        dedup = await deduplicate_themes(storage.neo4j, embedding_provider, work_id=work_id)
         result["theme_dedup"] = {
             "original": dedup.original_count,
             "canonical": dedup.canonical_count,
@@ -377,12 +377,13 @@ async def task_quality_gate(
                     detection_method="qg2_async",
                     trigger_context={"work_id": work_id, "author_id": author_id},
                     problem_description=(
-                        f"Theme deduplication merged {dedup.merged_count} near-duplicate "
-                        f"themes (from {dedup.original_count} to {dedup.canonical_count}) "
-                        f"after ingesting work '{work_id}'."
+                        f"Theme deduplication (scoped to work '{work_id}') merged "
+                        f"{dedup.merged_count} near-duplicate themes "
+                        f"(from {dedup.original_count} to {dedup.canonical_count})."
                     ),
                     fix_applied=(
-                        f"Merged {dedup.merged_count} themes via cosine similarity clustering."
+                        f"Merged {dedup.merged_count} themes via scoped cosine similarity "
+                        f"clustering for work '{work_id}'."
                     ),
                     prevention_rule=(
                         "LLM theme extraction tends to produce near-duplicate themes "
