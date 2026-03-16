@@ -959,7 +959,7 @@ class IngestionPipeline:
         try:
             entity_coverage_result = await self._storage.neo4j.execute_read(
                 """MATCH (c:Chunk {work_id: $work_id})
-                   OPTIONAL MATCH (c)-[:MENTIONS|EXPLORES_THEME|ARGUES|REFERENCES]->(e)
+                   OPTIONAL MATCH (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->(e)
                    WITH c, count(e) AS entity_count
                    RETURN
                      count(c) AS total_chunks,

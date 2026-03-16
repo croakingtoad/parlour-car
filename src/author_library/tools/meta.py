@@ -435,12 +435,12 @@ async def handle_audit_library(
     )
     noise_counts = {r["work_id"]: int(r["noise_count"]) for r in noise_rows}
 
-    # Entity edge counts per work in Neo4j (EXPLORES_THEME + MAKES_ARGUMENT)
+    # Entity edge counts per work in Neo4j
     entity_counts: dict[str, int] = {}
     orphan_counts: dict[str, int] = {}
     try:
         entity_rows = await storage.neo4j.execute_read(
-            """MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT]->()
+            """MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
                RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"""
         )
         for r in entity_rows:
@@ -449,7 +449,7 @@ async def handle_audit_library(
         # Orphaned chunks: in Neo4j but no entity relationships
         orphan_rows = await storage.neo4j.execute_read(
             """MATCH (c:Chunk)
-               WHERE NOT (c)-[:EXPLORES_THEME]->() AND NOT (c)-[:MAKES_ARGUMENT]->()
+               WHERE NOT (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
                RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"""
         )
         for r in orphan_rows:
