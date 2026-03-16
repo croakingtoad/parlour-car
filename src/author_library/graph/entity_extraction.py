@@ -413,10 +413,15 @@ class EntityExtractor:
         # Build user message with optional existing theme context
         theme_context = ""
         if existing_themes:
-            theme_list = ", ".join(existing_themes[:200])  # Limit to avoid huge prompts
+            # Format as JSON objects to reinforce expected output structure
+            theme_examples = [
+                f'{{"name": "{cn.replace("-", " ").title()}", "canonical_name": "{cn}"}}'
+                for cn in existing_themes[:100]
+            ]
             theme_context = (
                 f"\n\nExisting themes in the knowledge graph (reuse these "
-                f"canonical_names when the concept matches):\n{theme_list}\n"
+                f"exact canonical_names when the concept matches — return them "
+                f"as objects, not bare strings):\n[{', '.join(theme_examples)}]\n"
             )
 
         user_message = (
@@ -508,16 +513,23 @@ class EntityExtractor:
             # All four entity lists MUST guard with isinstance(x, dict) before calling
             # .get() — failure to do so causes 'str object has no attribute get' which
             # triggers the batch-retry cascade and wastes API calls.
-            themes = [
-                ExtractedEntity(
-                    entity_type="theme",
-                    name=t.get("name", ""),
-                    canonical_name=t.get("canonical_name", "")
-                    or t.get("name", "").lower().replace(" ", "-")[:80],
-                )
-                for t in raw.get("themes", [])
-                if isinstance(t, dict) and (t.get("name") or t.get("canonical_name"))
-            ]
+            themes = []
+            for t in raw.get("themes", []):
+                if isinstance(t, dict) and (t.get("name") or t.get("canonical_name")):
+                    themes.append(ExtractedEntity(
+                        entity_type="theme",
+                        name=t.get("name", ""),
+                        canonical_name=t.get("canonical_name", "")
+                        or t.get("name", "").lower().replace(" ", "-")[:80],
+                    ))
+                elif isinstance(t, str) and t.strip():
+                    # LLM returned a bare canonical_name string — recover it
+                    cn = t.strip().lower().replace(" ", "-")[:80]
+                    themes.append(ExtractedEntity(
+                        entity_type="theme",
+                        name=cn.replace("-", " ").title(),
+                        canonical_name=cn,
+                    ))
             arguments = [
                 ExtractedEntity(
                     entity_type="argument",
@@ -528,40 +540,52 @@ class EntityExtractor:
                 for a in raw.get("arguments", [])
                 if isinstance(a, dict) and a.get("claim")
             ]
-            concepts = [
-                ExtractedEntity(
-                    entity_type="concept",
-                    name=c.get("name", ""),
-                    canonical_name=c.get("canonical_name", "")
-                    or c.get("name", "").lower().replace(" ", "-")[:80],
-                )
-                for c in raw.get("concepts", [])
-                if isinstance(c, dict) and (c.get("name") or c.get("canonical_name"))
-            ]
-            persons = [
-                ExtractedEntity(
-                    entity_type="person",
-                    name=p.get("name", ""),
-                    canonical_name=p.get("canonical_name", "")
-                    or p.get("name", "").lower().replace(" ", "-")[:80],
-                    properties={"role": p.get("role", "referenced")},
-                )
-                for p in raw.get("persons", [])
-                if isinstance(p, dict) and (p.get("name") or p.get("canonical_name"))
-            ]
-            # Warn if LLM returned non-dict items in any entity list (prompt non-compliance)
-            for field, items in (
+            concepts = []
+            for c in raw.get("concepts", []):
+                if isinstance(c, dict) and (c.get("name") or c.get("canonical_name")):
+                    concepts.append(ExtractedEntity(
+                        entity_type="concept",
+                        name=c.get("name", ""),
+                        canonical_name=c.get("canonical_name", "")
+                        or c.get("name", "").lower().replace(" ", "-")[:80],
+                    ))
+                elif isinstance(c, str) and c.strip():
+                    cn = c.strip().lower().replace(" ", "-")[:80]
+                    concepts.append(ExtractedEntity(
+                        entity_type="concept",
+                        name=cn.replace("-", " ").title(),
+                        canonical_name=cn,
+                    ))
+            persons = []
+            for p in raw.get("persons", []):
+                if isinstance(p, dict) and (p.get("name") or p.get("canonical_name")):
+                    persons.append(ExtractedEntity(
+                        entity_type="person",
+                        name=p.get("name", ""),
+                        canonical_name=p.get("canonical_name", "")
+                        or p.get("name", "").lower().replace(" ", "-")[:80],
+                        properties={"role": p.get("role", "referenced")},
+                    ))
+                elif isinstance(p, str) and p.strip():
+                    cn = p.strip().lower().replace(" ", "-")[:80]
+                    persons.append(ExtractedEntity(
+                        entity_type="person",
+                        name=cn.replace("-", " ").title(),
+                        canonical_name=cn,
+                    ))
+            # Log if LLM returned bare strings (recovered as entities, not lost)
+            for field_name, items in (
                 ("themes", raw.get("themes", [])),
                 ("arguments", raw.get("arguments", [])),
                 ("concepts", raw.get("concepts", [])),
                 ("persons", raw.get("persons", [])),
             ):
-                non_dicts = [x for x in items if not isinstance(x, dict)]
+                non_dicts = [x for x in items if isinstance(x, str)]
                 if non_dicts:
-                    log.warning(
-                        "entity_extraction_non_dict_items_skipped",
+                    log.debug(
+                        "entity_extraction_bare_strings_recovered",
                         chunk_id=chunk_id,
-                        field=field,
+                        field=field_name,
                         count=len(non_dicts),
                         preview=str(non_dicts[:3])[:200],
                     )
