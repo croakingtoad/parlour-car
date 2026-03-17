@@ -478,6 +478,14 @@ async def handle_chunk_source(
     if deleted > 0:
         log.info("chunk_source_cleared_old", work_id=work_id, deleted=deleted)
 
+    # Also clear Neo4j chunk nodes so stale UUIDs don't persist
+    try:
+        deleted_graph = await storage.graph.delete_chunks_for_work(work_id)
+        if deleted_graph > 0:
+            log.info("chunk_source_cleared_graph", work_id=work_id, deleted_graph=deleted_graph)
+    except Exception as exc:
+        log.warning("neo4j_chunk_cleanup_failed", work_id=work_id, error=str(exc))
+
     # Step 4: Select chunking strategy
     genre_tags = work.get("genre_tags") or ["unclassified"]
     if chunking_strategy_override:

@@ -1287,6 +1287,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
     from starlette.responses import JSONResponse
 
     from author_library.captures.endpoint import handle_capture, handle_capture_status
+    from author_library.surfacing.endpoint import handle_surfacing
     from mcp.server.sse import SseServerTransport
 
     async def _handle_rest_health(request: Request) -> JSONResponse:
@@ -1326,8 +1327,9 @@ async def _run_http(server: Server, settings: Settings) -> None:
             # Legacy SSE transport
             Route("/sse", endpoint=handle_sse),
             Mount("/sse/messages", app=sse_transport.handle_post_message),
-            # Chrome extension REST endpoints
+            # REST API endpoints
             Route("/api/v1/health", endpoint=_handle_rest_health, methods=["GET"]),
+            Route("/api/v1/surfacing", endpoint=handle_surfacing, methods=["POST"]),
             Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
             Route(
                 "/api/v1/captures/status/{job_id:str}",
@@ -1338,7 +1340,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
         lifespan=lifespan,
     )
 
-    # Inject shared state for capture endpoint using proper Starlette state API.
+    # Inject shared state for REST endpoints using proper Starlette state API.
     # Must be set after app creation (not via app.state._state which is internal).
     api_key_secret = settings.api_keys.parlour_api_key
     api_key = api_key_secret.get_secret_value() if api_key_secret else ""
@@ -1347,6 +1349,13 @@ async def _run_http(server: Server, settings: Settings) -> None:
         "task_queue": server._tool_state.get("task_queue"),  # type: ignore[attr-defined]
         "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]
         "settings": settings,
+    }
+    app.state.surfacing_state = {
+        "api_key": api_key,
+        "settings": settings,
+        "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]
+        "embedding_provider": server._tool_state.get("embedding_provider"),  # type: ignore[attr-defined]
+        "cache_manager": server._tool_state.get("cache_manager"),  # type: ignore[attr-defined]
     }
 
     host = settings.server.host

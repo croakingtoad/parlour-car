@@ -245,6 +245,10 @@ class GraphRepository(ABC):
         """Create or update a Chunk node in the graph."""
 
     @abstractmethod
+    async def delete_chunks_for_work(self, work_id: str) -> int:
+        """Delete all Chunk nodes for a work from the graph."""
+
+    @abstractmethod
     async def create_edge(
         self,
         from_label: str,
@@ -865,6 +869,20 @@ class Neo4jGraphRepository(GraphRepository):
                 "publication_year": work["publication_year"],
             },
         )
+
+    async def delete_chunks_for_work(self, work_id: str) -> int:
+        """Delete all Chunk nodes (and their edges) for a work from Neo4j.
+
+        Called before re-ingestion to prevent stale chunk nodes with
+        outdated UUIDs from persisting when PG assigns new chunk IDs.
+        """
+        result = await self._neo4j.execute_write(
+            """MATCH (c:Chunk {work_id: $work_id})
+            DETACH DELETE c
+            RETURN count(c) AS deleted""",
+            {"work_id": work_id},
+        )
+        return result[0]["deleted"] if result else 0
 
     async def upsert_chunk_node(self, chunk: dict[str, Any]) -> None:
         # Build SET clause dynamically to include user_id for personal chunks

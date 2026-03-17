@@ -285,7 +285,8 @@ class TestItemFormatting:
         # work_id formatted: hyphens → spaces, -- → em dash, title case
         assert "Guite" in title
 
-    def test_excerpt_truncation(self):
+    def test_excerpt_preserves_full_text(self):
+        """Full text is preserved for drag-and-drop; sidebar CSS handles display truncation."""
         long_text = "A" * 500
         items = [
             _make_item(
@@ -296,8 +297,7 @@ class TestItemFormatting:
         ]
         result = format_surfacing_results(items)
         excerpt = result.high_confidence[0].excerpt
-        assert len(excerpt) <= 303  # 300 chars + "..."
-        assert excerpt.endswith("...")
+        assert len(excerpt) == 500
 
     def test_excerpt_no_truncation_for_short_text(self):
         items = [

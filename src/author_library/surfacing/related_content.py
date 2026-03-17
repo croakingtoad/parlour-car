@@ -203,12 +203,24 @@ class RelatedContentFinder:
         )
 
     async def _get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
-        """Fetch chunk data from PostgreSQL."""
+        """Fetch chunk data from PostgreSQL.
+
+        Normalizes chunk_id to UUID format (with dashes) since Neo4j stores
+        hex strings without dashes while PostgreSQL uses standard UUIDs.
+        """
+        # Normalize: insert dashes if we got a 32-char hex string from Neo4j
+        normalized = chunk_id
+        if len(chunk_id) == 32 and "-" not in chunk_id:
+            normalized = (
+                f"{chunk_id[:8]}-{chunk_id[8:12]}-{chunk_id[12:16]}"
+                f"-{chunk_id[16:20]}-{chunk_id[20:]}"
+            )
+
         row = await self._storage.pg.fetch_one(
             """SELECT id, work_id, text, source_class, granularity,
                       chapter, section, metadata, pass_number
             FROM chunks WHERE id::text = $1 LIMIT 1""",
-            chunk_id,
+            normalized,
         )
         return dict(row) if row else None
 
@@ -240,10 +252,18 @@ class RelatedContentFinder:
 
             work_info = await self._storage.works.get(link.target_chunk.work_id)
 
+            # Fetch full text from PG (Neo4j text_preview is truncated)
+            full_chunk = await self._get_chunk(link.target_chunk.chunk_id)
+            full_text = (
+                full_chunk.get("text", link.target_chunk.text_preview)
+                if full_chunk
+                else link.target_chunk.text_preview
+            )
+
             items.append(RelatedItem(
                 chunk_id=link.target_chunk.chunk_id,
                 work_id=link.target_chunk.work_id,
-                text=link.target_chunk.text_preview,
+                text=full_text,
                 source_class=link.target_chunk.source_class,
                 granularity=link.target_chunk.granularity,
                 connection_type=ConnectionType.PASSAGE_LINK,
@@ -289,10 +309,18 @@ class RelatedContentFinder:
                     {},
                 )
 
+                # Fetch full text from PG (Neo4j text_preview is truncated)
+                full_chunk = await self._get_chunk(chunk.chunk_id)
+                full_text = (
+                    full_chunk.get("text", chunk.text_preview)
+                    if full_chunk
+                    else chunk.text_preview
+                )
+
                 items.append(RelatedItem(
                     chunk_id=chunk.chunk_id,
                     work_id=chunk.work_id,
-                    text=chunk.text_preview,
+                    text=full_text,
                     source_class=chunk.source_class,
                     granularity=chunk.granularity,
                     connection_type=ConnectionType.THEMATIC_PARALLEL,

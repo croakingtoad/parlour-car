@@ -138,10 +138,9 @@ def _format_item(sc: ScoredConnection) -> FormattedSurfacingItem:
     # Build source attribution
     source = _build_source_attribution(item)
 
-    # Build excerpt — truncate long text
-    excerpt = item.text[:300].strip()
-    if len(item.text) > 300:
-        excerpt += "..."
+    # Build excerpt — full chunk text (sidebar CSS handles display truncation;
+    # drag-and-drop needs the complete passage)
+    excerpt = item.text.strip()
 
     return FormattedSurfacingItem(
         chunk_id=item.chunk_id,

@@ -223,6 +223,23 @@ class IngestionPipeline:
                 new_pass_number=pass_number,
             )
 
+        # Also clear Neo4j chunk nodes so stale UUIDs don't persist
+        try:
+            deleted_graph = await self._storage.graph.delete_chunks_for_work(work_id)
+            if deleted_graph > 0:
+                log.info(
+                    "ingestion_cleared_graph_chunks",
+                    work_id=work_id,
+                    deleted_graph_chunks=deleted_graph,
+                )
+        except Exception as exc:
+            log.warning(
+                "neo4j_chunk_cleanup_failed",
+                work_id=work_id,
+                error=str(exc),
+                message="Pipeline continues — old graph chunks may persist",
+            )
+
         # Upsert work node in Neo4j
         try:
             await self._storage.graph.upsert_work_node({
