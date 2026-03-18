@@ -5,6 +5,8 @@ Wraps the existing surfacing logic (PersonalContentBlender +
 format_surfacing_results) to return results in the flat format
 expected by the sidebar plugin.
 
+Also provides GET /api/v1/works — lists all works in the library.
+
 Sidebar sends:
     { parlour_car_id?: str, note_type?: str, tags?: list[str] }
 
@@ -276,3 +278,54 @@ async def handle_surfacing(request: Request) -> JSONResponse:
             "note_type": note_type,
         },
     })
+
+
+async def handle_works(request: Request) -> JSONResponse:
+    """Handle GET /api/v1/works — return all works in the library.
+
+    Authenticates via the same Bearer token as the surfacing endpoint.
+    Returns a JSON object with a ``works`` array, each entry containing
+    work_id, title, author, and media.
+    """
+    state: dict[str, Any] = request.app.state.surfacing_state
+
+    # Authenticate
+    api_key: str = state.get("api_key", "")
+    if not api_key:
+        log.error("works_endpoint_no_api_key_configured")
+        return JSONResponse(
+            {"error": "Server misconfigured: no API key set"},
+            status_code=500,
+        )
+
+    if not _authenticate(request, api_key):
+        log.warning(
+            "works_endpoint_auth_failed",
+            remote=request.client.host if request.client else "unknown",
+        )
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    storage: StorageManager = state["storage"]
+
+    try:
+        rows = await storage.pg.fetch_all(
+            "SELECT work_id, title, author, media FROM works ORDER BY title"
+        )
+        works = [
+            {
+                "work_id": row["work_id"],
+                "title": row["title"],
+                "author": row["author"],
+                "media": row["media"],
+            }
+            for row in rows
+        ]
+    except Exception as exc:
+        log.error("works_endpoint_query_error", error=str(exc))
+        return JSONResponse(
+            {"error": f"Failed to list works: {exc}"},
+            status_code=500,
+        )
+
+    log.info("works_endpoint_complete", work_count=len(works))
+    return JSONResponse({"works": works})

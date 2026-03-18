@@ -1287,7 +1287,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
     from starlette.responses import JSONResponse
 
     from author_library.captures.endpoint import handle_capture, handle_capture_status
-    from author_library.surfacing.endpoint import handle_surfacing
+    from author_library.surfacing.endpoint import handle_surfacing, handle_works
     from mcp.server.sse import SseServerTransport
 
     async def _handle_rest_health(request: Request) -> JSONResponse:
@@ -1330,6 +1330,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
             # REST API endpoints
             Route("/api/v1/health", endpoint=_handle_rest_health, methods=["GET"]),
             Route("/api/v1/surfacing", endpoint=handle_surfacing, methods=["POST"]),
+            Route("/api/v1/works", endpoint=handle_works, methods=["GET"]),
             Route("/api/v1/captures", endpoint=handle_capture, methods=["POST"]),
             Route(
                 "/api/v1/captures/status/{job_id:str}",
