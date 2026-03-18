@@ -734,6 +734,7 @@ async def handle_chunk_source(
             dedup_result = await deduplicate_themes(
                 storage.neo4j,
                 embedding_provider,
+                work_id=work_id,
             )
             if dedup_result.merged_count > 0:
                 log.info(

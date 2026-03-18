@@ -599,6 +599,7 @@ class IngestionPipeline:
                 dedup_result = await deduplicate_themes(
                     self._storage.neo4j,
                     self._embedding,
+                    work_id=work_id,
                 )
                 if dedup_result.merged_count > 0:
                     log.info(

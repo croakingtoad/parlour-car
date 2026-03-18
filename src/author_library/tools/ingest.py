@@ -510,3 +510,36 @@ async def _run_post_ingest_backup(work_id: str) -> None:
         log.warning("post_ingest_backup_timeout", work_id=work_id)
     except Exception as exc:
         log.warning("post_ingest_backup_error", error=str(exc))
+
+
+async def run_post_ingestion_hooks(
+    *,
+    result: IngestionResult,
+    subject_author_id: str,
+    settings: "Settings",
+    storage: "StorageManager",
+    embedding_provider: "EmbeddingProvider",
+) -> dict[str, Any]:
+    """Run post-ingestion hooks shared by all ingestion entry points.
+
+    Performs: cross-work analysis (voice profiles, thematic index),
+    production backup, and returns the result dict.  Cache invalidation
+    and QG2 enqueueing are skipped when no cache_manager/task_queue is
+    available (e.g. standalone scripts).
+    """
+    cross_work_summary: dict[str, Any] = {}
+    if result.source_class == "primary":
+        cross_work_summary = await _run_cross_work_analysis(
+            subject_author_id=subject_author_id,
+            settings=settings,
+            storage=storage,
+            embedding_provider=embedding_provider,
+        )
+
+    await _run_post_ingest_backup(result.work_id)
+
+    response = result.to_dict()
+    if cross_work_summary:
+        response["cross_work_analysis"] = cross_work_summary
+
+    return response
