@@ -285,6 +285,7 @@ class RelatedContentFinder:
         *,
         exclude_work_id: str | None = None,
         exclude_chunk_id: str | None = None,
+        max_chunks_per_theme: int = 20,
     ) -> list[RelatedItem]:
         """Find content exploring the same themes."""
         from author_library.graph.queries import GraphQueryService
@@ -297,7 +298,11 @@ class RelatedContentFinder:
             if not subgraph:
                 continue
 
+            chunks_processed = 0
             for chunk in subgraph.chunks:
+                if chunks_processed >= max_chunks_per_theme:
+                    break
+
                 # Skip the context chunk and its siblings from same work
                 if chunk.chunk_id == exclude_chunk_id:
                     continue
@@ -309,18 +314,10 @@ class RelatedContentFinder:
                     {},
                 )
 
-                # Fetch full text from PG (Neo4j text_preview is truncated)
-                full_chunk = await self._get_chunk(chunk.chunk_id)
-                full_text = (
-                    full_chunk.get("text", chunk.text_preview)
-                    if full_chunk
-                    else chunk.text_preview
-                )
-
                 items.append(RelatedItem(
                     chunk_id=chunk.chunk_id,
                     work_id=chunk.work_id,
-                    text=full_text,
+                    text=chunk.text_preview,
                     source_class=chunk.source_class,
                     granularity=chunk.granularity,
                     connection_type=ConnectionType.THEMATIC_PARALLEL,
@@ -331,6 +328,7 @@ class RelatedContentFinder:
                         "author": work_info.get("author", ""),
                     },
                 ))
+                chunks_processed += 1
 
         return items
 

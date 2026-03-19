@@ -146,12 +146,14 @@ class GraphQueryService:
 
         theme_record = theme_records[0]
 
-        # Get all chunks exploring this theme
+        # Get chunks exploring this theme (capped to avoid runaway queries
+        # on themes with tens of thousands of edges)
         chunk_records = await self._neo4j.execute_read(
             """MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme {canonical_name: $canonical_name})
             RETURN c.chunk_id AS chunk_id, c.work_id AS work_id,
                    c.text_preview AS text_preview, c.granularity AS granularity,
-                   c.source_class AS source_class""",
+                   c.source_class AS source_class
+            LIMIT 100""",
             {"canonical_name": canonical},
         )
         chunks = [

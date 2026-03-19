@@ -247,6 +247,25 @@ async def handle_surfacing(request: Request) -> JSONResponse:
         except Exception:
             work_media_map[wid] = None
 
+    # Batch-fetch themes for all chunk_ids in one Neo4j query
+    all_chunk_ids = [item.chunk_id for item in all_items if item.chunk_id]
+    chunk_themes_map: dict[str, list[str]] = {}
+    if all_chunk_ids:
+        try:
+            theme_rows = await storage.neo4j.execute_read(
+                """MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme)
+                   WHERE c.chunk_id IN $chunk_ids
+                   RETURN c.chunk_id AS chunk_id,
+                          collect(DISTINCT t.canonical_name) AS themes""",
+                {"chunk_ids": all_chunk_ids},
+            )
+            for row in theme_rows:
+                chunk_themes_map[row["chunk_id"]] = row["themes"]
+        except Exception:
+            log.debug("surfacing_endpoint_theme_lookup_failed")
+
+    all_themes_set: set[str] = set()
+
     for level, items in [
         ("high", response.high_confidence),
         ("medium", response.medium_confidence),
@@ -254,6 +273,8 @@ async def handle_surfacing(request: Request) -> JSONResponse:
     ]:
         for item in items:
             vault_path = _vault_path_for_work(item.work_id, work_media_map.get(item.work_id))
+            themes = chunk_themes_map.get(item.chunk_id, [])
+            all_themes_set.update(themes)
             flat_results.append({
                 "title": item.title,
                 "source": item.source,
@@ -262,6 +283,7 @@ async def handle_surfacing(request: Request) -> JSONResponse:
                 "vault_path": vault_path,
                 "parlour_car_id": item.work_id,
                 "score": item.metadata.get("relevance_score", 0.0),
+                "themes": themes,
             })
 
     log.info(
@@ -277,6 +299,7 @@ async def handle_surfacing(request: Request) -> JSONResponse:
             "parlour_car_id": parlour_car_id,
             "note_type": note_type,
         },
+        "available_themes": sorted(all_themes_set),
     })
 
 
