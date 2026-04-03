@@ -40,6 +40,10 @@ class CapturePayload(BaseModel):
         default=None,
         description="Manual speaker attribution override",
     )
+    transcript: str | None = Field(
+        default=None,
+        description="Full transcript extracted by the extension (preferred over server-side fetch)",
+    )
     extension_version: str = Field(description="Chrome extension version")
     captured_at: datetime = Field(description="ISO 8601 capture timestamp")
 

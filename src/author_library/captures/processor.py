@@ -74,11 +74,20 @@ async def process_capture(
         else f"media--{hash(payload.source_url) & 0xFFFFFFFF:08x}"
     )
 
-    # Step 2: Fetch/cache transcript
-    transcript = await get_transcript(
-        payload.source_url,
-        cache_repo=storage.transcript_cache,
-    )
+    # Step 2: Get transcript — prefer the one extracted by the extension (runs on
+    # the YouTube page, bypasses cloud IP blocks), fall back to server-side fetch.
+    if payload.transcript:
+        transcript = payload.transcript
+        log.info(
+            "capture_transcript_from_extension",
+            capture_id=capture_id,
+            chars=len(transcript),
+        )
+    else:
+        transcript = await get_transcript(
+            payload.source_url,
+            cache_repo=storage.transcript_cache,
+        )
 
     if not transcript:
         error_msg = f"No transcript available for {payload.source_url}"
