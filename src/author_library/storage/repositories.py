@@ -881,11 +881,14 @@ class Neo4jGraphRepository(GraphRepository):
         """
         total_deleted = 0
         while True:
+            # Collect before deleting so size() is computed before the nodes
+            # are removed (DETACH DELETE nullifies the var, making count(c) = 0).
             result = await self._neo4j.execute_write(
                 """MATCH (c:Chunk {work_id: $work_id})
                 WITH c LIMIT 1000
-                DETACH DELETE c
-                RETURN count(c) AS deleted""",
+                WITH collect(c) AS batch
+                FOREACH (n IN batch | DETACH DELETE n)
+                RETURN size(batch) AS deleted""",
                 {"work_id": work_id},
             )
             batch = result[0]["deleted"] if result else 0
