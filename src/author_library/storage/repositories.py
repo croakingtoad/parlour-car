@@ -875,14 +875,24 @@ class Neo4jGraphRepository(GraphRepository):
 
         Called before re-ingestion to prevent stale chunk nodes with
         outdated UUIDs from persisting when PG assigns new chunk IDs.
+
+        Batched in 1000-node transactions to avoid Neo4j transaction
+        size limits on large works (20k+ chunks with many relationships).
         """
-        result = await self._neo4j.execute_write(
-            """MATCH (c:Chunk {work_id: $work_id})
-            DETACH DELETE c
-            RETURN count(c) AS deleted""",
-            {"work_id": work_id},
-        )
-        return result[0]["deleted"] if result else 0
+        total_deleted = 0
+        while True:
+            result = await self._neo4j.execute_write(
+                """MATCH (c:Chunk {work_id: $work_id})
+                WITH c LIMIT 1000
+                DETACH DELETE c
+                RETURN count(c) AS deleted""",
+                {"work_id": work_id},
+            )
+            batch = result[0]["deleted"] if result else 0
+            total_deleted += batch
+            if batch == 0:
+                break
+        return total_deleted
 
     async def upsert_chunk_node(self, chunk: dict[str, Any]) -> None:
         # Build SET clause dynamically to include user_id for personal chunks

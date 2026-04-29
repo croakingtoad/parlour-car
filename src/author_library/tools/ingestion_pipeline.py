@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from author_library.chunking.models import Chunk
     from author_library.config import Settings
     from author_library.embeddings.base import EmbeddingProvider
+    from author_library.parsing.models import ParsedDocument
     from author_library.storage.manager import StorageManager
 
 log = structlog.get_logger(__name__)
@@ -157,10 +158,9 @@ class IngestionPipeline:
         Raises:
             IngestionError: If a critical pipeline stage fails.
         """
+        from author_library.parsing.models import ParsedDocument
+
         path = Path(file_path)
-        hints = metadata_hints or {}
-        errors: list[str] = []
-        pipeline_start = time.monotonic()
 
         log.info(
             "ingestion_starting",
@@ -178,6 +178,53 @@ class IngestionPipeline:
             word_count=document.metadata.word_count,
             format=document.format,
             elapsed_seconds=round(time.monotonic() - stage_start, 1),
+        )
+
+        # Delegate to ingest_document for steps 2+
+        return await self.ingest_document(
+            document,
+            subject_author_id=subject_author_id,
+            metadata_hints=metadata_hints,
+        )
+
+    async def ingest_document(
+        self,
+        document: ParsedDocument,
+        *,
+        subject_author_id: str,
+        metadata_hints: dict[str, Any] | None = None,
+    ) -> IngestionResult:
+        """Ingest a pre-built ParsedDocument through the pipeline.
+
+        Skips the parsing step — runs classify → chunk → annotate → embed →
+        extract entities → create passage links.
+
+        Use this for custom document structures (e.g., epistolary collections,
+        poetry collections with prose intros).
+
+        Args:
+            document: A pre-built ParsedDocument with the desired tree structure.
+            subject_author_id: The subject author's slug identifier.
+            metadata_hints: Optional metadata overrides (source_class, genre_tags, etc.).
+
+        Returns:
+            IngestionResult with counts and any non-fatal errors.
+
+        Raises:
+            IngestionError: If a critical pipeline stage fails.
+        """
+        from author_library.parsing.models import ParsedDocument
+
+        hints = metadata_hints or {}
+        errors: list[str] = []
+        pipeline_start = time.monotonic()
+
+        log.info(
+            "ingest_document_starting",
+            title=document.metadata.title,
+            word_count=document.metadata.word_count,
+            format=document.format,
+            subject_author=subject_author_id,
         )
 
         # Step 2: Classify via pipeline (creates catalog entry + stores in works table)
@@ -223,7 +270,10 @@ class IngestionPipeline:
                 new_pass_number=pass_number,
             )
 
-        # Also clear Neo4j chunk nodes so stale UUIDs don't persist
+        # Also clear Neo4j chunk nodes so stale UUIDs don't persist.
+        # On re-ingestion (deleted_chunks > 0), this is mandatory — PG just
+        # assigned new UUIDs, so any failure here would leave two disjoint
+        # UUID sets in Neo4j permanently. Abort rather than silently corrupt.
         try:
             deleted_graph = await self._storage.graph.delete_chunks_for_work(work_id)
             if deleted_graph > 0:
@@ -233,11 +283,18 @@ class IngestionPipeline:
                     deleted_graph_chunks=deleted_graph,
                 )
         except Exception as exc:
+            if deleted_chunks > 0:
+                raise RuntimeError(
+                    f"Neo4j chunk cleanup failed for re-ingestion of {work_id!r} — "
+                    f"PG chunks were already deleted and new UUIDs assigned. "
+                    f"Aborting to prevent stale Neo4j nodes. Fix Neo4j and retry. "
+                    f"Original error: {exc}"
+                ) from exc
             log.warning(
                 "neo4j_chunk_cleanup_failed",
                 work_id=work_id,
                 error=str(exc),
-                message="Pipeline continues — old graph chunks may persist",
+                message="First ingestion — no stale nodes possible, pipeline continues",
             )
 
         # Upsert work node in Neo4j
