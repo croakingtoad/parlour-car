@@ -98,6 +98,6 @@ class WorkerSettings:
     redis_settings = get_redis_settings()
     queue_name = QUEUE_DEFAULT
     max_jobs = 5
-    job_timeout = 1800  # 30 minutes — ingestion can be slow
+    job_timeout = 7200  # 2 hours — large OCR PDFs need extended time
     keep_result = 3600  # Keep results for 1 hour
     health_check_interval = 30

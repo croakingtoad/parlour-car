@@ -207,7 +207,7 @@ class TestTranscriptRegistration:
         assert TranscriptChunkingStrategy in types
 
     def test_seven_strategies_total(self) -> None:
-        assert len(list_strategies()) == 7
+        assert len(list_strategies()) == 8
 
     def test_bare_transcript_genre_maps_to_sermon(self) -> None:
         # "transcript" is shared by SermonStrategy and TranscriptChunkingStrategy.

@@ -18,6 +18,7 @@ from author_library.chunking.correspondence import (
 )
 from author_library.chunking.models import Chunk, ChunkGranularity
 from author_library.chunking.poetry import PoetryStrategy
+from author_library.chunking.poetry_collection import PoetryCollectionStrategy
 from author_library.chunking.scholarly import ScholarlyProseStrategy
 from author_library.chunking.sermon import SermonStrategy
 from author_library.chunking.transcript import TranscriptChunkingStrategy
@@ -27,6 +28,7 @@ from author_library.errors import IngestionError
 # The first strategy whose supported_genres() intersects with the
 # work's genre_tags wins.
 _STRATEGIES: list[ChunkingStrategy] = [
+    PoetryCollectionStrategy(),  # mixed prose + poetry (more specific than pure poetry)
     PoetryStrategy(),
     TranscriptChunkingStrategy(),  # before interview (more specific)
     InterviewStrategy(),
@@ -85,6 +87,7 @@ __all__ = [
     "ChunkingStrategy",
     "InterviewStrategy",
     "LetterStrategy",
+    "PoetryCollectionStrategy",
     "PoetryStrategy",
     "ScholarlyProseStrategy",
     "SermonStrategy",

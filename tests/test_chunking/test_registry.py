@@ -88,4 +88,4 @@ class TestListStrategies:
         assert ScholarlyProseStrategy in types
 
     def test_strategy_count(self) -> None:
-        assert len(list_strategies()) == 7
+        assert len(list_strategies()) == 8
