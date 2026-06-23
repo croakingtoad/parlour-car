@@ -30,7 +30,7 @@ async def get_library_overview(pg: "PostgresPool") -> dict[str, Any]:
         FROM works
         """
     )
-    overview: dict[str, Any] = dict(row) if row else {}
+    overview: dict[str, Any] = dict(row)
 
     chunk_row = await pg.fetch_one("SELECT count(*) AS total_chunks FROM chunks")
     overview["total_chunks"] = dict(chunk_row)["total_chunks"] if chunk_row else 0
@@ -39,8 +39,8 @@ async def get_library_overview(pg: "PostgresPool") -> dict[str, Any]:
         "SELECT count(DISTINCT chunk_id) AS embedded_chunks FROM chunk_embeddings"
     )
     embedded = dict(emb_row)["embedded_chunks"] if emb_row else 0
-    total = overview.get("total_chunks", 0) or 1
-    overview["embedding_coverage_pct"] = round(100.0 * embedded / total, 1)
+    total = overview.get("total_chunks", 0)
+    overview["embedding_coverage_pct"] = round(100.0 * embedded / total, 1) if total else 0.0
 
     vp_row = await pg.fetch_one(
         "SELECT count(*) AS voice_profile_count FROM voice_profiles WHERE is_current = TRUE"
@@ -69,8 +69,7 @@ async def get_per_work_details(pg: "PostgresPool") -> list[dict[str, Any]]:
         FROM works w
         LEFT JOIN chunks c            ON c.work_id = w.work_id
         LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id
-        GROUP BY w.work_id, w.title, w.author, w.source_class,
-                 w.ingestion_date, w.source_metadata
+        GROUP BY w.work_id, w.title, w.author, w.source_class, w.ingestion_date
         ORDER BY w.ingestion_date DESC, w.title
         """
     )
@@ -94,15 +93,18 @@ async def get_graph_stats(neo4j: "Neo4jConnection") -> dict[str, Any]:
         )
         node_counts: dict[str, int] = {}
         for r in node_rows:
-            for label in r.get("lbl", []):
-                node_counts[label] = node_counts.get(label, 0) + r.get("cnt", 0)
+            d = dict(r)
+            for label in d.get("lbl", []):
+                node_counts[label] = node_counts.get(label, 0) + d.get("cnt", 0)
         stats["node_counts"] = node_counts
-        stats["total_nodes"] = sum(node_counts.values())
+
+        total_row = await neo4j.execute_read("MATCH (n) RETURN count(n) AS cnt")
+        stats["total_nodes"] = total_row[0]["cnt"] if total_row else 0
 
         edge_rows = await neo4j.execute_read(
             "MATCH ()-[r]->() RETURN type(r) AS rel_type, count(r) AS cnt"
         )
-        edge_counts: dict[str, int] = {r["rel_type"]: r["cnt"] for r in edge_rows}
+        edge_counts: dict[str, int] = {dict(r)["rel_type"]: dict(r)["cnt"] for r in edge_rows}
         stats["edge_counts"] = edge_counts
         stats["total_edges"] = sum(edge_counts.values())
 
