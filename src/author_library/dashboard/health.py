@@ -64,7 +64,7 @@ async def check_missing_embeddings(pg: "PostgresPool") -> CheckResult:
             SELECT count(*) AS cnt
             FROM chunks c
             WHERE NOT EXISTS (
-                SELECT 1 FROM chunk_embeddings ce WHERE ce.chunk_id = c.chunk_id
+                SELECT 1 FROM chunk_embeddings ce WHERE ce.chunk_id = c.id
             )
             """
         )

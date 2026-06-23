@@ -68,8 +68,8 @@ async def get_per_work_details(pg: "PostgresPool") -> list[dict[str, Any]]:
             count(ce.chunk_id)                                               AS embedded_count
         FROM works w
         LEFT JOIN chunks c            ON c.work_id = w.work_id
-        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id
-        GROUP BY w.work_id, w.title, w.author, w.source_class, w.ingestion_date
+        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
+        GROUP BY w.work_id, w.title, w.author, w.source_class, w.ingestion_date, w.source_metadata
         ORDER BY w.ingestion_date DESC, w.title
         """
     )
