@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parlour Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #0f172a; color: #e2e8f0; min-height: 100vh; padding: 1.5rem; }
+    h1  { font-size: 1.5rem; font-weight: 700; color: #f8fafc; }
+    h2  { font-size: .8rem; font-weight: 600; color: #94a3b8; text-transform: uppercase;
+          letter-spacing: .06em; margin-bottom: .75rem; }
+    header { display: flex; align-items: center; justify-content: space-between;
+             margin-bottom: 1.5rem; }
+    #refresh-info { font-size: .8rem; color: #64748b; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr));
+             gap: .75rem; margin-bottom: 1.5rem; }
+    .card { background: #1e293b; border-radius: .5rem; padding: 1rem; }
+    .card-value { font-size: 2rem; font-weight: 700; color: #38bdf8; }
+    .card-label { font-size: .78rem; color: #94a3b8; margin-top: .25rem; }
+    .charts { display: grid; grid-template-columns: 240px 1fr; gap: 1rem;
+              margin-bottom: 1.5rem; }
+    .chart-box { background: #1e293b; border-radius: .5rem; padding: 1rem; }
+    h2.sec { margin-bottom: .5rem; }
+    .section { background: #1e293b; border-radius: .5rem; padding: 1rem;
+               margin-bottom: 1rem; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+    th { text-align: left; padding: .45rem .75rem; color: #64748b;
+         border-bottom: 1px solid #334155; white-space: nowrap; }
+    td { padding: .45rem .75rem; border-bottom: 1px solid #263044; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #263044; }
+    .badge { display: inline-block; padding: .12rem .5rem; border-radius: 999px;
+             font-size: .72rem; font-weight: 600; }
+    .badge-primary    { background: #0369a1; color: #bae6fd; }
+    .badge-secondary  { background: #7c3aed; color: #ddd6fe; }
+    .badge-contextual { background: #064e3b; color: #6ee7b7; }
+    .badge-tertiary   { background: #374151; color: #9ca3af; }
+    .badge-personal   { background: #92400e; color: #fde68a; }
+    .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+              gap: .75rem; margin-bottom: 1.5rem; }
+    .check { background: #1e293b; border-radius: .5rem; padding: .75rem 1rem;
+             border-left: 4px solid; }
+    .check-ok    { border-color: #22c55e; }
+    .check-warn  { border-color: #f59e0b; }
+    .check-error { border-color: #ef4444; }
+    .check-name   { font-size: .83rem; font-weight: 600; margin-bottom: .2rem; }
+    .check-detail { font-size: .78rem; color: #94a3b8; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+           margin-right: .4rem; vertical-align: middle; }
+    .dot-ok    { background: #22c55e; }
+    .dot-warn  { background: #f59e0b; }
+    .dot-error { background: #ef4444; }
+    .pbar-bg { background: #334155; border-radius: 3px; height: 5px;
+               width: 72px; display: inline-block; vertical-align: middle; }
+    .pbar    { background: #38bdf8; border-radius: 3px; height: 5px; }
+    .conf-warn { color: #f59e0b; }
+    .muted { color: #64748b; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Parlour Library</h1>
+  <span id="refresh-info">Loading...</span>
+</header>
+
+<div class="cards" id="cards"></div>
+
+<div class="charts">
+  <div class="chart-box">
+    <h2>Source classes</h2>
+    <canvas id="classChart" width="200" height="200"></canvas>
+  </div>
+  <div class="chart-box">
+    <h2>Chunks per work</h2>
+    <canvas id="chunksChart"></canvas>
+  </div>
+</div>
+
+<h2 class="sec">Health checks</h2>
+<div class="checks" id="checks"></div>
+
+<div class="section">
+  <h2>Works</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Title</th><th>Author</th><th>Class</th>
+        <th>Chunks</th><th>Embedded</th><th>Confidence</th><th>Ingested</th>
+      </tr>
+    </thead>
+    <tbody id="works-tbody"></tbody>
+  </table>
+</div>
+
+<div class="section">
+  <h2>Knowledge graph</h2>
+  <div id="graph-stats"></div>
+</div>
+
+<script>
+// Escape HTML special chars in any string from the server before
+// inserting it via innerHTML.
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function fmt(n) { return n == null ? '&mdash;' : Number(n).toLocaleString(); }
+function pct(v) { return v == null ? '&mdash;' : Number(v).toFixed(1) + '%'; }
+
+let classChart = null, chunksChart = null;
+
+async function load() {
+  try {
+    const [stats, health] = await Promise.all([
+      fetch('/dashboard/stats').then(r => r.json()),
+      fetch('/dashboard/health').then(r => r.json()),
+    ]);
+    renderCards(stats.library || {});
+    renderCharts(stats.library || {}, stats.works || []);
+    renderWorks(stats.works || []);
+    renderGraph(stats.graph || {});
+    renderHealth(health.checks || []);
+    document.getElementById('refresh-info').textContent =
+      'Updated ' + new Date().toLocaleTimeString() + ' · auto-refresh 60s';
+  } catch (err) {
+    document.getElementById('refresh-info').textContent = 'Load error: ' + err.message;
+  }
+}
+
+function renderCards(lib) {
+  const items = [
+    { value: fmt(lib.total_works),            label: 'Works' },
+    { value: fmt(lib.total_chunks),           label: 'Chunks' },
+    { value: pct(lib.embedding_coverage_pct), label: 'Embedded' },
+    { value: fmt(lib.voice_profile_count),    label: 'Voice profiles' },
+    { value: fmt(lib.unique_authors),         label: 'Authors' },
+    { value: esc(lib.last_ingestion_date) || '&mdash;', label: 'Last ingested' },
+  ];
+  const el = document.getElementById('cards');
+  el.textContent = '';
+  items.forEach(({ value, label }) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML =
+      '<div class="card-value">' + value + '</div>' +
+      '<div class="card-label">' + esc(label) + '</div>';
+    el.appendChild(card);
+  });
+}
+
+function renderCharts(lib, works) {
+  const cls = lib.by_source_class || {};
+  const clsLabels = Object.keys(cls);
+  const clsData   = Object.values(cls);
+  const clsColors = ['#0369a1','#7c3aed','#064e3b','#374151','#92400e'];
+
+  if (classChart) classChart.destroy();
+  classChart = new Chart(document.getElementById('classChart'), {
+    type: 'doughnut',
+    data: { labels: clsLabels,
+            datasets: [{ data: clsData, backgroundColor: clsColors, borderWidth: 0 }] },
+    options: {
+      plugins: { legend: {
+        position: 'bottom',
+        labels: { color: '#94a3b8', font: { size: 11 }, boxWidth: 12 },
+      }},
+    },
+  });
+
+  const sorted  = [...works].sort((a, b) => b.chunk_count - a.chunk_count);
+  const wLabels = sorted.map(w => {
+    const t = String(w.title || '');
+    return t.length > 32 ? t.slice(0, 30) + '…' : t;
+  });
+  const wData = sorted.map(w => w.chunk_count || 0);
+
+  if (chunksChart) chunksChart.destroy();
+  chunksChart = new Chart(document.getElementById('chunksChart'), {
+    type: 'bar',
+    data: {
+      labels: wLabels,
+      datasets: [{ label: 'Chunks', data: wData,
+                   backgroundColor: '#38bdf8', borderRadius: 3 }],
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#64748b' }, grid: { color: '#263044' } },
+        y: { ticks: { color: '#94a3b8', font: { size: 11 } } },
+      },
+    },
+  });
+}
+
+function renderWorks(works) {
+  const tbody = document.getElementById('works-tbody');
+  tbody.textContent = '';
+  works.forEach(w => {
+    const conf = w.classification_confidence;
+    const confStr  = conf != null ? (conf * 100).toFixed(0) + '%' : '&mdash;';
+    const confCls  = conf != null && conf < 0.90 ? ' conf-warn' : '';
+    const embPct   = w.embedding_pct ?? 0;
+    const cls      = esc(w.source_class || '');
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td>' + esc(w.title)  + '</td>' +
+      '<td class="muted">' + esc(w.author) + '</td>' +
+      '<td><span class="badge badge-' + cls + '">' + cls + '</span></td>' +
+      '<td>' + fmt(w.chunk_count) + '</td>' +
+      '<td>' +
+        '<span class="pbar-bg"><span class="pbar" style="width:' + embPct + '%"></span></span> ' +
+        pct(embPct) +
+      '</td>' +
+      '<td class="' + confCls + '">' + confStr + '</td>' +
+      '<td class="muted">' + esc(w.ingestion_date) + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+function renderGraph(g) {
+  const el = document.getElementById('graph-stats');
+  el.textContent = '';
+  if (g.error) {
+    el.textContent = 'Neo4j unavailable: ' + g.error;
+    el.style.color = '#94a3b8';
+    return;
+  }
+  const nc = g.node_counts || {};
+  const ec = g.edge_counts || {};
+  const nodeStr  = Object.entries(nc).map(([k, v]) => esc(k) + ': ' + fmt(v)).join(' &middot; ');
+  const edgeStr  = Object.entries(ec).map(([k, v]) => esc(k) + ': ' + fmt(v)).join(' &middot; ');
+  const themes   = (g.top_themes || []).slice(0, 8)
+    .map(t => esc(t.name) + ' (' + t.work_count + 'w)').join(', ');
+  el.innerHTML =
+    '<p style="font-size:.83rem"><strong style="color:#e2e8f0">Nodes:</strong> ' + (nodeStr || '&mdash;') + '</p>' +
+    '<p style="font-size:.83rem;margin-top:.4rem"><strong style="color:#e2e8f0">Edges:</strong> ' + (edgeStr || '&mdash;') + '</p>' +
+    '<p style="font-size:.83rem;margin-top:.4rem"><strong style="color:#e2e8f0">Top themes:</strong> ' + (themes || '&mdash;') + '</p>';
+}
+
+function renderHealth(checks) {
+  const el = document.getElementById('checks');
+  el.textContent = '';
+  checks.forEach(c => {
+    const div = document.createElement('div');
+    div.className = 'check check-' + c.status;
+    div.innerHTML =
+      '<div class="check-name"><span class="dot dot-' + c.status + '"></span>' +
+        esc(c.label) + '</div>' +
+      '<div class="check-detail">' + esc(c.detail) + '</div>';
+    el.appendChild(div);
+  });
+}
+
+load();
+setInterval(load, 60_000);
+</script>
+</body>
+</html>
