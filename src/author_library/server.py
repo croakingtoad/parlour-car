@@ -1289,6 +1289,11 @@ async def _run_http(server: Server, settings: Settings) -> None:
     from author_library.captures.endpoint import handle_capture, handle_capture_status
     from author_library.surfacing.endpoint import handle_surfacing, handle_works
     from mcp.server.sse import SseServerTransport
+    from author_library.dashboard.endpoint import (
+        handle_dashboard,
+        handle_health,
+        handle_stats,
+    )
 
     async def _handle_rest_health(request: Request) -> JSONResponse:
         """Simple health endpoint for Chrome extension 'Test Connection' button."""
@@ -1337,6 +1342,9 @@ async def _run_http(server: Server, settings: Settings) -> None:
                 endpoint=handle_capture_status,
                 methods=["GET"],
             ),
+            Route("/dashboard", endpoint=handle_dashboard, methods=["GET"]),
+            Route("/dashboard/stats", endpoint=handle_stats, methods=["GET"]),
+            Route("/dashboard/health", endpoint=handle_health, methods=["GET"]),
         ],
         lifespan=lifespan,
     )
@@ -1357,6 +1365,9 @@ async def _run_http(server: Server, settings: Settings) -> None:
         "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]
         "embedding_provider": server._tool_state.get("embedding_provider"),  # type: ignore[attr-defined]
         "cache_manager": server._tool_state.get("cache_manager"),  # type: ignore[attr-defined]
+    }
+    app.state.dashboard_state = {
+        "storage": server._tool_state.get("storage"),  # type: ignore[attr-defined]
     }
 
     host = settings.server.host
