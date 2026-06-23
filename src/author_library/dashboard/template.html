@@ -203,6 +203,7 @@ function renderCharts(lib, works) {
 }
 
 function renderWorks(works) {
+  const VALID_CLASSES = new Set(['primary', 'secondary', 'contextual', 'tertiary', 'personal']);
   const tbody = document.getElementById('works-tbody');
   tbody.textContent = '';
   works.forEach(w => {
@@ -210,12 +211,13 @@ function renderWorks(works) {
     const confStr  = conf != null ? (conf * 100).toFixed(0) + '%' : '&mdash;';
     const confCls  = conf != null && conf < 0.90 ? ' conf-warn' : '';
     const embPct   = w.embedding_pct ?? 0;
-    const cls      = esc(w.source_class || '');
+    const rawCls = String(w.source_class || '');
+    const cls = VALID_CLASSES.has(rawCls) ? rawCls : 'tertiary';
     const tr = document.createElement('tr');
     tr.innerHTML =
       '<td>' + esc(w.title)  + '</td>' +
       '<td class="muted">' + esc(w.author) + '</td>' +
-      '<td><span class="badge badge-' + cls + '">' + cls + '</span></td>' +
+      '<td><span class="badge badge-' + cls + '">' + esc(rawCls) + '</span></td>' +
       '<td>' + fmt(w.chunk_count) + '</td>' +
       '<td>' +
         '<span class="pbar-bg"><span class="pbar" style="width:' + embPct + '%"></span></span> ' +
