@@ -18,9 +18,13 @@ from starlette.responses import FileResponse, JSONResponse
 
 from author_library.dashboard.health import run_all_checks
 from author_library.dashboard.queries import (
+    get_all_themes,
     get_graph_stats,
     get_library_overview,
     get_per_work_details,
+    get_theme_detail,
+    get_voice_profiles,
+    get_work_detail,
 )
 
 if TYPE_CHECKING:
@@ -79,4 +83,54 @@ async def handle_health(request: Request) -> JSONResponse:
         })
     except Exception as exc:
         log.error("dashboard_health_error", error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_voice_profiles(request: Request) -> JSONResponse:
+    """Return all current voice profiles."""
+    storage = _storage(request)
+    try:
+        profiles = await get_voice_profiles(storage.pg)
+        return JSONResponse({"profiles": profiles})
+    except Exception as exc:
+        log.error("dashboard_voice_profiles_error", error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_work_detail(request: Request) -> JSONResponse:
+    """Return full detail for a single work."""
+    storage = _storage(request)
+    work_id = request.path_params["work_id"]
+    try:
+        detail = await get_work_detail(storage.pg, storage.neo4j, work_id)
+        if detail is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(detail)
+    except Exception as exc:
+        log.error("dashboard_work_detail_error", work_id=work_id, error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_themes(request: Request) -> JSONResponse:
+    """Return all themes with appearance counts."""
+    storage = _storage(request)
+    try:
+        themes = await get_all_themes(storage.pg)
+        return JSONResponse({"themes": themes})
+    except Exception as exc:
+        log.error("dashboard_themes_error", error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_theme_detail(request: Request) -> JSONResponse:
+    """Return full theme detail including per-work appearances and quotes."""
+    storage = _storage(request)
+    entry_id = request.path_params["entry_id"]
+    try:
+        detail = await get_theme_detail(storage.pg, storage.neo4j, entry_id)
+        if detail is None:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return JSONResponse(detail)
+    except Exception as exc:
+        log.error("dashboard_theme_detail_error", entry_id=entry_id, error=str(exc))
         return JSONResponse({"error": str(exc)}, status_code=500)
