@@ -7,6 +7,7 @@ tested independently of the full StorageManager lifecycle.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -241,9 +242,8 @@ async def get_theme_detail(
     pg: "PostgresPool", neo4j: "Neo4jConnection", entry_id: str
 ) -> dict[str, Any] | None:
     """Full theme detail: metadata + per-work appearances + chunk quotes from Neo4j."""
-    import uuid as _uuid
     try:
-        _uuid.UUID(entry_id)
+        uuid.UUID(entry_id)
     except ValueError:
         return None
 
