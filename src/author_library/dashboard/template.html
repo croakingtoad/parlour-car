@@ -667,7 +667,7 @@ function buildThemeDetail(d) {
 
       const quotes = Array.isArray(ap.quotes) ? ap.quotes : [];
       if (quotes.length) {
-        quotes.forEach(q => {
+        quotes.slice(0, 2).forEach(q => {
           block.appendChild(mkEl('div', 'quote-block',
             q + (q.length >= 400 ? '…' : '')));
         });
