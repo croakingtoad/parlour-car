@@ -554,8 +554,141 @@ function buildVpDetail(prof) {
   return frag;
 }
 
-// Placeholder — filled in by Task 5 and 6
-function loadThemes() {}
+// ── Themes ────────────────────────────────────────────────────────────────
+async function loadThemes() {
+  const grid = document.getElementById('theme-grid');
+  grid.textContent = 'Loading…';
+  try {
+    const data = await fetch('/dashboard/themes').then(r => r.json());
+    grid.textContent = '';
+    (data.themes || []).forEach(t => grid.appendChild(buildThemeCard(t)));
+  } catch(e) {
+    grid.textContent = 'Error: ' + e.message;
+  }
+}
+
+function buildThemeCard(t) {
+  const card = mkEl('div', 'theme-card');
+  card.dataset.entryId = t.id;
+
+  const nameLine = mkEl('div', 'theme-card-name');
+  nameLine.appendChild(document.createTextNode(t.theme + ' '));
+  const badge = mkEl('span');
+  badge.style.cssText = 'font-size:.7rem;color:' + (t.work_count > 1 ? '#38bdf8' : '#64748b');
+  badge.textContent = t.work_count > 1 ? t.work_count + ' works' : '1 work';
+  nameLine.appendChild(badge);
+  card.appendChild(nameLine);
+
+  card.appendChild(mkEl('div', 'theme-card-author', t.author_name || ''));
+  card.appendChild(mkEl('div', 'theme-card-stance', t.author_stance || ''));
+
+  card.addEventListener('click', () => openThemeDetail(t.id, card));
+  return card;
+}
+
+async function openThemeDetail(entryId, cardEl) {
+  document.querySelectorAll('.theme-card').forEach(c => c.classList.remove('selected'));
+  cardEl.classList.add('selected');
+
+  const panel = document.getElementById('theme-panel');
+  panel.textContent = '';
+  const loading = mkEl('div', null, 'Loading…');
+  loading.style.cssText = 'color:#64748b;padding:1rem';
+  panel.appendChild(loading);
+
+  try {
+    const detail = await fetch('/dashboard/themes/' + encodeURIComponent(entryId)).then(r => r.json());
+    panel.textContent = '';
+    panel.appendChild(buildThemeDetail(detail));
+    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch(e) {
+    panel.textContent = 'Error: ' + e.message;
+  }
+}
+
+function buildThemeDetail(d) {
+  const wrap = mkEl('div', 'theme-panel');
+
+  wrap.appendChild(mkEl('div', 'theme-panel-title', d.theme));
+
+  const authorLine = mkEl('div', null, d.author_name || '');
+  authorLine.style.cssText = 'font-size:.78rem;color:#64748b;margin-bottom:.5rem';
+  wrap.appendChild(authorLine);
+
+  if (d.author_stance) {
+    const stance = mkEl('div');
+    stance.style.cssText = 'font-size:.85rem;color:#cbd5e1;line-height:1.6;margin-bottom:1rem';
+    stance.textContent = d.author_stance;
+    wrap.appendChild(stance);
+  }
+
+  if (d.key_passages) {
+    const kpSec = mkEl('div');
+    kpSec.style.marginBottom = '.75rem';
+    kpSec.appendChild(mkEl('div', 'wd-title', 'Key Passages'));
+    kpSec.appendChild(mkEl('div', 'quote-block', d.key_passages));
+    wrap.appendChild(kpSec);
+  }
+
+  const related = Array.isArray(d.related_themes) ? d.related_themes : [];
+  if (related.length) {
+    const rtSec = mkEl('div');
+    rtSec.style.marginBottom = '.75rem';
+    rtSec.appendChild(mkEl('div', 'wd-title', 'Related Themes'));
+    const tl = mkEl('div', 'tag-list');
+    related.forEach(t => tl.appendChild(mkEl('span', 'theme-chip', String(t))));
+    rtSec.appendChild(tl);
+    wrap.appendChild(rtSec);
+  }
+
+  const appearances = Array.isArray(d.appearances) ? d.appearances : [];
+  if (appearances.length) {
+    const heading = mkEl('div', 'wd-title');
+    heading.style.marginBottom = '.75rem';
+    heading.textContent = 'This theme across ' + appearances.length +
+      ' work' + (appearances.length !== 1 ? 's' : '');
+    wrap.appendChild(heading);
+
+    appearances.forEach(ap => {
+      const block = mkEl('div', 'cw-block');
+      block.appendChild(mkEl('div', 'cw-title', (ap.title || '') + ' — ' + (ap.author || '')));
+
+      if (ap.treatment_summary) {
+        block.appendChild(mkEl('div', 'cw-summary', ap.treatment_summary));
+      }
+
+      const chapters = Array.isArray(ap.chapters) ? ap.chapters : [];
+      if (chapters.length) {
+        const chap = mkEl('div');
+        chap.style.cssText = 'font-size:.72rem;color:#64748b;margin-bottom:.4rem';
+        chap.textContent = 'Chapters: ' + chapters.join(', ');
+        block.appendChild(chap);
+      }
+
+      const quotes = Array.isArray(ap.quotes) ? ap.quotes : [];
+      if (quotes.length) {
+        quotes.forEach(q => {
+          block.appendChild(mkEl('div', 'quote-block',
+            q + (q.length >= 400 ? '…' : '')));
+        });
+      } else {
+        const noQ = mkEl('div');
+        noQ.style.cssText = 'font-size:.75rem;color:#64748b;font-style:italic';
+        noQ.textContent = 'Quotes available after Neo4j theme extraction completes';
+        block.appendChild(noQ);
+      }
+
+      wrap.appendChild(block);
+    });
+  } else {
+    const noApp = mkEl('div');
+    noApp.style.cssText = 'font-size:.83rem;color:#64748b;margin-top:.5rem';
+    noApp.textContent = 'No cross-work appearances recorded yet.';
+    wrap.appendChild(noApp);
+  }
+
+  return wrap;
+}
 
 load();
 setInterval(load, 60_000);
