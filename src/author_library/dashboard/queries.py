@@ -6,7 +6,12 @@ tested independently of the full StorageManager lifecycle.
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
+
+import structlog
+
+log = structlog.get_logger(__name__)
 
 if TYPE_CHECKING:
     from author_library.storage.neo4j import Neo4jConnection
@@ -139,7 +144,7 @@ async def get_voice_profiles(pg: "PostgresPool") -> list[dict[str, Any]]:
             count(w.work_id)                                AS work_count
         FROM voice_profiles vp
         JOIN authors a ON a.id = vp.author_id
-        LEFT JOIN works w ON w.work_id LIKE vp.author_id || '--%'
+        LEFT JOIN works w ON SPLIT_PART(w.work_id, '--', 1) = vp.author_id
                           AND w.source_class = 'primary'
         WHERE vp.is_current = TRUE
         GROUP BY vp.author_id, a.canonical_name, vp.version, vp.profile, vp.created_at
@@ -150,8 +155,7 @@ async def get_voice_profiles(pg: "PostgresPool") -> list[dict[str, Any]]:
     for row in rows:
         d = dict(row)
         if isinstance(d["profile"], str):
-            import json as _json
-            d["profile"] = _json.loads(d["profile"])
+            d["profile"] = json.loads(d["profile"])
         result.append(d)
     return result
 
@@ -174,8 +178,7 @@ async def get_work_detail(
         return None
     detail: dict[str, Any] = dict(row)
     if isinstance(detail["source_metadata"], str):
-        import json as _json
-        detail["source_metadata"] = _json.loads(detail["source_metadata"])
+        detail["source_metadata"] = json.loads(detail["source_metadata"])
 
     breakdown_rows = await pg.fetch_all(
         "SELECT granularity, count(*) AS cnt FROM chunks WHERE work_id = $1 GROUP BY granularity",
@@ -194,8 +197,8 @@ async def get_work_detail(
             {"work_id": work_id},
         )
         themes = [{"name": r["name"], "chunk_count": r["chunk_count"]} for r in theme_rows]
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning("get_work_detail_neo4j_failed", work_id=work_id, error=str(exc))
     detail["themes"] = themes
 
     chunk_rows = await pg.fetch_all(
@@ -238,6 +241,12 @@ async def get_theme_detail(
     pg: "PostgresPool", neo4j: "Neo4jConnection", entry_id: str
 ) -> dict[str, Any] | None:
     """Full theme detail: metadata + per-work appearances + chunk quotes from Neo4j."""
+    import uuid as _uuid
+    try:
+        _uuid.UUID(entry_id)
+    except ValueError:
+        return None
+
     row = await pg.fetch_one(
         """
         SELECT te.id::text AS id, te.author_id, a.canonical_name AS author_name,
@@ -265,22 +274,31 @@ async def get_theme_detail(
     appearances = [dict(r) for r in appearance_rows]
 
     theme_name = detail["theme"]
-    for appearance in appearances:
-        quotes: list[str] = []
+    work_ids = [ap["work_id"] for ap in appearances]
+
+    quotes_by_work: dict[str, list[str]] = {ap["work_id"]: [] for ap in appearances}
+    if work_ids:
         try:
             quote_rows = await neo4j.execute_read(
                 """
-                MATCH (c:Chunk {work_id: $work_id})-[:EXPLORES_THEME]->(t:Theme)
-                WHERE t.canonical_name = $theme
-                RETURN c.text AS text
-                ORDER BY c.position LIMIT 2
+                MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme)
+                WHERE c.work_id IN $work_ids AND t.canonical_name = $theme
+                RETURN c.work_id AS work_id, c.text AS text
+                ORDER BY c.work_id, c.position LIMIT 40
                 """,
-                {"work_id": appearance["work_id"], "theme": theme_name},
+                {"work_ids": work_ids, "theme": theme_name},
             )
-            quotes = [r["text"][:400] for r in quote_rows if r.get("text")]
-        except Exception:
-            pass
-        appearance["quotes"] = quotes
+            for r in quote_rows:
+                wid = r["work_id"]
+                if wid in quotes_by_work and len(quotes_by_work[wid]) < 2:
+                    text = r["text"]
+                    if text:
+                        quotes_by_work[wid].append(text[:400])
+        except Exception as exc:
+            log.warning("get_theme_detail_neo4j_failed", error=str(exc))
+
+    for appearance in appearances:
+        appearance["quotes"] = quotes_by_work.get(appearance["work_id"], [])
 
     detail["appearances"] = appearances
     return detail
