@@ -58,6 +58,64 @@
     .pbar    { background: #38bdf8; border-radius: 3px; height: 5px; }
     .conf-warn { color: #f59e0b; }
     .muted { color: #64748b; }
+    /* Tabs */
+    .tabs{display:flex;gap:.25rem;margin-bottom:1.5rem;border-bottom:1px solid #334155}
+    .tab-btn{background:none;border:none;color:#64748b;font-size:.85rem;font-weight:600;
+             padding:.5rem 1rem;cursor:pointer;border-bottom:2px solid transparent;
+             margin-bottom:-1px;transition:color .15s,border-color .15s}
+    .tab-btn:hover{color:#e2e8f0}
+    .tab-btn.active{color:#38bdf8;border-bottom-color:#38bdf8}
+    .tab-panel{display:none}
+    .tab-panel.active{display:block}
+    /* Voice profiles */
+    .vp-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:1rem}
+    .vp-card{background:#1e293b;border-radius:.5rem;padding:1rem}
+    .vp-author{font-size:1rem;font-weight:700;color:#f8fafc}
+    .vp-section-title{font-size:.72rem;font-weight:600;color:#64748b;text-transform:uppercase;
+                      letter-spacing:.06em;margin-bottom:.3rem;margin-top:.75rem}
+    .vp-text{font-size:.83rem;color:#cbd5e1;line-height:1.5}
+    .vp-list{list-style:none;padding:0}
+    .vp-list li{font-size:.83rem;color:#cbd5e1;padding:.15rem 0;border-bottom:1px solid #263044}
+    .vp-list li:last-child{border-bottom:none}
+    .expand-btn{background:none;border:1px solid #334155;color:#64748b;font-size:.75rem;
+                padding:.25rem .6rem;border-radius:.25rem;cursor:pointer;margin-top:.6rem}
+    .expand-btn:hover{color:#e2e8f0;border-color:#64748b}
+    .vp-detail{display:none;margin-top:.75rem;border-top:1px solid #334155;padding-top:.75rem}
+    .vp-detail.open{display:block}
+    /* Work detail accordion */
+    .work-row{cursor:pointer}
+    .work-row:hover td{background:#263044}
+    .work-detail-row td{padding:0}
+    .work-detail-inner{padding:.75rem 1rem 1rem;background:#162032;border-bottom:1px solid #334155}
+    .wd-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
+    .wd-section{margin-bottom:.75rem}
+    .wd-title{font-size:.72rem;font-weight:600;color:#64748b;text-transform:uppercase;
+              letter-spacing:.06em;margin-bottom:.4rem}
+    .tag-list{display:flex;flex-wrap:wrap;gap:.3rem}
+    .tag{background:#1e293b;color:#94a3b8;font-size:.72rem;padding:.15rem .45rem;border-radius:.25rem}
+    .theme-chip{background:#1e3a5f;color:#93c5fd;font-size:.72rem;padding:.15rem .45rem;
+                border-radius:.25rem;cursor:pointer}
+    .theme-chip:hover{background:#1e4a7f}
+    .chunk-quote{font-size:.78rem;color:#94a3b8;font-style:italic;border-left:2px solid #334155;
+                 padding-left:.6rem;margin-top:.4rem;line-height:1.5}
+    /* Themes */
+    .theme-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(255px,1fr));gap:.75rem;margin-bottom:1.5rem}
+    .theme-card{background:#1e293b;border-radius:.5rem;padding:.85rem 1rem;cursor:pointer;
+                transition:background .15s;border:1px solid transparent}
+    .theme-card:hover{background:#263044;border-color:#334155}
+    .theme-card.selected{border-color:#38bdf8;background:#162032}
+    .theme-card-name{font-size:.88rem;font-weight:600;color:#e2e8f0;margin-bottom:.2rem}
+    .theme-card-author{font-size:.73rem;color:#64748b;margin-bottom:.35rem}
+    .theme-card-stance{font-size:.77rem;color:#94a3b8;line-height:1.4;
+                       display:-webkit-box;-webkit-line-clamp:2;
+                       -webkit-box-orient:vertical;overflow:hidden}
+    .theme-panel{background:#1e293b;border-radius:.5rem;padding:1.25rem;margin-bottom:1rem}
+    .theme-panel-title{font-size:1.1rem;font-weight:700;color:#f8fafc;margin-bottom:.3rem}
+    .cw-block{background:#162032;border-radius:.4rem;padding:.75rem;margin-bottom:.75rem}
+    .cw-title{font-size:.85rem;font-weight:600;color:#e2e8f0;margin-bottom:.3rem}
+    .cw-summary{font-size:.8rem;color:#94a3b8;margin-bottom:.4rem;line-height:1.5}
+    .quote-block{font-size:.78rem;color:#94a3b8;font-style:italic;border-left:2px solid #38bdf8;
+                 padding-left:.6rem;margin-top:.4rem;line-height:1.5}
   </style>
 </head>
 <body>
@@ -65,7 +123,13 @@
   <h1>Parlour Library</h1>
   <span id="refresh-info">Loading...</span>
 </header>
+<div class="tabs">
+  <button class="tab-btn active" data-tab="library">Library</button>
+  <button class="tab-btn" data-tab="voices">Voice Profiles</button>
+  <button class="tab-btn" data-tab="themes">Themes</button>
+</div>
 
+<div id="tab-library" class="tab-panel active">
 <div class="cards" id="cards"></div>
 
 <div class="charts">
@@ -99,6 +163,16 @@
   <h2>Knowledge graph</h2>
   <div id="graph-stats"></div>
 </div>
+</div><!-- /tab-library -->
+
+<div id="tab-voices" class="tab-panel">
+  <div class="vp-grid" id="vp-grid"></div>
+</div><!-- /tab-voices -->
+
+<div id="tab-themes" class="tab-panel">
+  <div class="theme-grid" id="theme-grid"></div>
+  <div id="theme-panel"></div>
+</div><!-- /tab-themes -->
 
 <script>
 // Escape HTML special chars in any string from the server before
@@ -262,6 +336,111 @@ function renderHealth(checks) {
     el.appendChild(div);
   });
 }
+
+// ── Helper ───────────────────────────────────────────────────────────────
+function mkEl(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+// ── Tab navigation ───────────────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const name = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    if (name === 'voices' && !document.getElementById('vp-grid').children.length) loadVoiceProfiles();
+    if (name === 'themes' && !document.getElementById('theme-grid').children.length) loadThemes();
+  });
+});
+
+// ── Voice Profiles ────────────────────────────────────────────────────────
+async function loadVoiceProfiles() {
+  const grid = document.getElementById('vp-grid');
+  grid.textContent = 'Loading…';
+  try {
+    const data = await fetch('/dashboard/voice-profiles').then(r => r.json());
+    grid.textContent = '';
+    (data.profiles || []).forEach(p => grid.appendChild(buildVpCard(p)));
+  } catch (e) {
+    grid.textContent = 'Error: ' + e.message;
+  }
+}
+
+function buildVpCard(p) {
+  const prof = p.profile || {};
+  const card = mkEl('div', 'vp-card');
+
+  const hdr = mkEl('div');
+  hdr.style.cssText = 'display:flex;align-items:baseline;justify-content:space-between;margin-bottom:.5rem';
+  hdr.appendChild(mkEl('span', 'vp-author', p.canonical_name));
+  hdr.appendChild(mkEl('span', 'muted', 'v' + p.version + ' · ' + p.work_count + ' works'));
+  card.appendChild(hdr);
+
+  if (prof.register) {
+    card.appendChild(mkEl('div', 'vp-section-title', 'Register'));
+    card.appendChild(mkEl('div', 'vp-text', prof.register));
+  }
+
+  if (prof.confidence != null) {
+    const pct = (prof.confidence * 100).toFixed(0);
+    const col = prof.confidence >= 0.85 ? '#22c55e' : prof.confidence >= 0.70 ? '#f59e0b' : '#ef4444';
+    const conf = mkEl('div', null, 'Confidence: ');
+    conf.style.cssText = 'font-size:.75rem;color:#64748b;margin-top:.4rem';
+    const strong = mkEl('strong', null, pct + '%');
+    strong.style.color = col;
+    conf.appendChild(strong);
+    card.appendChild(conf);
+  }
+
+  const btn = mkEl('button', 'expand-btn', 'Show full profile');
+  card.appendChild(btn);
+  const detail = mkEl('div', 'vp-detail');
+  detail.appendChild(buildVpDetail(prof));
+  card.appendChild(detail);
+  btn.addEventListener('click', () => {
+    const open = detail.classList.toggle('open');
+    btn.textContent = open ? 'Hide profile' : 'Show full profile';
+  });
+
+  return card;
+}
+
+function buildVpDetail(prof) {
+  const frag = document.createDocumentFragment();
+  [
+    ['Characteristic Phrases', prof.characteristic_phrases],
+    ['Rhetorical Moves',       prof.rhetorical_moves],
+    ['Sentence Patterns',      prof.sentence_patterns],
+  ].forEach(([title, val]) => {
+    const items = Array.isArray(val) ? val : (val ? [val] : []);
+    if (!items.length) return;
+    frag.appendChild(mkEl('div', 'vp-section-title', title));
+    const ul = mkEl('ul', 'vp-list');
+    items.slice(0, 8).forEach(v => ul.appendChild(mkEl('li', null, String(v))));
+    frag.appendChild(ul);
+  });
+  if (prof.humor_style) {
+    frag.appendChild(mkEl('div', 'vp-section-title', 'Humor Style'));
+    frag.appendChild(mkEl('div', 'vp-text', prof.humor_style));
+  }
+  const passages = Array.isArray(prof.example_passages) ? prof.example_passages : [];
+  if (passages.length) {
+    frag.appendChild(mkEl('div', 'vp-section-title', 'Example Passages'));
+    passages.slice(0, 2).forEach(ep => {
+      const q = mkEl('div', 'chunk-quote');
+      q.textContent = typeof ep === 'string' ? ep : (ep.text || JSON.stringify(ep));
+      frag.appendChild(q);
+    });
+  }
+  return frag;
+}
+
+// Placeholder — filled in by Task 5 and 6
+function loadThemes() {}
 
 load();
 setInterval(load, 60_000);
