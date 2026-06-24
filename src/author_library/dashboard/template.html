@@ -660,19 +660,44 @@ function buildThemeDetail(d) {
   }
 
   if (d.key_passages) {
-    // key_passages may be a plain string or a JSON-encoded array
+    // key_passages may be a plain string or a JSON-encoded array of {work_id, text_excerpt}
     let passages = d.key_passages;
     if (typeof passages === 'string') {
       try { passages = JSON.parse(passages); } catch(e) { /* leave as string */ }
     }
     const items = Array.isArray(passages) ? passages : [passages];
+
+    // Build a work_id → title lookup from appearances
+    const titleByWorkId = {};
+    (d.appearances || []).forEach(ap => { titleByWorkId[ap.work_id] = ap.title; });
+
+    // Group passages by work_id, preserving insertion order
+    const groups = {};
+    const groupOrder = [];
+    items.forEach(item => {
+      const wid = (typeof item === 'object' && item.work_id) ? item.work_id : '__unknown__';
+      if (!groups[wid]) { groups[wid] = []; groupOrder.push(wid); }
+      groups[wid].push(item);
+    });
+
     const kpSec = mkEl('div');
     kpSec.style.marginBottom = '.75rem';
     kpSec.appendChild(mkEl('div', 'wd-title', 'Key Passages'));
-    items.forEach(item => {
-      const text = typeof item === 'string' ? item : (item.text_excerpt || item.text || item.passage || '');
-      kpSec.appendChild(mkEl('div', 'quote-block', text));
+
+    groupOrder.forEach(wid => {
+      // Book header (skip if single group with unknown work)
+      if (!(groupOrder.length === 1 && wid === '__unknown__')) {
+        const bookTitle = titleByWorkId[wid] || wid.split('--').slice(1).join(' ').replace(/-/g, ' ');
+        const hdr = mkEl('div', null, bookTitle);
+        hdr.style.cssText = 'font-size:.78rem;font-weight:600;color:#64748b;margin:.6rem 0 .25rem';
+        kpSec.appendChild(hdr);
+      }
+      groups[wid].forEach(item => {
+        const text = typeof item === 'string' ? item : (item.text_excerpt || item.text || item.passage || '');
+        if (text) kpSec.appendChild(mkEl('div', 'quote-block', text));
+      });
     });
+
     wrap.appendChild(kpSec);
   }
 
