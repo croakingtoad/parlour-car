@@ -151,7 +151,7 @@ async def _classify_only(
     from author_library.catalog.mixed_authorship import MixedAuthorshipAnalyzer
     from author_library.parsing import parse_document
 
-    document = parse_document(path, metadata_hints=metadata_hints)
+    document = await parse_document(path, metadata_hints=metadata_hints)
 
     classifier = SourceClassifier(settings)
     classification = await classifier.classify(

@@ -56,6 +56,16 @@ def get_parser(file_path: str | Path) -> DocumentParser:
     return parser
 
 
+async def parse_document(
+    file_path: str | Path,
+    metadata_hints: dict | None = None,  # noqa: ARG001 — reserved for future use
+) -> "DocumentParser":
+    """Parse a document and return the ParsedDocument result."""
+    from author_library.parsing.base import ParsedDocument as _PD  # noqa: F401
+    parser = get_parser(file_path)
+    return await parser.parse(file_path)
+
+
 __all__ = [
     "DocumentParser",
     "DocxParser",
@@ -64,4 +74,5 @@ __all__ = [
     "PdfParser",
     "TextParser",
     "get_parser",
+    "parse_document",
 ]
