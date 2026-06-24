@@ -1295,9 +1295,14 @@ async def _run_http(server: Server, settings: Settings) -> None:
         handle_stats,
     )
 
+    from starlette.responses import RedirectResponse
+
     async def _handle_rest_health(request: Request) -> JSONResponse:
         """Simple health endpoint for Chrome extension 'Test Connection' button."""
         return JSONResponse({"status": "ok", "server": "parlour-car"})
+
+    async def _handle_root(request: Request) -> RedirectResponse:
+        return RedirectResponse(url="/dashboard")
     from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
     # Streamable HTTP transport (recommended — stateless, no session stickiness issues)
@@ -1342,6 +1347,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
                 endpoint=handle_capture_status,
                 methods=["GET"],
             ),
+            Route("/", endpoint=_handle_root, methods=["GET"]),
             Route("/dashboard", endpoint=handle_dashboard, methods=["GET"]),
             Route("/dashboard/stats", endpoint=handle_stats, methods=["GET"]),
             Route("/dashboard/health", endpoint=handle_health, methods=["GET"]),
