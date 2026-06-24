@@ -61,7 +61,6 @@ async def parse_document(
     metadata_hints: dict | None = None,  # noqa: ARG001 — reserved for future use
 ) -> "DocumentParser":
     """Parse a document and return the ParsedDocument result."""
-    from author_library.parsing.base import ParsedDocument as _PD  # noqa: F401
     parser = get_parser(file_path)
     return await parser.parse(file_path)
 
