@@ -111,6 +111,19 @@
                        -webkit-box-orient:vertical;overflow:hidden}
     .theme-panel{background:#1e293b;border-radius:.5rem;padding:1.25rem;margin-bottom:1rem}
     .theme-panel-title{font-size:1.1rem;font-weight:700;color:#f8fafc;margin-bottom:.3rem}
+    /* Modal */
+    .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:100;
+                   display:flex;align-items:center;justify-content:center;padding:1.5rem}
+    .modal-overlay.hidden{display:none}
+    .modal-box{background:#1e293b;border-radius:.75rem;width:100%;max-width:720px;
+               max-height:85vh;display:flex;flex-direction:column;overflow:hidden}
+    .modal-header{display:flex;align-items:flex-start;justify-content:space-between;
+                  padding:1.25rem 1.25rem .75rem;border-bottom:1px solid #334155;flex-shrink:0}
+    .modal-title{font-size:1.1rem;font-weight:700;color:#f8fafc;margin-right:1rem}
+    .modal-close{background:none;border:none;color:#64748b;font-size:1.25rem;cursor:pointer;
+                 line-height:1;padding:.2rem .4rem;flex-shrink:0}
+    .modal-close:hover{color:#e2e8f0}
+    .modal-body{overflow-y:auto;padding:1.25rem;flex:1}
     .cw-block{background:#162032;border-radius:.4rem;padding:.75rem;margin-bottom:.75rem}
     .cw-title{font-size:.85rem;font-weight:600;color:#e2e8f0;margin-bottom:.3rem}
     .cw-summary{font-size:.8rem;color:#94a3b8;margin-bottom:.4rem;line-height:1.5}
@@ -173,6 +186,17 @@
   <div class="theme-grid" id="theme-grid"></div>
   <div id="theme-panel"></div>
 </div><!-- /tab-themes -->
+
+<!-- Theme detail modal -->
+<div id="theme-modal" class="modal-overlay hidden">
+  <div class="modal-box">
+    <div class="modal-header">
+      <div class="modal-title" id="theme-modal-title"></div>
+      <button class="modal-close" id="theme-modal-close" aria-label="Close">&#x2715;</button>
+    </div>
+    <div class="modal-body" id="theme-modal-body"></div>
+  </div>
+</div>
 
 <script>
 // Escape HTML special chars in any string from the server before
@@ -586,30 +610,43 @@ function buildThemeCard(t) {
   return card;
 }
 
+// Modal setup (runs once)
+(function() {
+  const overlay = document.getElementById('theme-modal');
+  document.getElementById('theme-modal-close').addEventListener('click', closeThemeModal);
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeThemeModal(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeThemeModal(); });
+})();
+
+function closeThemeModal() {
+  document.getElementById('theme-modal').classList.add('hidden');
+  document.querySelectorAll('.theme-card').forEach(c => c.classList.remove('selected'));
+}
+
 async function openThemeDetail(entryId, cardEl) {
   document.querySelectorAll('.theme-card').forEach(c => c.classList.remove('selected'));
   cardEl.classList.add('selected');
 
-  const panel = document.getElementById('theme-panel');
-  panel.textContent = '';
-  const loading = mkEl('div', null, 'Loading…');
-  loading.style.cssText = 'color:#64748b;padding:1rem';
-  panel.appendChild(loading);
+  const modal = document.getElementById('theme-modal');
+  const titleEl = document.getElementById('theme-modal-title');
+  const body = document.getElementById('theme-modal-body');
+
+  titleEl.textContent = 'Loading…';
+  body.textContent = '';
+  modal.classList.remove('hidden');
 
   try {
     const detail = await fetch('/dashboard/themes/' + encodeURIComponent(entryId)).then(r => r.json());
-    panel.textContent = '';
-    panel.appendChild(buildThemeDetail(detail));
-    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    titleEl.textContent = detail.theme || '';
+    body.textContent = '';
+    body.appendChild(buildThemeDetail(detail));
   } catch(e) {
-    panel.textContent = 'Error: ' + e.message;
+    body.textContent = 'Error: ' + e.message;
   }
 }
 
 function buildThemeDetail(d) {
   const wrap = mkEl('div', 'theme-panel');
-
-  wrap.appendChild(mkEl('div', 'theme-panel-title', d.theme));
 
   const authorLine = mkEl('div', null, d.author_name || '');
   authorLine.style.cssText = 'font-size:.78rem;color:#64748b;margin-bottom:.5rem';
@@ -623,10 +660,19 @@ function buildThemeDetail(d) {
   }
 
   if (d.key_passages) {
+    // key_passages may be a plain string or a JSON-encoded array
+    let passages = d.key_passages;
+    if (typeof passages === 'string') {
+      try { passages = JSON.parse(passages); } catch(e) { /* leave as string */ }
+    }
+    const items = Array.isArray(passages) ? passages : [passages];
     const kpSec = mkEl('div');
     kpSec.style.marginBottom = '.75rem';
     kpSec.appendChild(mkEl('div', 'wd-title', 'Key Passages'));
-    kpSec.appendChild(mkEl('div', 'quote-block', d.key_passages));
+    items.forEach(item => {
+      const text = typeof item === 'string' ? item : (item.text_excerpt || item.text || item.passage || '');
+      kpSec.appendChild(mkEl('div', 'quote-block', text));
+    });
     wrap.appendChild(kpSec);
   }
 
