@@ -916,7 +916,10 @@ function renderPipelineTable(works) {
     ['chunked','embedded','entities','themes','voice'].forEach(key => {
       const val = w.stages ? w.stages[key] : undefined;
       const { cls: ic, txt } = stageIcon(val);
-      tr.appendChild(mkEl('td', ic, txt));
+      const td = document.createElement('td');
+      td.style.textAlign = 'center';
+      td.appendChild(mkEl('span', ic, txt));
+      tr.appendChild(td);
     });
 
     tbody.appendChild(tr);
