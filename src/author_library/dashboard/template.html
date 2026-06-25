@@ -124,6 +124,13 @@
                  line-height:1;padding:.2rem .4rem;flex-shrink:0}
     .modal-close:hover{color:#e2e8f0}
     .modal-body{overflow-y:auto;padding:1.25rem;flex:1}
+    .has-tip{position:relative;cursor:help;border-bottom:1px dotted #475569}
+    .has-tip .tip{display:none;position:absolute;top:100%;left:50%;transform:translateX(-50%);
+                  background:#0f172a;border:1px solid #334155;border-radius:.4rem;
+                  padding:.5rem .75rem;font-size:.75rem;color:#cbd5e1;line-height:1.6;
+                  white-space:pre-line;width:220px;z-index:50;pointer-events:none;
+                  box-shadow:0 4px 12px rgba(0,0,0,.5)}
+    .has-tip:hover .tip{display:block}
     .issue-pill{display:inline-block;background:#7c2d12;color:#fed7aa;font-size:.68rem;
                 padding:.1rem .4rem;border-radius:.25rem;margin:.1rem .15rem 0 0}
     .issue-pill.warn{background:#78350f;color:#fde68a}
@@ -168,7 +175,7 @@
     <thead>
       <tr>
         <th>Title</th><th>Author</th><th>Class</th>
-        <th>Chunks</th><th>Embedded</th><th>Confidence</th><th>Ingested</th>
+        <th>Chunks</th><th>Embedded</th><th class="has-tip">Confidence<span class="tip">LLM self-reported confidence in the source classification, based on how many signals it detected.<br>≥ 0.90 = strong (30+ signals)<br>0.70–0.89 = good (15–30)<br>0.50–0.69 = weak (5–15)<br>&lt; 0.50 = very uncertain (&lt;5)</span></th><th>Ingested</th>
       </tr>
     </thead>
     <tbody id="works-tbody"></tbody>
@@ -190,7 +197,7 @@
     <thead>
       <tr>
         <th>Author</th><th>Slug</th><th>Works (slug)</th><th>Primary (SAID)</th>
-        <th>Voice profile</th><th>Confidence</th><th>Issues</th>
+        <th>Voice profile</th><th class="has-tip">Confidence<span class="tip">How confident the LLM was when building this voice profile, based on sample size.<br>≥ 0.90 = 30+ samples<br>0.70–0.89 = 15–30 samples<br>0.50–0.69 = 5–15 samples<br>&lt; 0.50 = fewer than 5</span></th><th>Issues</th>
       </tr>
     </thead>
     <tbody id="author-health-tbody"></tbody>
