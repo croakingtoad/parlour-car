@@ -353,3 +353,122 @@ async def get_theme_detail(
 
     detail["appearances"] = appearances
     return detail
+
+
+async def get_pipeline_status(
+    pg: "PostgresPool", neo4j: "Neo4jConnection"
+) -> dict[str, Any]:
+    """Return per-work pipeline completion and summary counts."""
+
+    # All works with chunk + embedding counts
+    work_rows = await pg.fetch_all(
+        """
+        SELECT
+            w.work_id, w.title, w.author, w.source_class,
+            w.ingestion_date::text                              AS ingestion_date,
+            count(c.id)                                         AS chunk_count,
+            count(ce.chunk_id)                                  AS embedded_count
+        FROM works w
+        LEFT JOIN chunks c            ON c.work_id = w.work_id
+        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id
+        GROUP BY w.work_id, w.title, w.author, w.source_class, w.ingestion_date
+        ORDER BY w.ingestion_date DESC, w.title
+        """
+    )
+
+    all_work_ids = [dict(r)["work_id"] for r in work_rows]
+
+    # Works that have entity edges in Neo4j
+    works_with_entities: set[str] = set()
+    works_with_themes: set[str] = set()
+    try:
+        entity_rows = await neo4j.execute_read(
+            """
+            MATCH (c:Chunk)-[:MENTIONS|EXPLORES_THEME|MAKES_ARGUMENT]->()
+            WHERE c.work_id IN $work_ids
+            RETURN DISTINCT c.work_id AS work_id
+            """,
+            {"work_ids": all_work_ids},
+        )
+        works_with_entities = {r["work_id"] for r in entity_rows}
+
+        theme_rows = await neo4j.execute_read(
+            """
+            MATCH (c:Chunk)-[:EXPLORES_THEME]->()
+            WHERE c.work_id IN $work_ids
+            RETURN DISTINCT c.work_id AS work_id
+            """,
+            {"work_ids": all_work_ids},
+        )
+        works_with_themes = {r["work_id"] for r in theme_rows}
+    except Exception as exc:
+        log.warning("pipeline_status_neo4j_failed", error=str(exc))
+
+    # Current voice profiles
+    vp_rows = await pg.fetch_all(
+        "SELECT author_id FROM voice_profiles WHERE is_current = TRUE"
+    )
+    authors_with_profiles = {dict(r)["author_id"] for r in vp_rows}
+
+    works: list[dict[str, Any]] = []
+    pending_chunks = 0
+    pending_embed = 0
+    pending_entities = 0
+    pending_themes = 0
+
+    for row in work_rows:
+        d = dict(row)
+        wid = d["work_id"]
+        chunk_count = d["chunk_count"] or 0
+        embedded = d["embedded_count"] or 0
+
+        author_slug = wid.split("--")[0]
+        is_primary = d["source_class"] == "primary"
+
+        stages = {
+            "chunked":   chunk_count > 0,
+            "embedded":  chunk_count > 0 and embedded == chunk_count,
+            "entities":  wid in works_with_entities,
+            "themes":    wid in works_with_themes,
+            "voice":     (author_slug in authors_with_profiles) if is_primary else None,
+        }
+
+        embedding_pct = round(100.0 * embedded / chunk_count, 0) if chunk_count else 0.0
+
+        if not stages["chunked"]:       pending_chunks += 1
+        if not stages["embedded"]:      pending_embed += 1
+        if not stages["entities"]:      pending_entities += 1
+        if not stages["themes"]:        pending_themes += 1
+
+        fully_done = (
+            stages["chunked"] and stages["embedded"]
+            and stages["entities"] and stages["themes"]
+            and (stages["voice"] is not False)
+        )
+
+        works.append({
+            "work_id":       wid,
+            "title":         d["title"],
+            "author":        d["author"],
+            "source_class":  d["source_class"],
+            "ingestion_date":d["ingestion_date"],
+            "chunk_count":   chunk_count,
+            "embedding_pct": embedding_pct,
+            "stages":        stages,
+            "fully_done":    fully_done,
+        })
+
+    total = len(works)
+    fully_complete = sum(1 for w in works if w["fully_done"])
+
+    return {
+        "works": works,
+        "summary": {
+            "total":            total,
+            "fully_complete":   fully_complete,
+            "pending_chunks":   pending_chunks,
+            "pending_embed":    pending_embed,
+            "pending_entities": pending_entities,
+            "pending_themes":   pending_themes,
+        },
+    }

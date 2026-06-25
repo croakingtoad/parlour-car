@@ -20,6 +20,7 @@ from author_library.dashboard.health import run_all_checks
 from author_library.dashboard.queries import (
     get_all_themes,
     get_author_health,
+    get_pipeline_status,
     get_graph_stats,
     get_library_overview,
     get_per_work_details,
@@ -145,4 +146,15 @@ async def handle_author_health(request: Request) -> JSONResponse:
         return JSONResponse({"authors": rows})
     except Exception as exc:
         log.error("dashboard_author_health_error", error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_pipeline(request: Request) -> JSONResponse:
+    """Return per-work pipeline completion status."""
+    storage = _storage(request)
+    try:
+        data = await get_pipeline_status(storage.pg, storage.neo4j)
+        return JSONResponse(data)
+    except Exception as exc:
+        log.error("dashboard_pipeline_error", error=str(exc))
         return JSONResponse({"error": str(exc)}, status_code=500)
