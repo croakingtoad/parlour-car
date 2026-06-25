@@ -132,6 +132,57 @@ async def get_graph_stats(neo4j: "Neo4jConnection") -> dict[str, Any]:
     return stats
 
 
+async def get_author_health(pg: "PostgresPool") -> list[dict[str, Any]]:
+    """Return a health row per author: work counts, slug consistency, voice profile status."""
+    rows = await pg.fetch_all(
+        """
+        SELECT
+            a.id                                                                AS author_id,
+            a.canonical_name,
+            -- Works whose work_id prefix matches the author slug
+            count(DISTINCT w.work_id) FILTER (
+                WHERE SPLIT_PART(w.work_id, '--', 1) = a.id
+            )                                                                   AS works_matching_slug,
+            -- Works claiming this author via subject_author_id metadata
+            count(DISTINCT w2.work_id) FILTER (
+                WHERE w2.source_class = 'primary'
+            )                                                                   AS primary_works_by_said,
+            -- Current voice profile confidence
+            (vp.profile->>'confidence')::float                                  AS vp_confidence,
+            vp.version                                                          AS vp_version,
+            -- Stale subject_author_id refs (works with old slugs in metadata)
+            count(DISTINCT w3.work_id) FILTER (
+                WHERE w3.source_metadata->>'subject_author_id' != a.id
+                  AND w3.source_metadata->>'subject_author_id' IS NOT NULL
+                  AND SPLIT_PART(w3.work_id, '--', 1) = a.id
+            )                                                                   AS said_mismatches
+        FROM authors a
+        LEFT JOIN works w   ON SPLIT_PART(w.work_id, '--', 1) = a.id
+        LEFT JOIN works w2  ON w2.source_metadata->>'subject_author_id' = a.id
+        LEFT JOIN works w3  ON SPLIT_PART(w3.work_id, '--', 1) = a.id
+        LEFT JOIN voice_profiles vp ON vp.author_id = a.id AND vp.is_current = TRUE
+        GROUP BY a.id, a.canonical_name, vp.profile, vp.version
+        ORDER BY a.canonical_name
+        """
+    )
+    result = []
+    for row in rows:
+        d = dict(row)
+        issues = []
+        if d["works_matching_slug"] == 0:
+            issues.append("no works match slug")
+        if d["said_mismatches"] and d["said_mismatches"] > 0:
+            issues.append(f"{d['said_mismatches']} subject_author_id mismatch(es)")
+        if d["vp_confidence"] is None:
+            issues.append("no voice profile")
+        elif d["vp_confidence"] < 0.75:
+            issues.append(f"low confidence ({d['vp_confidence']:.0%})")
+        d["issues"] = issues
+        d["status"] = "error" if any("no works" in i or "no voice" in i for i in issues) \
+                      else "warn" if issues else "ok"
+        result.append(d)
+    return result
+
 async def get_voice_profiles(pg: "PostgresPool") -> list[dict[str, Any]]:
     """Return all current voice profiles with author name and work count."""
     rows = await pg.fetch_all(

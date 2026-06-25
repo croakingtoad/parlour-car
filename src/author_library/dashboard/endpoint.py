@@ -19,6 +19,7 @@ from starlette.responses import FileResponse, JSONResponse
 from author_library.dashboard.health import run_all_checks
 from author_library.dashboard.queries import (
     get_all_themes,
+    get_author_health,
     get_graph_stats,
     get_library_overview,
     get_per_work_details,
@@ -133,4 +134,15 @@ async def handle_theme_detail(request: Request) -> JSONResponse:
         return JSONResponse(detail)
     except Exception as exc:
         log.error("dashboard_theme_detail_error", entry_id=entry_id, error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def handle_author_health(request: Request) -> JSONResponse:
+    """Return author health rows for the dashboard integrity table."""
+    storage = _storage(request)
+    try:
+        rows = await get_author_health(storage.pg)
+        return JSONResponse({"authors": rows})
+    except Exception as exc:
+        log.error("dashboard_author_health_error", error=str(exc))
         return JSONResponse({"error": str(exc)}, status_code=500)

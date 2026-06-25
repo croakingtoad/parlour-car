@@ -1297,6 +1297,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
         handle_work_detail,
         handle_themes,
         handle_theme_detail,
+        handle_author_health,
     )
 
     from starlette.responses import RedirectResponse
@@ -1359,6 +1360,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
             Route("/dashboard/work/{work_id:str}", endpoint=handle_work_detail, methods=["GET"]),
             Route("/dashboard/themes", endpoint=handle_themes, methods=["GET"]),
             Route("/dashboard/themes/{entry_id:str}", endpoint=handle_theme_detail, methods=["GET"]),
+            Route("/dashboard/author-health", endpoint=handle_author_health, methods=["GET"]),
         ],
         lifespan=lifespan,
     )

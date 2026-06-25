@@ -124,6 +124,9 @@
                  line-height:1;padding:.2rem .4rem;flex-shrink:0}
     .modal-close:hover{color:#e2e8f0}
     .modal-body{overflow-y:auto;padding:1.25rem;flex:1}
+    .issue-pill{display:inline-block;background:#7c2d12;color:#fed7aa;font-size:.68rem;
+                padding:.1rem .4rem;border-radius:.25rem;margin:.1rem .15rem 0 0}
+    .issue-pill.warn{background:#78350f;color:#fde68a}
     .cw-block{background:#162032;border-radius:.4rem;padding:.75rem;margin-bottom:.75rem}
     .cw-title{font-size:.85rem;font-weight:600;color:#e2e8f0;margin-bottom:.3rem}
     .cw-summary{font-size:.8rem;color:#94a3b8;margin-bottom:.4rem;line-height:1.5}
@@ -180,6 +183,19 @@
 
 <div id="tab-voices" class="tab-panel">
   <div class="vp-grid" id="vp-grid"></div>
+
+<div class="section" style="margin-top:1.5rem">
+  <h2>Author integrity</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Author</th><th>Slug</th><th>Works (slug)</th><th>Primary (SAID)</th>
+        <th>Voice profile</th><th>Confidence</th><th>Issues</th>
+      </tr>
+    </thead>
+    <tbody id="author-health-tbody"></tbody>
+  </table>
+</div>
 </div><!-- /tab-voices -->
 
 <div id="tab-themes" class="tab-panel">
@@ -501,12 +517,56 @@ async function loadVoiceProfiles() {
   const grid = document.getElementById('vp-grid');
   grid.textContent = 'Loading…';
   try {
-    const data = await fetch('/dashboard/voice-profiles').then(r => r.json());
+    const [vpData, healthData] = await Promise.all([
+      fetch('/dashboard/voice-profiles').then(r => r.json()),
+      fetch('/dashboard/author-health').then(r => r.json()),
+    ]);
     grid.textContent = '';
-    (data.profiles || []).forEach(p => grid.appendChild(buildVpCard(p)));
+    (vpData.profiles || []).forEach(p => grid.appendChild(buildVpCard(p)));
+    renderAuthorHealth(healthData.authors || []);
   } catch (e) {
     grid.textContent = 'Error: ' + e.message;
   }
+}
+
+function renderAuthorHealth(authors) {
+  const tbody = document.getElementById('author-health-tbody');
+  if (!tbody) return;
+  tbody.textContent = '';
+  authors.forEach(a => {
+    const tr = document.createElement('tr');
+    const conf = a.vp_confidence;
+    const confStr = conf != null ? (conf * 100).toFixed(0) + '%' : '—';
+    const confCol = conf == null ? '#64748b' : conf >= 0.75 ? '#22c55e' : conf >= 0.60 ? '#f59e0b' : '#ef4444';
+
+    // Issues pills
+    const issuesCell = document.createElement('td');
+    if (a.issues && a.issues.length) {
+      a.issues.forEach(issue => {
+        const pill = mkEl('span', issue.includes('low') ? 'issue-pill warn' : 'issue-pill', issue);
+        issuesCell.appendChild(pill);
+      });
+    } else {
+      issuesCell.appendChild(mkEl('span', null, '✓'));
+      issuesCell.style.color = '#22c55e';
+    }
+
+    tr.appendChild(mkEl('td', null, a.canonical_name));
+    tr.appendChild(mkEl('td', 'muted', a.author_id));
+    tr.appendChild(mkEl('td', null, String(a.works_matching_slug ?? 0)));
+    tr.appendChild(mkEl('td', null, String(a.primary_works_by_said ?? 0)));
+
+    const vpCell = mkEl('td', null, a.vp_version != null ? 'v' + a.vp_version : '—');
+    vpCell.style.color = a.vp_version != null ? '#94a3b8' : '#64748b';
+    tr.appendChild(vpCell);
+
+    const confCell = mkEl('td', null, confStr);
+    confCell.style.color = confCol;
+    tr.appendChild(confCell);
+
+    tr.appendChild(issuesCell);
+    tbody.appendChild(tr);
+  });
 }
 
 function buildVpCard(p) {
