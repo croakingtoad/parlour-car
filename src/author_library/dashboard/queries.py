@@ -370,7 +370,7 @@ async def get_pipeline_status(
             count(ce.chunk_id)                                  AS embedded_count
         FROM works w
         LEFT JOIN chunks c            ON c.work_id = w.work_id
-        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id
+        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.id
         GROUP BY w.work_id, w.title, w.author, w.source_class, w.ingestion_date
         ORDER BY w.ingestion_date DESC, w.title
         """
