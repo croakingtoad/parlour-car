@@ -1290,6 +1290,7 @@ async def _run_http(server: Server, settings: Settings) -> None:
     from author_library.surfacing.endpoint import handle_surfacing, handle_works
     from mcp.server.sse import SseServerTransport
     from author_library.dashboard.endpoint import (
+        handle_blend_studio_authors,
         handle_dashboard,
         handle_health,
         handle_stats,
@@ -1351,6 +1352,11 @@ async def _run_http(server: Server, settings: Settings) -> None:
             Route(
                 "/api/v1/captures/status/{job_id:str}",
                 endpoint=handle_capture_status,
+                methods=["GET"],
+            ),
+            Route(
+                "/api/blend-studio/authors",
+                endpoint=handle_blend_studio_authors,
                 methods=["GET"],
             ),
             Route("/", endpoint=_handle_root, methods=["GET"]),

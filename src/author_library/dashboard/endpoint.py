@@ -99,6 +99,30 @@ async def handle_voice_profiles(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+async def handle_blend_studio_authors(request: Request) -> JSONResponse:
+    """Return current voice profiles for Voice Blend Studio.
+
+    Called server-to-server by Blend Studio — no auth required
+    since both services run on the same Tailscale node.
+    """
+    storage = _storage(request)
+    try:
+        profiles = await get_voice_profiles(storage.pg)
+        authors = []
+        for p in profiles:
+            d = dict(p)
+            d["confidence"] = (
+                d["profile"].get("confidence", 0.0)
+                if isinstance(d.get("profile"), dict)
+                else 0.0
+            )
+            authors.append(d)
+        return JSONResponse({"authors": authors})
+    except Exception as exc:
+        log.error("blend_studio_authors_error", error=str(exc))
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 async def handle_work_detail(request: Request) -> JSONResponse:
     """Return full detail for a single work."""
     storage = _storage(request)
