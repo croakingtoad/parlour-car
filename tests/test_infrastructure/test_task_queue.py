@@ -44,7 +44,7 @@ class TestWorkerConfig:
 
     def test_worker_settings_class_attributes(self) -> None:
         assert WorkerSettings.max_jobs == 5
-        assert WorkerSettings.job_timeout == 1800
+        assert WorkerSettings.job_timeout == 7200  # 2 hours — large OCR PDFs need extended time
         assert WorkerSettings.keep_result == 3600
         assert WorkerSettings.health_check_interval == 30
         assert WorkerSettings.queue_name == QUEUE_DEFAULT

@@ -3,7 +3,7 @@
 Tests cover:
   - job_status and ingest_book_async tools are in the TOOLS list
   - Tool schemas have required fields
-  - Total tool count includes all tools (21 total: 11 original + 2 Epic D + 5 Epic B + 3 Epic C)
+  - Total tool count includes all tools
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from author_library.server import TOOLS
 
 class TestToolRegistrations:
     def test_total_tool_count(self) -> None:
-        """24 tools: 12 original + 2 Epic D + 5 Epic B + 3 Epic C + 2 Epic N."""
-        assert len(TOOLS) == 24
+        """25 tools: 12 original + 2 Epic D + 5 Epic B + 3 Epic C + 2 Epic N + 1 QG3."""
+        assert len(TOOLS) == 25
 
     def test_job_status_tool_registered(self) -> None:
         names = [t.name for t in TOOLS]
