@@ -530,16 +530,24 @@ class EntityExtractor:
                         name=cn.replace("-", " ").title(),
                         canonical_name=cn,
                     ))
-            arguments = [
-                ExtractedEntity(
-                    entity_type="argument",
-                    name=a.get("claim", ""),
-                    canonical_name=a.get("claim", "")[:80].lower().replace(" ", "-"),
-                    properties={"evidence_summary": a.get("evidence_summary", "")},
-                )
-                for a in raw.get("arguments", [])
-                if isinstance(a, dict) and a.get("claim")
-            ]
+            arguments = []
+            for a in raw.get("arguments", []):
+                if isinstance(a, dict) and a.get("claim"):
+                    arguments.append(ExtractedEntity(
+                        entity_type="argument",
+                        name=a.get("claim", ""),
+                        canonical_name=a.get("claim", "")[:80].lower().replace(" ", "-"),
+                        properties={"evidence_summary": a.get("evidence_summary", "")},
+                    ))
+                elif isinstance(a, str) and a.strip():
+                    # LLM returned the claim as a bare string — recover it
+                    claim = a.strip()
+                    arguments.append(ExtractedEntity(
+                        entity_type="argument",
+                        name=claim,
+                        canonical_name=claim[:80].lower().replace(" ", "-"),
+                        properties={"evidence_summary": ""},
+                    ))
             concepts = []
             for c in raw.get("concepts", []):
                 if isinstance(c, dict) and (c.get("name") or c.get("canonical_name")):
@@ -572,6 +580,7 @@ class EntityExtractor:
                         entity_type="person",
                         name=cn.replace("-", " ").title(),
                         canonical_name=cn,
+                        properties={"role": "referenced"},
                     ))
             # Log if LLM returned bare strings (recovered as entities, not lost)
             for field_name, items in (

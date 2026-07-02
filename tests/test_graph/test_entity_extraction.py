@@ -527,3 +527,75 @@ def _parse_test_response(response_text: str) -> list[ChunkExtraction]:
         )
 
     return extractions
+
+
+class TestBareStringEntityRecovery:
+    """Bare-string list items must be recovered as entities, not dropped (td-c59c25).
+
+    The LLM sometimes returns e.g. themes: ["spiritual-autobiography"] instead
+    of [{"name": ..., "canonical_name": ...}]. Exercises the REAL
+    _parse_extraction_response, not the test-local reimplementation.
+    """
+
+    @staticmethod
+    def _parse(payload: list[dict]) -> list[ChunkExtraction]:
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        return EntityExtractor._parse_extraction_response(None, json.dumps(payload))  # type: ignore[arg-type]
+
+    def test_bare_string_themes_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": ["spiritual-autobiography", "Poetic Imagination"],
+            "arguments": [], "concepts": [], "persons": [],
+        }])
+        themes = result[0].themes
+        assert len(themes) == 2
+        assert themes[0].canonical_name == "spiritual-autobiography"
+        assert themes[0].name == "Spiritual Autobiography"
+        assert themes[1].canonical_name == "poetic-imagination"
+
+    def test_bare_string_concepts_and_persons_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [],
+            "arguments": [],
+            "concepts": ["esemplastic power"],
+            "persons": ["William Wordsworth"],
+        }])
+        assert result[0].concepts[0].canonical_name == "esemplastic-power"
+        assert result[0].persons[0].canonical_name == "william-wordsworth"
+        assert result[0].persons[0].properties["role"] == "referenced"
+
+    def test_bare_string_arguments_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [], "concepts": [], "persons": [],
+            "arguments": ["Imagination is the living power of perception"],
+        }])
+        args = result[0].arguments
+        assert len(args) == 1
+        assert args[0].entity_type == "argument"
+        assert args[0].name == "Imagination is the living power of perception"
+        assert args[0].canonical_name.startswith("imagination-is-the-living-power")
+
+    def test_mixed_dict_and_bare_string_lists(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [
+                {"name": "Primary Imagination", "canonical_name": "primary-imagination"},
+                "sacramental-vision",
+            ],
+            "arguments": [], "concepts": [], "persons": [],
+        }])
+        names = {t.canonical_name for t in result[0].themes}
+        assert names == {"primary-imagination", "sacramental-vision"}
+
+    def test_whitespace_only_strings_dropped(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": ["   ", ""],
+            "arguments": ["  "], "concepts": [], "persons": [],
+        }])
+        assert result[0].themes == []
+        assert result[0].arguments == []
