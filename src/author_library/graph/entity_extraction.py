@@ -47,6 +47,9 @@ _CODE_FENCE_RE = re.compile(r"^```\w*\s*\n(.*?)```\s*$", re.DOTALL)
 # Handles truncated responses where closing ``` is missing
 _CODE_FENCE_OPEN_RE = re.compile(r"^```\w*\s*\n(.*)$", re.DOTALL)
 
+# Fenced block anywhere in the text (prose preamble), closed fence optional
+_CODE_FENCE_ANY_RE = re.compile(r"```\w*\s*\n(.*?)(?:```|\Z)", re.DOTALL)
+
 
 def _strip_code_fences(text: str) -> str:
     """Strip markdown code fences from LLM output.
@@ -65,6 +68,15 @@ def _strip_code_fences(text: str) -> str:
     match = _CODE_FENCE_OPEN_RE.match(stripped)
     if match:
         return match.group(1).strip()
+    # LLM sometimes writes prose before the payload ("Looking at these
+    # chunks... ```json [...]") — find a fenced block anywhere, closed or not
+    match = _CODE_FENCE_ANY_RE.search(stripped)
+    if match:
+        return match.group(1).strip()
+    # Prose followed by a bare JSON array
+    first_bracket = stripped.find("[")
+    if first_bracket > 0:
+        return stripped[first_bracket:]
     return stripped
 
 

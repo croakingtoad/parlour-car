@@ -599,3 +599,41 @@ class TestBareStringEntityRecovery:
         }])
         assert result[0].themes == []
         assert result[0].arguments == []
+
+
+class TestProsePreambleRecovery:
+    """LLM sometimes writes prose before the JSON payload (td-aef7c5 backfill).
+
+    Observed on micro-fragment batches: 'Looking at these chunks... ```json [...]'.
+    The parser must find the payload anywhere in the response.
+    """
+
+    @staticmethod
+    def _parse(text: str) -> list[ChunkExtraction]:
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        return EntityExtractor._parse_extraction_response(None, text)  # type: ignore[arg-type]
+
+    _PAYLOAD = '[{"chunk_id": "c9", "themes": [{"name": "Imagination", "canonical_name": "imagination"}], "arguments": [], "concepts": [], "persons": []}]'
+
+    def test_prose_then_fenced_json(self) -> None:
+        text = f"Looking at these chunks, they are micro-fragments.\n\n```json\n{self._PAYLOAD}\n```"
+        result = self._parse(text)
+        assert len(result) == 1
+        assert result[0].chunk_id == "c9"
+
+    def test_prose_then_unclosed_fence(self) -> None:
+        text = f"These chunks are fragments. I'll extract minimally.\n\n```json\n{self._PAYLOAD}"
+        result = self._parse(text)
+        assert result[0].chunk_id == "c9"
+
+    def test_prose_then_bare_array(self) -> None:
+        text = f"Here is the extraction:\n\n{self._PAYLOAD}"
+        result = self._parse(text)
+        assert result[0].chunk_id == "c9"
+
+    def test_plain_payload_still_works(self) -> None:
+        assert self._parse(self._PAYLOAD)[0].chunk_id == "c9"
+
+    def test_fenced_payload_still_works(self) -> None:
+        assert self._parse(f"```json\n{self._PAYLOAD}\n```")[0].chunk_id == "c9"
