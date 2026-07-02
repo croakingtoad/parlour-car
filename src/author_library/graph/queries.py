@@ -289,15 +289,20 @@ class GraphQueryService:
         canonical = theme_name.lower().replace(" ", "-")
 
         # Get arguments connected to theme-exploring chunks
+        # Collect chunks as structured rows: parallel collect(DISTINCT ...)
+        # lists deduplicate independently, so per-field lists desynchronize
+        # whenever chunks share a work_id/granularity/source_class.
         arg_records = await self._neo4j.execute_read(
             """MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme {canonical_name: $canonical_name}),
                    (c)-[:MAKES_ARGUMENT]->(a:Argument)
             RETURN DISTINCT a.canonical_name AS canonical_name, a.claim AS claim,
-                   collect(DISTINCT c.chunk_id) AS chunk_ids,
-                   collect(DISTINCT c.work_id) AS work_ids,
-                   collect(DISTINCT c.text_preview) AS previews,
-                   collect(DISTINCT c.granularity) AS granularities,
-                   collect(DISTINCT c.source_class) AS source_classes""",
+                   collect(DISTINCT {
+                       chunk_id: c.chunk_id,
+                       work_id: c.work_id,
+                       text_preview: c.text_preview,
+                       granularity: c.granularity,
+                       source_class: c.source_class
+                   }) AS chunks""",
             {"canonical_name": canonical},
         )
 
@@ -305,20 +310,13 @@ class GraphQueryService:
         for r in arg_records:
             chunks = [
                 ChunkResult(
-                    chunk_id=cid,
-                    work_id=wid,
-                    text_preview=preview or "",
-                    granularity=gran or "",
-                    source_class=sc or "",
+                    chunk_id=row["chunk_id"],
+                    work_id=row["work_id"],
+                    text_preview=row["text_preview"] or "",
+                    granularity=row["granularity"] or "",
+                    source_class=row["source_class"] or "",
                 )
-                for cid, wid, preview, gran, sc in zip(
-                    r["chunk_ids"],
-                    r["work_ids"],
-                    r["previews"],
-                    r["granularities"],
-                    r["source_classes"],
-                    strict=True,
-                )
+                for row in r["chunks"]
             ]
             arguments.append(
                 ArgumentNode(
