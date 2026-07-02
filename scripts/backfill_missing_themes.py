@@ -129,9 +129,9 @@ async def main() -> None:
             result = await extractor.extract_and_persist(
                 chunks, work_title=work["title"] or "", author=work["author"] or ""
             )
-            totals["extracted"] += result.chunks_processed
+            totals["extracted"] += len(result.extractions)
             totals["errors"] += len(result.errors)
-            print(f"[{work_id}]   done: {result.chunks_processed} chunks processed, "
+            print(f"[{work_id}]   done: {len(result.extractions)} chunks processed, "
                   f"{result.nodes_created} nodes, {result.edges_created} edges, "
                   f"{len(result.errors)} errors")
 
