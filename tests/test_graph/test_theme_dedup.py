@@ -699,6 +699,13 @@ class TestMergeThemeIntoCanonicalIntegration:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason="DESTRUCTIVE (td-aef7c5): deduplicate_themes() runs against the WHOLE "
+    "shared Neo4j graph, and the mock embedder maps every theme name without "
+    "'imagination'/'poetry' to the same vector — merging ALL production themes "
+    "into one node. Verified to have destroyed production Theme nodes on "
+    "2026-07-02. Do not re-enable until dedup can run against an isolated graph."
+)
 @requires_neo4j
 class TestDeduplicateThemesIntegration:
     """Full pipeline test with real Neo4j and mocked embeddings."""
