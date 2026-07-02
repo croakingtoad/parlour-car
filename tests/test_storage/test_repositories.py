@@ -354,28 +354,33 @@ async def test_graph_work_and_chunk_nodes(neo4j_conn: Neo4jConnection) -> None:
     await neo4j_conn.init_schema()
     graph = Neo4jGraphRepository(neo4j_conn)
 
+    # test-- prefix: NEVER a production work_id — upsert_work_node MERGEs by
+    # work_id and would overwrite the production node's properties. The Neo4j
+    # instance is shared with production (see parlour-test-isolation-patterns).
     await graph.upsert_work_node({
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "title": "Faith, Hope and Poetry",
-        "author": "malcolm-guite",
+        "author": "test-author",
         "source_class": "primary",
         "publication_year": 2010,
     })
 
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-001",
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text_preview": "The imagination is not merely a faculty...",
         "granularity": "meso",
         "source_class": "primary",
     })
 
-    # Verify nodes exist
+    # Verify nodes exist (scoped — shared instance holds production works)
     works = await neo4j_conn.execute_read(
-        "MATCH (w:Work) RETURN w.work_id AS wid", {}
+        "MATCH (w:Work {work_id: 'test--faith-hope-and-poetry'}) "
+        "RETURN w.work_id AS wid",
+        {},
     )
     assert len(works) == 1
-    assert works[0]["wid"] == "malcolm-guite--faith-hope-and-poetry"
+    assert works[0]["wid"] == "test--faith-hope-and-poetry"
 
 
 async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
@@ -387,7 +392,7 @@ async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
     for cid in ("chunk-a", "chunk-b"):
         await graph.upsert_chunk_node({
             "chunk_id": cid,
-            "work_id": "work-1",
+            "work_id": "test--work-1",
             "text_preview": f"Text for {cid}",
             "granularity": "meso",
             "source_class": "primary",
@@ -395,7 +400,7 @@ async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
 
     # Create a theme
     await neo4j_conn.execute_write(
-        "MERGE (t:Theme {name: 'Imagination', canonical_name: 'imagination'})",
+        "MERGE (t:Theme {name: 'Imagination', canonical_name: 'test--imagination'})",
         {},
     )
 
@@ -414,7 +419,7 @@ async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
     await graph.create_edge(
         "Chunk", "chunk_id", "chunk-a",
         "EXPLORES_THEME",
-        "Theme", "canonical_name", "imagination",
+        "Theme", "canonical_name", "test--imagination",
     )
 
     # Query related chunks
@@ -426,7 +431,7 @@ async def test_graph_create_edge_and_query(neo4j_conn: Neo4jConnection) -> None:
     # Query themes
     themes = await graph.get_themes_for_chunk("chunk-a")
     assert len(themes) == 1
-    assert themes[0]["canonical_name"] == "imagination"
+    assert themes[0]["canonical_name"] == "test--imagination"
 
 
 async def test_chunk_creates_part_of_edge_to_work(neo4j_conn: Neo4jConnection) -> None:
@@ -568,7 +573,7 @@ async def test_part_of_is_idempotent(neo4j_conn: Neo4jConnection) -> None:
     graph = Neo4jGraphRepository(neo4j_conn)
 
     await graph.upsert_work_node({
-        "work_id": "work-1",
+        "work_id": "test--work-1",
         "title": "Test Work",
         "author": "test-author",
         "source_class": "primary",
@@ -577,7 +582,7 @@ async def test_part_of_is_idempotent(neo4j_conn: Neo4jConnection) -> None:
 
     chunk_data = {
         "chunk_id": "chunk-dup",
-        "work_id": "work-1",
+        "work_id": "test--work-1",
         "text_preview": "Some text",
         "granularity": "meso",
         "source_class": "primary",
@@ -606,7 +611,7 @@ async def test_get_passage_links_for_work_empty(neo4j_conn: Neo4jConnection) -> 
 
     # Create a work and chunk with no passage links
     await graph.upsert_work_node({
-        "work_id": "work-no-links",
+        "work_id": "test--work-no-links",
         "title": "No Links Work",
         "author": "test-author",
         "source_class": "primary",
@@ -614,13 +619,13 @@ async def test_get_passage_links_for_work_empty(neo4j_conn: Neo4jConnection) -> 
     })
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-lonely",
-        "work_id": "work-no-links",
+        "work_id": "test--work-no-links",
         "text_preview": "A lonely chunk with no connections",
         "granularity": "meso",
         "source_class": "primary",
     })
 
-    result = await graph.get_passage_links_for_work("work-no-links")
+    result = await graph.get_passage_links_for_work("test--work-no-links")
     assert result == []
 
 
@@ -631,14 +636,14 @@ async def test_get_passage_links_for_work_engages_with(neo4j_conn: Neo4jConnecti
 
     # Create two works with chunks
     await graph.upsert_work_node({
-        "work_id": "work-primary",
+        "work_id": "test--work-primary",
         "title": "Primary Work",
         "author": "test-author",
         "source_class": "primary",
         "publication_year": 2020,
     })
     await graph.upsert_work_node({
-        "work_id": "work-contextual",
+        "work_id": "test--work-contextual",
         "title": "Contextual Work",
         "author": "test-author",
         "source_class": "contextual",
@@ -646,14 +651,14 @@ async def test_get_passage_links_for_work_engages_with(neo4j_conn: Neo4jConnecti
     })
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-p1",
-        "work_id": "work-primary",
+        "work_id": "test--work-primary",
         "text_preview": "Primary chunk text",
         "granularity": "meso",
         "source_class": "primary",
     })
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-c1",
-        "work_id": "work-contextual",
+        "work_id": "test--work-contextual",
         "text_preview": "Contextual chunk text",
         "granularity": "meso",
         "source_class": "contextual",
@@ -673,7 +678,7 @@ async def test_get_passage_links_for_work_engages_with(neo4j_conn: Neo4jConnecti
     )
 
     # Query from the primary work
-    result = await graph.get_passage_links_for_work("work-primary")
+    result = await graph.get_passage_links_for_work("test--work-primary")
     assert len(result) == 1
     assert result[0]["source_chunk_id"] == "chunk-p1"
     assert result[0]["target_chunk_id"] == "chunk-c1"
@@ -682,7 +687,7 @@ async def test_get_passage_links_for_work_engages_with(neo4j_conn: Neo4jConnecti
     assert result[0]["confidence"] == "high"
 
     # Query from the contextual work should also find the same edge
-    result_ctx = await graph.get_passage_links_for_work("work-contextual")
+    result_ctx = await graph.get_passage_links_for_work("test--work-contextual")
     assert len(result_ctx) == 1
     assert result_ctx[0]["source_chunk_id"] == "chunk-c1"
     assert result_ctx[0]["target_chunk_id"] == "chunk-p1"
@@ -696,8 +701,8 @@ async def test_get_passage_links_for_work_thematic_parallel(neo4j_conn: Neo4jCon
 
     # Create two works with chunks
     for wid, title, sc in [
-        ("work-a", "Work A", "primary"),
-        ("work-b", "Work B", "primary"),
+        ("test--work-a", "Work A", "primary"),
+        ("test--work-b", "Work B", "primary"),
     ]:
         await graph.upsert_work_node({
             "work_id": wid,
@@ -709,14 +714,14 @@ async def test_get_passage_links_for_work_thematic_parallel(neo4j_conn: Neo4jCon
 
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-a1",
-        "work_id": "work-a",
+        "work_id": "test--work-a",
         "text_preview": "Chunk from work A",
         "granularity": "meso",
         "source_class": "primary",
     })
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-b1",
-        "work_id": "work-b",
+        "work_id": "test--work-b",
         "text_preview": "Chunk from work B",
         "granularity": "meso",
         "source_class": "primary",
@@ -736,7 +741,7 @@ async def test_get_passage_links_for_work_thematic_parallel(neo4j_conn: Neo4jCon
         },
     )
 
-    result = await graph.get_passage_links_for_work("work-a")
+    result = await graph.get_passage_links_for_work("test--work-a")
     assert len(result) == 1
     assert result[0]["source_chunk_id"] == "chunk-a1"
     assert result[0]["target_chunk_id"] == "chunk-b1"
@@ -750,7 +755,7 @@ async def test_get_passage_links_for_work_both_edge_types(neo4j_conn: Neo4jConne
     await neo4j_conn.init_schema()
     graph = Neo4jGraphRepository(neo4j_conn)
 
-    for wid, title in [("work-1", "Work One"), ("work-2", "Work Two")]:
+    for wid, title in [("test--work-1", "Work One"), ("test--work-2", "Work Two")]:
         await graph.upsert_work_node({
             "work_id": wid,
             "title": title,
@@ -760,10 +765,10 @@ async def test_get_passage_links_for_work_both_edge_types(neo4j_conn: Neo4jConne
         })
 
     for cid, wid in [
-        ("chunk-1a", "work-1"),
-        ("chunk-1b", "work-1"),
-        ("chunk-2a", "work-2"),
-        ("chunk-2b", "work-2"),
+        ("chunk-1a", "test--work-1"),
+        ("chunk-1b", "test--work-1"),
+        ("chunk-2a", "test--work-2"),
+        ("chunk-2b", "test--work-2"),
     ]:
         await graph.upsert_chunk_node({
             "chunk_id": cid,
@@ -789,7 +794,7 @@ async def test_get_passage_links_for_work_both_edge_types(neo4j_conn: Neo4jConne
         {"link_type": "thematic_parallel", "confidence": "low"},
     )
 
-    result = await graph.get_passage_links_for_work("work-1")
+    result = await graph.get_passage_links_for_work("test--work-1")
     assert len(result) == 2
 
     rel_types = {r["rel_type"] for r in result}

@@ -94,8 +94,18 @@ async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
         await neo4j_conn.execute_write(
             "MATCH (w:Work) WHERE w.work_id STARTS WITH 'test--' DETACH DELETE w", {}
         )
-        # Clean orphaned entity nodes (no remaining relationships)
+        # Clean test entity nodes BY NAME PREFIX, never by orphan heuristic:
+        # production vocabulary nodes can legitimately have zero edges (e.g.
+        # restored themes awaiting extraction backfill) — an orphan sweep
+        # deletes them (td-aef7c5, 2026-07-02 incident).
         for label in ("Theme", "Person", "Concept", "Argument", "Author"):
             await neo4j_conn.execute_write(
-                f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+                f"MATCH (n:{label}) WHERE n.canonical_name STARTS WITH 'test--' "
+                "DETACH DELETE n",
+                {},
             )
+        await neo4j_conn.execute_write(
+            "MATCH (a:Author {author_id: 'test-author'}) DETACH DELETE a", {}
+        )
+        # TestNode label is used only by connection smoke tests
+        await neo4j_conn.execute_write("MATCH (t:TestNode) DETACH DELETE t", {})

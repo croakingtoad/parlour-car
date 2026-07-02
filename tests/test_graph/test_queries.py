@@ -36,7 +36,7 @@ class TestQueryResultModels:
         """ThemeSubgraph holds chunks and works."""
         subgraph = ThemeSubgraph(
             theme_name="Primary Imagination",
-            canonical_name="primary-imagination",
+            canonical_name="test--primary-imagination",
             chunks=[
                 ChunkResult("c1", "w1", "text", "meso", "primary"),
             ],
@@ -88,7 +88,7 @@ class TestGraphQueryServiceWithNeo4j:
 
         # Themes
         themes = [
-            ("primary-imagination", "Primary Imagination"),
+            ("test--primary-imagination", "Primary Imagination"),
             ("sacramental-vision", "Sacramental Vision"),
         ]
         for cn, name in themes:
@@ -117,7 +117,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Edges: EXPLORES_THEME
         await neo4j.execute_write(
             """MATCH (c:Chunk {chunk_id: 'chunk-p1'}),
-                   (t:Theme {canonical_name: 'primary-imagination'})
+                   (t:Theme {canonical_name: 'test--primary-imagination'})
             MERGE (c)-[:EXPLORES_THEME]->(t)"""
         )
         await neo4j.execute_write(
@@ -127,7 +127,7 @@ class TestGraphQueryServiceWithNeo4j:
         )
         await neo4j.execute_write(
             """MATCH (c:Chunk {chunk_id: 'chunk-c1'}),
-                   (t:Theme {canonical_name: 'primary-imagination'})
+                   (t:Theme {canonical_name: 'test--primary-imagination'})
             MERGE (c)-[:EXPLORES_THEME]->(t)"""
         )
 
@@ -159,11 +159,11 @@ class TestGraphQueryServiceWithNeo4j:
         await self._setup_graph(neo4j_conn)
 
         service = GraphQueryService(neo4j_conn)
-        subgraph = await service.get_theme_subgraph("primary-imagination")
+        subgraph = await service.get_theme_subgraph("test--primary-imagination")
 
         assert subgraph is not None
         assert subgraph.theme_name == "Primary Imagination"
-        assert subgraph.canonical_name == "primary-imagination"
+        assert subgraph.canonical_name == "test--primary-imagination"
         assert len(subgraph.chunks) == 2  # chunk-p1 and chunk-c1
         chunk_ids = {c.chunk_id for c in subgraph.chunks}
         assert "chunk-p1" in chunk_ids
@@ -200,9 +200,9 @@ class TestGraphQueryServiceWithNeo4j:
         await self._setup_graph(neo4j_conn)
 
         service = GraphQueryService(neo4j_conn)
-        evolution = await service.get_argument_evolution("primary-imagination")
+        evolution = await service.get_argument_evolution("test--primary-imagination")
 
-        assert evolution.theme_name == "primary-imagination"
+        assert evolution.theme_name == "test--primary-imagination"
         assert len(evolution.arguments) >= 1
         arg_names = {a.canonical_name for a in evolution.arguments}
         assert "imagination-is-sacramental" in arg_names

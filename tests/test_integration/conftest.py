@@ -43,6 +43,11 @@ SKIP_NO_ANTHROPIC = pytest.mark.skipif(
     reason="ANTHROPIC_API_KEY not set",
 )
 
+SKIP_NO_VOYAGE = pytest.mark.skipif(
+    not os.environ.get("VOYAGE_API_KEY"),
+    reason="VOYAGE_API_KEY not set (source .env)",
+)
+
 
 @pytest.fixture(scope="session")
 def event_loop():
