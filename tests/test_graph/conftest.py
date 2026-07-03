@@ -76,9 +76,26 @@ async def neo4j_conn() -> AsyncGenerator[Neo4jConnection]:
         await c.execute_write(
             "MATCH (w:Work) WHERE w.work_id STARTS WITH 'test--' DETACH DELETE w"
         )
-        # Clean orphaned entity nodes left by test deletions
+        # Clean test-created entity nodes BY NAME PREFIX, never by orphan
+        # heuristic. Production vocabulary nodes can legitimately have zero
+        # edges (e.g. restored themes awaiting extraction backfill) — an
+        # orphan sweep deletes them (td-aef7c5, 2026-07-02 incident).
         for label in ("Theme", "Person", "Concept", "Argument"):
-            await c.execute_write(f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n")
+            await c.execute_write(
+                f"MATCH (n:{label}) WHERE n.canonical_name STARTS WITH 'test--' "
+                "DETACH DELETE n"
+            )
+        # Legacy unprefixed entity names from older tests
+        _LEGACY_TEST_ENTITY_NAMES = [
+            "canon", "dup", "imagination-theology", "imagination-divine",
+            "poetry-form", "primary-imagination", "imagination",
+        ]
+        for label in ("Theme", "Concept"):
+            await c.execute_write(
+                f"MATCH (n:{label}) WHERE n.canonical_name IN $names "
+                "AND NOT (n)--() DELETE n",
+                {"names": _LEGACY_TEST_ENTITY_NAMES},
+            )
 
     await _scoped_cleanup(conn)
     yield conn

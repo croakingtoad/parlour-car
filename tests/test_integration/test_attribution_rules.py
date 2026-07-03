@@ -23,7 +23,7 @@ from author_library.config import Settings
 from author_library.intelligence.voice_profile import VoiceProfileExtractor
 from author_library.tools.composable_query import handle_search_chunks
 
-from .conftest import SKIP_NO_DB
+from .conftest import SKIP_NO_DB, SKIP_NO_VOYAGE
 
 # ---------------------------------------------------------------------------
 # Helpers: build test records
@@ -254,6 +254,7 @@ class TestVoiceContamination:
 
 
 @SKIP_NO_DB
+@SKIP_NO_VOYAGE
 class TestVoiceEligibleProvenance:
     """search_chunks provenance_rules.voice_eligible is False for non-primary."""
 

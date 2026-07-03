@@ -52,6 +52,8 @@ class TestToolDefinitions:
         # Epic N: Surfacing & Synthesis (2)
         "surface_related",
         "synthesize_my_thinking",
+        # QG3: Quality gates (1)
+        "audit_library",
     })
 
     def test_all_tools_registered(self) -> None:
@@ -59,7 +61,7 @@ class TestToolDefinitions:
         assert tool_names == self.EXPECTED_TOOLS
 
     def test_tool_count(self) -> None:
-        assert len(TOOLS) == 24
+        assert len(TOOLS) == len(self.EXPECTED_TOOLS)
 
     def test_all_tools_have_descriptions(self) -> None:
         for tool in TOOLS:

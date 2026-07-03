@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, patch
 
+import asyncio
 import pytest
 
 from author_library.errors import IngestionError
@@ -249,3 +250,23 @@ class TestIngestBookCrossWorkAnalysis:
         # Response should NOT contain cross_work_analysis
         result = json.loads(result_json)
         assert "cross_work_analysis" not in result
+
+
+class TestPostIngestBackupGuard:
+    """The production backup hook must never fire from test runs (td-aef7c5)."""
+
+    async def test_backup_skipped_when_test_database_in_use(
+        self, monkeypatch
+    ) -> None:
+        from author_library.tools import ingest as ingest_mod
+
+        monkeypatch.setenv(
+            "DB_POSTGRES_URL",
+            "postgresql://author_library:x@localhost:5432/author_library_test",
+        )
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("backup subprocess must not be spawned from tests")
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", _explode)
+        await ingest_mod._run_post_ingest_backup("test--some-work")

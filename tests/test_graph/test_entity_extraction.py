@@ -527,3 +527,113 @@ def _parse_test_response(response_text: str) -> list[ChunkExtraction]:
         )
 
     return extractions
+
+
+class TestBareStringEntityRecovery:
+    """Bare-string list items must be recovered as entities, not dropped (td-c59c25).
+
+    The LLM sometimes returns e.g. themes: ["spiritual-autobiography"] instead
+    of [{"name": ..., "canonical_name": ...}]. Exercises the REAL
+    _parse_extraction_response, not the test-local reimplementation.
+    """
+
+    @staticmethod
+    def _parse(payload: list[dict]) -> list[ChunkExtraction]:
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        return EntityExtractor._parse_extraction_response(None, json.dumps(payload))  # type: ignore[arg-type]
+
+    def test_bare_string_themes_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": ["spiritual-autobiography", "Poetic Imagination"],
+            "arguments": [], "concepts": [], "persons": [],
+        }])
+        themes = result[0].themes
+        assert len(themes) == 2
+        assert themes[0].canonical_name == "spiritual-autobiography"
+        assert themes[0].name == "Spiritual Autobiography"
+        assert themes[1].canonical_name == "poetic-imagination"
+
+    def test_bare_string_concepts_and_persons_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [],
+            "arguments": [],
+            "concepts": ["esemplastic power"],
+            "persons": ["William Wordsworth"],
+        }])
+        assert result[0].concepts[0].canonical_name == "esemplastic-power"
+        assert result[0].persons[0].canonical_name == "william-wordsworth"
+        assert result[0].persons[0].properties["role"] == "referenced"
+
+    def test_bare_string_arguments_recovered(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [], "concepts": [], "persons": [],
+            "arguments": ["Imagination is the living power of perception"],
+        }])
+        args = result[0].arguments
+        assert len(args) == 1
+        assert args[0].entity_type == "argument"
+        assert args[0].name == "Imagination is the living power of perception"
+        assert args[0].canonical_name.startswith("imagination-is-the-living-power")
+
+    def test_mixed_dict_and_bare_string_lists(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": [
+                {"name": "Primary Imagination", "canonical_name": "primary-imagination"},
+                "sacramental-vision",
+            ],
+            "arguments": [], "concepts": [], "persons": [],
+        }])
+        names = {t.canonical_name for t in result[0].themes}
+        assert names == {"primary-imagination", "sacramental-vision"}
+
+    def test_whitespace_only_strings_dropped(self) -> None:
+        result = self._parse([{
+            "chunk_id": "c1",
+            "themes": ["   ", ""],
+            "arguments": ["  "], "concepts": [], "persons": [],
+        }])
+        assert result[0].themes == []
+        assert result[0].arguments == []
+
+
+class TestProsePreambleRecovery:
+    """LLM sometimes writes prose before the JSON payload (td-aef7c5 backfill).
+
+    Observed on micro-fragment batches: 'Looking at these chunks... ```json [...]'.
+    The parser must find the payload anywhere in the response.
+    """
+
+    @staticmethod
+    def _parse(text: str) -> list[ChunkExtraction]:
+        from author_library.graph.entity_extraction import EntityExtractor
+
+        return EntityExtractor._parse_extraction_response(None, text)  # type: ignore[arg-type]
+
+    _PAYLOAD = '[{"chunk_id": "c9", "themes": [{"name": "Imagination", "canonical_name": "imagination"}], "arguments": [], "concepts": [], "persons": []}]'
+
+    def test_prose_then_fenced_json(self) -> None:
+        text = f"Looking at these chunks, they are micro-fragments.\n\n```json\n{self._PAYLOAD}\n```"
+        result = self._parse(text)
+        assert len(result) == 1
+        assert result[0].chunk_id == "c9"
+
+    def test_prose_then_unclosed_fence(self) -> None:
+        text = f"These chunks are fragments. I'll extract minimally.\n\n```json\n{self._PAYLOAD}"
+        result = self._parse(text)
+        assert result[0].chunk_id == "c9"
+
+    def test_prose_then_bare_array(self) -> None:
+        text = f"Here is the extraction:\n\n{self._PAYLOAD}"
+        result = self._parse(text)
+        assert result[0].chunk_id == "c9"
+
+    def test_plain_payload_still_works(self) -> None:
+        assert self._parse(self._PAYLOAD)[0].chunk_id == "c9"
+
+    def test_fenced_payload_still_works(self) -> None:
+        assert self._parse(f"```json\n{self._PAYLOAD}\n```")[0].chunk_id == "c9"

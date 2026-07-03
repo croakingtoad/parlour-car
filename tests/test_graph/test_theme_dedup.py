@@ -576,8 +576,8 @@ class TestMergeThemeIntoCanonicalIntegration:
         await neo4j_conn.execute_write(
             """CREATE (c1:Chunk {chunk_id: 'c1', work_id: 'w1'})
             CREATE (c2:Chunk {chunk_id: 'c2', work_id: 'w1'})
-            CREATE (t_canon:Theme {canonical_name: 'imagination-theology', name: 'Imagination Theology'})
-            CREATE (t_dup:Theme {canonical_name: 'imagination-divine', name: 'Imagination Divine'})
+            CREATE (t_canon:Theme {canonical_name: 'test--imagination-theology', name: 'Imagination Theology'})
+            CREATE (t_dup:Theme {canonical_name: 'test--imagination-divine', name: 'Imagination Divine'})
             CREATE (c1)-[:EXPLORES_THEME]->(t_canon)
             CREATE (c2)-[:EXPLORES_THEME]->(t_dup)"""
         )
@@ -585,8 +585,8 @@ class TestMergeThemeIntoCanonicalIntegration:
         # Merge duplicate into canonical
         await _merge_theme_into_canonical(
             neo4j_conn,
-            canonical_name="imagination-theology",
-            duplicate_name="imagination-divine",
+            canonical_name="test--imagination-theology",
+            duplicate_name="test--imagination-divine",
         )
 
         # Verify: c2 should now point to canonical theme
@@ -595,11 +595,11 @@ class TestMergeThemeIntoCanonicalIntegration:
             RETURN t.canonical_name AS name"""
         )
         assert len(edges) == 1
-        assert edges[0]["name"] == "imagination-theology"
+        assert edges[0]["name"] == "test--imagination-theology"
 
         # Verify: duplicate theme node should be deleted
         dups = await neo4j_conn.execute_read(
-            "MATCH (t:Theme {canonical_name: 'imagination-divine'}) RETURN t"
+            "MATCH (t:Theme {canonical_name: 'test--imagination-divine'}) RETURN t"
         )
         assert len(dups) == 0
 
@@ -610,16 +610,16 @@ class TestMergeThemeIntoCanonicalIntegration:
         """When a chunk already links to both canonical and duplicate, merge should not create duplicate edge."""
         await neo4j_conn.execute_write(
             """CREATE (c1:Chunk {chunk_id: 'c1', work_id: 'w1'})
-            CREATE (t_canon:Theme {canonical_name: 'canon', name: 'Canon'})
-            CREATE (t_dup:Theme {canonical_name: 'dup', name: 'Dup'})
+            CREATE (t_canon:Theme {canonical_name: 'test--canon', name: 'Canon'})
+            CREATE (t_dup:Theme {canonical_name: 'test--dup', name: 'Dup'})
             CREATE (c1)-[:EXPLORES_THEME]->(t_canon)
             CREATE (c1)-[:EXPLORES_THEME]->(t_dup)"""
         )
 
         await _merge_theme_into_canonical(
             neo4j_conn,
-            canonical_name="canon",
-            duplicate_name="dup",
+            canonical_name="test--canon",
+            duplicate_name="test--dup",
         )
 
         # c1 should have exactly 1 EXPLORES_THEME edge (not 2)
@@ -631,7 +631,7 @@ class TestMergeThemeIntoCanonicalIntegration:
 
         # Duplicate should be deleted
         dups = await neo4j_conn.execute_read(
-            "MATCH (t:Theme {canonical_name: 'dup'}) RETURN t"
+            "MATCH (t:Theme {canonical_name: 'test--dup'}) RETURN t"
         )
         assert len(dups) == 0
 
@@ -641,22 +641,24 @@ class TestMergeThemeIntoCanonicalIntegration:
     ) -> None:
         """Merging when the duplicate doesn't exist should be a no-op."""
         await neo4j_conn.execute_write(
-            """CREATE (t:Theme {canonical_name: 'canon', name: 'Canon'})"""
+            """CREATE (t:Theme {canonical_name: 'test--canon', name: 'Canon'})"""
         )
 
         # Merge a non-existent duplicate -- should not raise
         await _merge_theme_into_canonical(
             neo4j_conn,
-            canonical_name="canon",
-            duplicate_name="nonexistent",
+            canonical_name="test--canon",
+            duplicate_name="test--nonexistent",
         )
 
-        # Canon should still exist
+        # Canon should still exist (scope to test-created themes — the
+        # shared Neo4j instance holds production Theme nodes)
         themes = await neo4j_conn.execute_read(
-            "MATCH (t:Theme) RETURN t.canonical_name AS name"
+            "MATCH (t:Theme) WHERE t.canonical_name STARTS WITH 'test--' "
+            "RETURN t.canonical_name AS name"
         )
         assert len(themes) == 1
-        assert themes[0]["name"] == "canon"
+        assert themes[0]["name"] == "test--canon"
 
     @pytest.mark.asyncio
     async def test_merge_multiple_chunks(
@@ -667,8 +669,8 @@ class TestMergeThemeIntoCanonicalIntegration:
             """CREATE (c1:Chunk {chunk_id: 'c1'})
             CREATE (c2:Chunk {chunk_id: 'c2'})
             CREATE (c3:Chunk {chunk_id: 'c3'})
-            CREATE (canon:Theme {canonical_name: 'canon', name: 'Canon'})
-            CREATE (dup:Theme {canonical_name: 'dup', name: 'Dup'})
+            CREATE (canon:Theme {canonical_name: 'test--canon', name: 'Canon'})
+            CREATE (dup:Theme {canonical_name: 'test--dup', name: 'Dup'})
             CREATE (c1)-[:EXPLORES_THEME]->(dup)
             CREATE (c2)-[:EXPLORES_THEME]->(dup)
             CREATE (c3)-[:EXPLORES_THEME]->(canon)"""
@@ -676,20 +678,20 @@ class TestMergeThemeIntoCanonicalIntegration:
 
         await _merge_theme_into_canonical(
             neo4j_conn,
-            canonical_name="canon",
-            duplicate_name="dup",
+            canonical_name="test--canon",
+            duplicate_name="test--dup",
         )
 
         # All 3 chunks should now link to canon
         edges = await neo4j_conn.execute_read(
-            """MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme {canonical_name: 'canon'})
+            """MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme {canonical_name: 'test--canon'})
             RETURN count(c) AS cnt"""
         )
         assert edges[0]["cnt"] == 3
 
         # Duplicate gone
         dups = await neo4j_conn.execute_read(
-            "MATCH (t:Theme {canonical_name: 'dup'}) RETURN t"
+            "MATCH (t:Theme {canonical_name: 'test--dup'}) RETURN t"
         )
         assert len(dups) == 0
 
@@ -699,6 +701,13 @@ class TestMergeThemeIntoCanonicalIntegration:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(
+    reason="DESTRUCTIVE (td-aef7c5): deduplicate_themes() runs against the WHOLE "
+    "shared Neo4j graph, and the mock embedder maps every theme name without "
+    "'imagination'/'poetry' to the same vector — merging ALL production themes "
+    "into one node. Verified to have destroyed production Theme nodes on "
+    "2026-07-02. Do not re-enable until dedup can run against an isolated graph."
+)
 @requires_neo4j
 class TestDeduplicateThemesIntegration:
     """Full pipeline test with real Neo4j and mocked embeddings."""

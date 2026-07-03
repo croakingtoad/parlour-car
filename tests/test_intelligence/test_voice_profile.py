@@ -374,10 +374,15 @@ class TestVoiceExtractionErrors:
 
     async def test_no_api_key_raises_error(self) -> None:
         """Should raise IntelligenceError when API key is missing."""
-        from author_library.config import Settings
+        from pydantic import SecretStr
 
+        from author_library.config import APIKeySettings, Settings
+
+        # Settings loads keys from .env (env_file) — explicit kwargs are the
+        # only reliable way to simulate a missing key regardless of the
+        # invoking shell's environment
         settings = Settings()
-        # Ensure no API key (default empty)
+        settings.api_keys = APIKeySettings(anthropic_api_key=SecretStr(""))
         extractor = VoiceProfileExtractor(settings)
 
         with pytest.raises(IntelligenceError, match="API key is required"):

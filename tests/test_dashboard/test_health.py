@@ -56,9 +56,22 @@ class TestIndividualChecks:
         assert r.status == "ok"
         assert r.count == 0
 
-    async def test_pg_neo4j_sync_ok_on_empty_db(self, clean_storage):
+    async def test_pg_neo4j_sync_reflects_actual_counts(self, clean_storage):
+        # PG is an isolated test database but Neo4j is SHARED with production,
+        # so "empty ⇒ ok" cannot be asserted. Verify the check's contract
+        # against the real counts instead.
+        pg_row = await clean_storage.pg.fetch_one("SELECT count(*) AS cnt FROM chunks")
+        pg_count = dict(pg_row)["cnt"] if pg_row else 0
+        neo4j_rows = await clean_storage.neo4j.execute_read(
+            "MATCH (c:Chunk) RETURN count(c) AS cnt"
+        )
+        neo4j_count = neo4j_rows[0]["cnt"] if neo4j_rows else 0
+        diff = abs(pg_count - neo4j_count)
+
         r = await check_pg_neo4j_sync(clean_storage.pg, clean_storage.neo4j)
-        assert r.status == "ok"
+        expected = "ok" if diff == 0 else ("warn" if diff < 10 else "error")
+        assert r.status == expected
+        assert r.count == diff
 
     async def test_low_confidence_ok_on_empty_db(self, clean_storage):
         r = await check_low_confidence_classifications(clean_storage.pg)

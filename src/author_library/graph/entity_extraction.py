@@ -47,6 +47,9 @@ _CODE_FENCE_RE = re.compile(r"^```\w*\s*\n(.*?)```\s*$", re.DOTALL)
 # Handles truncated responses where closing ``` is missing
 _CODE_FENCE_OPEN_RE = re.compile(r"^```\w*\s*\n(.*)$", re.DOTALL)
 
+# Fenced block anywhere in the text (prose preamble), closed fence optional
+_CODE_FENCE_ANY_RE = re.compile(r"```\w*\s*\n(.*?)(?:```|\Z)", re.DOTALL)
+
 
 def _strip_code_fences(text: str) -> str:
     """Strip markdown code fences from LLM output.
@@ -65,6 +68,15 @@ def _strip_code_fences(text: str) -> str:
     match = _CODE_FENCE_OPEN_RE.match(stripped)
     if match:
         return match.group(1).strip()
+    # LLM sometimes writes prose before the payload ("Looking at these
+    # chunks... ```json [...]") — find a fenced block anywhere, closed or not
+    match = _CODE_FENCE_ANY_RE.search(stripped)
+    if match:
+        return match.group(1).strip()
+    # Prose followed by a bare JSON array
+    first_bracket = stripped.find("[")
+    if first_bracket > 0:
+        return stripped[first_bracket:]
     return stripped
 
 
@@ -530,16 +542,24 @@ class EntityExtractor:
                         name=cn.replace("-", " ").title(),
                         canonical_name=cn,
                     ))
-            arguments = [
-                ExtractedEntity(
-                    entity_type="argument",
-                    name=a.get("claim", ""),
-                    canonical_name=a.get("claim", "")[:80].lower().replace(" ", "-"),
-                    properties={"evidence_summary": a.get("evidence_summary", "")},
-                )
-                for a in raw.get("arguments", [])
-                if isinstance(a, dict) and a.get("claim")
-            ]
+            arguments = []
+            for a in raw.get("arguments", []):
+                if isinstance(a, dict) and a.get("claim"):
+                    arguments.append(ExtractedEntity(
+                        entity_type="argument",
+                        name=a.get("claim", ""),
+                        canonical_name=a.get("claim", "")[:80].lower().replace(" ", "-"),
+                        properties={"evidence_summary": a.get("evidence_summary", "")},
+                    ))
+                elif isinstance(a, str) and a.strip():
+                    # LLM returned the claim as a bare string — recover it
+                    claim = a.strip()
+                    arguments.append(ExtractedEntity(
+                        entity_type="argument",
+                        name=claim,
+                        canonical_name=claim[:80].lower().replace(" ", "-"),
+                        properties={"evidence_summary": ""},
+                    ))
             concepts = []
             for c in raw.get("concepts", []):
                 if isinstance(c, dict) and (c.get("name") or c.get("canonical_name")):
@@ -572,6 +592,7 @@ class EntityExtractor:
                         entity_type="person",
                         name=cn.replace("-", " ").title(),
                         canonical_name=cn,
+                        properties={"role": "referenced"},
                     ))
             # Log if LLM returned bare strings (recovered as entities, not lost)
             for field_name, items in (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -487,6 +488,12 @@ async def _run_post_ingest_backup(work_id: str) -> None:
     The backup script path is hardcoded (not user input) and the work_id
     label is passed as a single argument to the script (no shell expansion).
     """
+    # Never fire the production backup from test runs: test-triggered
+    # backups pollute the backup directory and the keep-10 retention for
+    # post-ingest backups can prune REAL backups (observed 2026-07-02).
+    if "author_library_test" in os.environ.get("DB_POSTGRES_URL", ""):
+        log.debug("post_ingest_backup_skipped", reason="test database in use")
+        return
     if not _BACKUP_SCRIPT.exists():
         log.debug("post_ingest_backup_skipped", reason="backup script not found")
         return
