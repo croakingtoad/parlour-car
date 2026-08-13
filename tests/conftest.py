@@ -110,7 +110,7 @@ def assert_graph_is_disposable() -> None:
 
 
 @pytest.fixture
-def reset_disposable_graph() -> "Callable[[Any], Awaitable[None]]":
+def reset_disposable_graph() -> Callable[[Any], Awaitable[None]]:
     """Clear the whole test graph, after re-proving it is disposable.
 
     This is the ONE audited place allowed to delete unscoped, and it earns that
