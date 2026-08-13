@@ -78,7 +78,14 @@ class TestIndividualChecks:
         assert r.status == "ok"
         assert r.count == 0
 
-    async def test_orphaned_themes_ok_on_empty_neo4j(self, clean_storage):
+    async def test_orphaned_themes_ok_on_empty_neo4j(
+        self, clean_storage, reset_disposable_graph
+    ):
+        # Truly empty the graph first. Prefix-scoped teardown cannot remove
+        # entity nodes the LLM names itself, so sibling suites leave orphaned
+        # Theme nodes behind and this check would report "warn" purely because
+        # of test ordering.
+        await reset_disposable_graph(clean_storage.neo4j)
         r = await check_orphaned_theme_nodes(clean_storage.neo4j)
         assert r.status == "ok"
 

@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import TEST_NAMESPACE
+from tests.conftest import PRODUCTION_AUTHOR_PREFIXES, TEST_NAMESPACE
 
 TESTS_ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,8 +48,19 @@ def _python_files() -> list[Path]:
     return sorted(p for p in TESTS_ROOT.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+#: The root conftest owns the single audited unscoped delete: the
+#: reset_disposable_graph fixture, which re-proves the graph holds no
+#: production Work nodes immediately before clearing it. Exempt by path so the
+#: exemption cannot silently spread to other files.
+_AUDITED_UNSCOPED_DELETE = {Path("conftest.py")}
+
+
 def _this_file(path: Path) -> bool:
     return path.resolve() == Path(__file__).resolve()
+
+
+def _is_audited(path: Path) -> bool:
+    return path.relative_to(TESTS_ROOT) in _AUDITED_UNSCOPED_DELETE
 
 
 def _code_only(text: str) -> str:
@@ -121,35 +132,24 @@ class TestNoDestructiveUnscopedCypher:
         offenders = [
             str(p.relative_to(TESTS_ROOT))
             for p in _python_files()
-            if not _this_file(p) and _find_executed(p, _WIPE_RE)
+            if not _this_file(p) and not _is_audited(p) and _find_executed(p, _WIPE_RE)
         ]
         assert not offenders, f"Unscoped whole-graph delete found in: {offenders}"
 
 
 class TestNoProductionIdsInTests:
-    #: Author/work prefixes that belong to the real corpus. A test that
-    #: creates nodes under these names is indistinguishable from production
-    #: data, which is what forced a production prefix into cleanup before.
-    PRODUCTION_PREFIXES = (
-        "malcolm-guite",
-        "samuel-taylor-coleridge",
-        "george-macdonald",
-        "henri-j-m-nouwen",
-        "iain-mcgilchrist",
-        "john-odonohue",
-        "richard-holmes",
-        "ewan-james-jones",
-        "martin-shaw",
-        "paul-david-tripp",
-        "paul-kingsnorth",
-    )
+    #: Single source of truth lives in tests/conftest.py so the runtime check
+    #: in reset_disposable_graph and this static check cannot drift apart.
+    PRODUCTION_PREFIXES = PRODUCTION_AUTHOR_PREFIXES
 
     @pytest.mark.parametrize("prefix", PRODUCTION_PREFIXES)
     def test_no_production_work_ids_created_by_tests(self, prefix: str) -> None:
         """Test fixtures must not use production author/work identifiers."""
         offenders: list[str] = []
         for path in _python_files():
-            if _this_file(path):
+            # Skip this file and the root conftest: they NAME the production
+            # prefixes in order to ban them, rather than using them as data.
+            if _this_file(path) or _is_audited(path):
                 continue
             text = _code_only(path.read_text(encoding="utf-8"))
             if not _touches_graph(text):
