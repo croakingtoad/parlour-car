@@ -154,6 +154,37 @@ class TestWorkIdGeneration:
         )
         assert work_id == "hans-urs-von-balthasar--prayer"
 
+    def test_marc_life_dates_excluded_from_slug(self) -> None:
+        """MARC life dates must not leak into the work_id (2026-08-13).
+
+        'Coleridge, Samuel Taylor, 1772-1834' produced the work_id
+        samuel-taylor-1772-1834-coleridge--..., a second Work node for a work
+        that already existed as samuel-taylor-coleridge--..., which split
+        14,704 PART_OF edges away from the PG-matching Work node.
+        """
+        with_dates = ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor, 1772-1834",
+            "Lectures 1795 : On politics and religion",
+        )
+        without_dates = ClassificationPipeline._generate_work_id(
+            "Samuel Taylor Coleridge",
+            "Lectures 1795 : On politics and religion",
+        )
+        assert with_dates == without_dates
+        assert with_dates.startswith("samuel-taylor-coleridge--")
+        assert "1772" not in with_dates.split("--")[0]
+
+    def test_marc_life_dates_match_existing_corpus_ids(self) -> None:
+        """Re-ingesting these authors must reproduce the ids already in PG."""
+        cases = [
+            ("MacDonald, George, 1824-1905", "Unspoken Sermons",
+             "george-macdonald--unspoken-sermons"),
+            ("Nouwen, Henri J. M., 1932-1996", "Life of the Beloved",
+             "henri-j-m-nouwen--life-of-the-beloved"),
+        ]
+        for author, title, expected in cases:
+            assert ClassificationPipeline._generate_work_id(author, title) == expected
+
 
 class TestNormalizeAuthorName:
     def test_natural_order_unchanged(self) -> None:
@@ -167,6 +198,39 @@ class TestNormalizeAuthorName:
 
     def test_no_comma_no_change(self) -> None:
         assert ClassificationPipeline._normalize_author_name("Malcolm Guite") == "Malcolm Guite"
+
+    def test_life_dates_stripped(self) -> None:
+        assert (
+            ClassificationPipeline._normalize_author_name(
+                "Coleridge, Samuel Taylor, 1772-1834"
+            )
+            == "Samuel Taylor Coleridge"
+        )
+
+    def test_life_dates_variants_stripped(self) -> None:
+        for raw, expected in [
+            ("MacDonald, George, 1824-1905", "George MacDonald"),
+            ("Nouwen, Henri J. M., 1932-1996", "Henri J. M. Nouwen"),
+            ("Traherne, Thomas, 1637?-1674", "Thomas Traherne"),
+            ("Someone, Jane, b. 1900", "Jane Someone"),
+            ("Ancient, Author, ca. 1200", "Author Ancient"),
+            ("Living, Person, 1950-", "Person Living"),
+        ]:
+            assert ClassificationPipeline._normalize_author_name(raw) == expected, raw
+
+    def test_surname_with_dates_only(self) -> None:
+        """No given name — return the surname, not a date fragment."""
+        assert (
+            ClassificationPipeline._normalize_author_name("Coleridge, 1772-1834")
+            == "Coleridge"
+        )
+
+    def test_non_date_qualifier_preserved(self) -> None:
+        """A suffix that is not a date must keep the pre-existing behaviour."""
+        assert (
+            ClassificationPipeline._normalize_author_name("Smith, John, Jr.")
+            == "John, Jr. Smith"
+        )
 
     def test_empty_parts_not_swapped(self) -> None:
         """A trailing comma with no given name should not corrupt the output."""

@@ -336,14 +336,43 @@ class ClassificationPipeline:
         (e.g. "Guite, Malcolm") or natural order ("Malcolm Guite").
         This normalizes to natural order so that work_id slugs are
         consistent regardless of the metadata format.
+
+        MARC-style records append life dates as a further comma-separated
+        segment ("Coleridge, Samuel Taylor, 1772-1834"). Those are dropped:
+        left in, they slugified into a *second* work_id for an author who
+        already had one, which split 14,704 PART_OF edges onto a duplicate
+        Work node (found 2026-08-13).
         """
+        import re
+
         author = author.strip()
-        if "," in author:
-            # Split on the first comma only — handles "Guite, Malcolm"
-            # but also "Guite, Malcolm J." or "van der Berg, Jan"
-            parts = [p.strip() for p in author.split(",", 1)]
-            if len(parts) == 2 and parts[0] and parts[1]:
-                author = f"{parts[1]} {parts[0]}"
+        if "," not in author:
+            return author
+
+        parts = [p.strip() for p in author.split(",")]
+
+        # A trailing segment that is only a life date / bibliographic
+        # qualifier: "1772-1834", "1637?-1674", "1950-", "b. 1900",
+        # "ca. 1200", "fl. 1550", "d. 1674".
+        date_qualifier = re.compile(
+            r"^(?:b|d|ca|fl|active)?\.?\s*\d{1,4}\??"
+            r"(?:\s*[-\u2013\u2014]\s*\d{0,4}\??)?\.?$",
+            re.IGNORECASE,
+        )
+
+        while len(parts) > 2 and date_qualifier.match(parts[-1]):
+            parts.pop()
+
+        # "Coleridge, 1772-1834" — surname plus dates, no given name.
+        if len(parts) == 2 and date_qualifier.match(parts[-1]) and parts[0]:
+            return parts[0]
+
+        # Reorder to natural order. Segments beyond the first stay joined
+        # so non-date suffixes keep their prior behaviour ("Smith, John, Jr."
+        # -> "John, Jr. Smith").
+        if len(parts) >= 2 and parts[0] and all(parts[1:]):
+            return f"{', '.join(parts[1:])} {parts[0]}"
+
         return author
 
     @staticmethod
