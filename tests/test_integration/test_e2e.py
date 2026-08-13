@@ -124,7 +124,7 @@ class TestDatabaseConnectivity:
     async def test_neo4j_read_write(self, clean_storage: StorageManager) -> None:
         """Verify Neo4j write + read round trip."""
         await clean_storage.graph.upsert_work_node({
-            "work_id": "shakespeare--hamlet",
+            "work_id": "test--shakespeare-hamlet",
             "title": "Hamlet",
             "author": "William Shakespeare",
             "source_class": "primary",
@@ -132,7 +132,7 @@ class TestDatabaseConnectivity:
         })
         results = await clean_storage.neo4j.execute_read(
             "MATCH (w:Work {work_id: $wid}) RETURN w.title AS title",
-            {"wid": "shakespeare--hamlet"},
+            {"wid": "test--shakespeare-hamlet"},
         )
         assert len(results) == 1
         assert results[0]["title"] == "Hamlet"
@@ -142,7 +142,7 @@ class TestDatabaseConnectivity:
         await _make_test_author(clean_storage)
         # Create a work first
         await clean_storage.works.create({
-            "work_id": "shakespeare--sonnets",
+            "work_id": "test--shakespeare-sonnets",
             "title": "Sonnets",
             "author": "shakespeare",
             "source_class": "primary",
@@ -158,7 +158,7 @@ class TestDatabaseConnectivity:
         # Store chunks at each granularity
         for gran in ("macro", "meso", "micro"):
             chunk_id = await clean_storage.chunks.create({
-                "work_id": "shakespeare--sonnets",
+                "work_id": "test--shakespeare-sonnets",
                 "text": f"Test chunk at {gran} granularity",
                 "granularity": gran,
                 "source_class": "primary",
@@ -167,7 +167,7 @@ class TestDatabaseConnectivity:
             assert chunk_id is not None
 
         # Verify all three granularities stored
-        all_chunks = await clean_storage.chunks.list_by_work("shakespeare--sonnets")
+        all_chunks = await clean_storage.chunks.list_by_work("test--shakespeare-sonnets")
         granularities = {c["granularity"] for c in all_chunks}
         assert granularities == {"macro", "meso", "micro"}
 
@@ -175,7 +175,7 @@ class TestDatabaseConnectivity:
         """Verify embedding store + similarity search works with pgvector."""
         await _make_test_author(clean_storage)
         await clean_storage.works.create({
-            "work_id": "shakespeare--sonnets",
+            "work_id": "test--shakespeare-sonnets",
             "title": "Sonnets",
             "author": "shakespeare",
             "source_class": "primary",
@@ -189,7 +189,7 @@ class TestDatabaseConnectivity:
         })
 
         chunk_id = await clean_storage.chunks.create({
-            "work_id": "shakespeare--sonnets",
+            "work_id": "test--shakespeare-sonnets",
             "text": "Shall I compare thee to a summer's day?",
             "granularity": "micro",
             "source_class": "primary",
@@ -213,14 +213,14 @@ class TestDatabaseConnectivity:
         # Create two chunk nodes
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "chunk-1",
-            "work_id": "shakespeare--hamlet",
+            "work_id": "test--shakespeare-hamlet",
             "text_preview": "To be or not to be",
             "granularity": "micro",
             "source_class": "primary",
         })
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "chunk-2",
-            "work_id": "shakespeare--hamlet",
+            "work_id": "test--shakespeare-hamlet",
             "text_preview": "The slings and arrows",
             "granularity": "micro",
             "source_class": "primary",

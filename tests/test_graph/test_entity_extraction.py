@@ -48,7 +48,7 @@ class TestExtractionResponseParsing:
                 "persons": [
                     {
                         "name": "Samuel Taylor Coleridge",
-                        "canonical_name": "samuel-taylor-coleridge",
+                        "canonical_name": "test--stc",
                         "role": "discussed",
                     },
                 ],

@@ -37,6 +37,7 @@ from author_library.tools.query import (
     handle_find_quotes,
     handle_trace_theme,
 )
+from tests.conftest import TEST_NAMESPACE
 
 from .conftest import SKIP_NO_ANTHROPIC, SKIP_NO_DB
 
@@ -119,18 +120,24 @@ async def _clean_query_test_data(storage: StorageManager) -> None:
     await storage.pg.execute("DELETE FROM chunks")
     await storage.pg.execute("DELETE FROM works")
     await storage.pg.execute("DELETE FROM authors")
-    for prefix in ("shakespeare--",):
-        await storage.neo4j.execute_write(
-            "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
-            {"prefix": prefix},
-        )
-        await storage.neo4j.execute_write(
-            "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
-            {"prefix": prefix},
-        )
+    # Neo4j cleanup must stay inside the test-- namespace. Never orphan-sweep
+    # (WHERE NOT (n)--()): that deletes unreferenced PRODUCTION entities too,
+    # which is how 3 real Author nodes were lost on 2026-08-13.
+    await storage.neo4j.execute_write(
+        "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
+        {"prefix": TEST_NAMESPACE},
+    )
+    await storage.neo4j.execute_write(
+        "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
+        {"prefix": TEST_NAMESPACE},
+    )
     for label in ("Theme", "Person", "Concept", "Argument", "Author"):
         await storage.neo4j.execute_write(
-            f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+            f"MATCH (n:{label}) "
+            "WHERE n.canonical_name STARTS WITH $prefix "
+            "   OR n.author_id STARTS WITH $prefix "
+            "DETACH DELETE n",
+            {"prefix": TEST_NAMESPACE},
         )
 
 

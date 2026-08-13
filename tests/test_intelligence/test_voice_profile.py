@@ -33,7 +33,7 @@ class TestVoiceProfileModel:
     def test_valid_voice_profile(self) -> None:
         """A fully populated voice profile should validate."""
         profile = VoiceProfile(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             register="academic but accessible, conversational scholarly",
             sentence_patterns=[
                 "favors complex sentences with embedded clauses",
@@ -55,7 +55,7 @@ class TestVoiceProfileModel:
             example_passages=["A representative passage of the author's work."],
             confidence=0.85,
         )
-        assert profile.author_id == "malcolm-guite"
+        assert profile.author_id == "test--guite"
         assert profile.confidence == 0.85
         assert len(profile.sentence_patterns) == 2
 
@@ -149,13 +149,13 @@ async def test_voice_extraction_integration(
 
     extractor = VoiceProfileExtractor(app_settings)
     profile = await extractor.extract(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         author_name="Malcolm Guite",
         work_repo=work_repo,
         chunk_repo=chunk_repo,
     )
 
-    assert profile.author_id == "malcolm-guite"
+    assert profile.author_id == "test--guite"
     assert 0.0 <= profile.confidence <= 1.0
     assert profile.register  # non-empty
     assert len(profile.characteristic_phrases) > 0
@@ -169,7 +169,7 @@ async def test_voice_extraction_integration(
 def _make_chunk_dict(
     section_type: str,
     source_class: str = "primary",
-    work_id: str = "guite--test",
+    work_id: str = "test--test",
 ) -> dict:
     """Create a minimal chunk dict as returned by chunk_repo.list_by_work."""
     return {
@@ -199,7 +199,7 @@ class TestVoiceProfileSectionTypeFiltering:
 
         extractor = self._extractor()
         work = {
-            "work_id": "guite--faith-hope",
+            "work_id": "test--faith-hope",
             "source_class": "primary",
             "source_metadata": {"voice_profile_eligible": True},
         }
@@ -213,7 +213,7 @@ class TestVoiceProfileSectionTypeFiltering:
         ]
 
         chunks = await extractor._gather_eligible_chunks(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             work_repo=work_repo,
             chunk_repo=chunk_repo,
         )
@@ -227,7 +227,7 @@ class TestVoiceProfileSectionTypeFiltering:
 
         extractor = self._extractor()
         work = {
-            "work_id": "guite--faith-hope",
+            "work_id": "test--faith-hope",
             "source_class": "primary",
             "source_metadata": {"voice_profile_eligible": True},
         }
@@ -242,7 +242,7 @@ class TestVoiceProfileSectionTypeFiltering:
         ]
 
         chunks = await extractor._gather_eligible_chunks(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             work_repo=work_repo,
             chunk_repo=chunk_repo,
         )
@@ -259,7 +259,7 @@ class TestVoiceProfileSectionTypeFiltering:
 
         extractor = self._extractor()
         work = {
-            "work_id": "guite--faith-hope",
+            "work_id": "test--faith-hope",
             "source_class": "primary",
             "source_metadata": {"voice_profile_eligible": True},
         }
@@ -276,7 +276,7 @@ class TestVoiceProfileSectionTypeFiltering:
         ]
 
         chunks = await extractor._gather_eligible_chunks(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             work_repo=work_repo,
             chunk_repo=chunk_repo,
         )
@@ -291,7 +291,7 @@ class TestVoiceProfileSectionTypeFiltering:
 
         extractor = self._extractor()
         work = {
-            "work_id": "guite--faith-hope",
+            "work_id": "test--faith-hope",
             "source_class": "primary",
             "source_metadata": {"voice_profile_eligible": True},
         }
@@ -302,7 +302,7 @@ class TestVoiceProfileSectionTypeFiltering:
         chunk_repo.list_by_work.return_value = [
             {
                 "id": "c1",
-                "work_id": "guite--faith-hope",
+                "work_id": "test--faith-hope",
                 "text": "text",
                 "granularity": "meso",
                 "source_class": "primary",
@@ -311,7 +311,7 @@ class TestVoiceProfileSectionTypeFiltering:
             },
             {
                 "id": "c2",
-                "work_id": "guite--faith-hope",
+                "work_id": "test--faith-hope",
                 "text": "text",
                 "granularity": "meso",
                 "source_class": "primary",
@@ -321,7 +321,7 @@ class TestVoiceProfileSectionTypeFiltering:
         ]
 
         chunks = await extractor._gather_eligible_chunks(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             work_repo=work_repo,
             chunk_repo=chunk_repo,
         )
@@ -335,7 +335,7 @@ class TestVoiceProfileSectionTypeFiltering:
 
         extractor = self._extractor()
         work = {
-            "work_id": "guite--faith-hope",
+            "work_id": "test--faith-hope",
             "source_class": "primary",
             "source_metadata": {"voice_profile_eligible": True},
         }
@@ -346,7 +346,7 @@ class TestVoiceProfileSectionTypeFiltering:
         chunk_repo.list_by_work.return_value = [
             {
                 "id": "c1",
-                "work_id": "guite--faith-hope",
+                "work_id": "test--faith-hope",
                 "text": "text",
                 "granularity": "meso",
                 "source_class": "primary",
@@ -356,7 +356,7 @@ class TestVoiceProfileSectionTypeFiltering:
         ]
 
         chunks = await extractor._gather_eligible_chunks(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             work_repo=work_repo,
             chunk_repo=chunk_repo,
         )
@@ -417,7 +417,7 @@ class TestVoiceExtractionErrors:
 
         with pytest.raises(IntelligenceError, match="Insufficient primary corpus"):
             await extractor.extract(
-                author_id="malcolm-guite",
+                author_id="test--guite",
                 author_name="Malcolm Guite",
                 work_repo=PgWorkRepository(pg_pool),
                 chunk_repo=PgChunkRepository(pg_pool),

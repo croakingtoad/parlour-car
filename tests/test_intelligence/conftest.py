@@ -18,6 +18,7 @@ from author_library.storage.manager import StorageManager
 from author_library.storage.migrations.runner import run_migrations
 from author_library.storage.neo4j import Neo4jConnection
 from author_library.storage.postgres import PostgresPool
+from tests.conftest import TEST_NAMESPACE
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -65,7 +66,10 @@ async def pg_pool(db_settings: DatabaseSettings) -> AsyncIterator[PostgresPool]:
 
 
 @pytest.fixture
-async def neo4j_conn(db_settings: DatabaseSettings) -> AsyncIterator[Neo4jConnection]:
+async def neo4j_conn(
+    db_settings: DatabaseSettings,
+    assert_graph_is_disposable: None,
+) -> AsyncIterator[Neo4jConnection]:
     """Provide a connected Neo4j driver."""
     conn = Neo4jConnection(db_settings)
     await conn.connect()
@@ -75,7 +79,10 @@ async def neo4j_conn(db_settings: DatabaseSettings) -> AsyncIterator[Neo4jConnec
 
 
 @pytest.fixture
-async def storage(db_settings: DatabaseSettings) -> AsyncIterator[StorageManager]:
+async def storage(
+    db_settings: DatabaseSettings,
+    assert_graph_is_disposable: None,
+) -> AsyncIterator[StorageManager]:
     """Provide a fully connected StorageManager."""
     mgr = StorageManager(db_settings, pg_min_pool=1, pg_max_pool=3)
     await mgr.connect(run_pg_migrations=True, init_neo4j_schema=True)
@@ -105,21 +112,33 @@ async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
     """Clean up Neo4j test data after each test."""
     yield
     with contextlib.suppress(Exception):
-        # Scoped cleanup — only delete test-created nodes
-        # IMPORTANT: Never use unscoped MATCH (n) DETACH DELETE n
-        # which would wipe production data if TEST_NEO4J_URL is misconfigured.
-        for prefix in ("test--", "malcolm-guite--"):
-            await neo4j_conn.execute_write(
-                "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
-                {"prefix": prefix},
-            )
-            await neo4j_conn.execute_write(
-                "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
-                {"prefix": prefix},
-            )
+        # Scoped cleanup — only delete test-created nodes.
+        #
+        # IMPORTANT: every pattern here MUST be scoped to the test--
+        # namespace. Three rules, all learned the hard way:
+        #   1. Never use unscoped MATCH (n) DETACH DELETE n.
+        #   2. Never add a real author's prefix here. This list used to
+        #      include the production Guite prefix, which deleted all 5
+        #      production Guite works (3,495 chunks) on 2026-08-13. Test
+        #      data must live under test-- so cleanup cannot reach real works.
+        #   3. Never orphan-sweep (MATCH (n:Label) WHERE NOT (n)--()).
+        #      It deletes any production entity that happens to be
+        #      unreferenced, which is how three real Author nodes died.
+        await neo4j_conn.execute_write(
+            "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
+            {"prefix": TEST_NAMESPACE},
+        )
+        await neo4j_conn.execute_write(
+            "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
+            {"prefix": TEST_NAMESPACE},
+        )
         for label in ("Theme", "Person", "Concept", "Argument", "Author"):
             await neo4j_conn.execute_write(
-                f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+                f"MATCH (n:{label}) "
+                "WHERE n.canonical_name STARTS WITH $prefix "
+                "   OR n.author_id STARTS WITH $prefix "
+                "DETACH DELETE n",
+                {"prefix": TEST_NAMESPACE},
             )
 
 
@@ -128,15 +147,15 @@ async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 
 SAMPLE_AUTHOR: dict[str, str] = {
-    "id": "malcolm-guite",
+    "id": "test--guite",
     "canonical_name": "Malcolm Guite",
 }
 
 
 SAMPLE_PRIMARY_WORK: dict[str, Any] = {
-    "work_id": "malcolm-guite--faith-hope-and-poetry",
+    "work_id": "test--faith-hope-and-poetry",
     "title": "Faith, Hope and Poetry",
-    "author": "malcolm-guite",
+    "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
         "Authored by Malcolm Guite, the subject author of this collection"
@@ -152,9 +171,9 @@ SAMPLE_PRIMARY_WORK: dict[str, Any] = {
 
 
 SAMPLE_PRIMARY_WORK_2: dict[str, Any] = {
-    "work_id": "malcolm-guite--mariner",
+    "work_id": "test--mariner",
     "title": "Mariner: A Voyage with Samuel Taylor Coleridge",
-    "author": "malcolm-guite",
+    "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
         "Authored by Malcolm Guite, the subject author of this collection"
@@ -172,7 +191,7 @@ SAMPLE_PRIMARY_WORK_2: dict[str, Any] = {
 # Representative literary text chunks for testing
 PRIMARY_CHUNKS: list[dict[str, Any]] = [
     {
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text": (
             "Coleridge makes a vital distinction between what he calls the Primary "
             "Imagination, which is 'the living power and prime agent of all human "
@@ -188,7 +207,7 @@ PRIMARY_CHUNKS: list[dict[str, Any]] = [
         "position": 1,
     },
     {
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text": (
             "The sacramental vision at the heart of Coleridge's poetics sees every "
             "created thing as potentially revelatory, a window onto the divine. This "
@@ -203,7 +222,7 @@ PRIMARY_CHUNKS: list[dict[str, Any]] = [
         "position": 2,
     },
     {
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text": (
             "I want to argue that the best poetry does not simply describe religious "
             "experience from the outside, but actually becomes a means of mediating "
@@ -218,7 +237,7 @@ PRIMARY_CHUNKS: list[dict[str, Any]] = [
         "position": 3,
     },
     {
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text": (
             "Herbert's poetry, like all great devotional verse, achieves its power "
             "not through abstraction but through a startling particularity. When he "
@@ -233,7 +252,7 @@ PRIMARY_CHUNKS: list[dict[str, Any]] = [
         "position": 4,
     },
     {
-        "work_id": "malcolm-guite--mariner",
+        "work_id": "test--mariner",
         "text": (
             "What draws me to Coleridge is not simply his genius as a poet but his "
             "extraordinary capacity for self-reflection. He was always examining his "
@@ -248,7 +267,7 @@ PRIMARY_CHUNKS: list[dict[str, Any]] = [
         "position": 5,
     },
     {
-        "work_id": "malcolm-guite--mariner",
+        "work_id": "test--mariner",
         "text": (
             "In an earlier book I argued that Coleridge's distinction between Primary "
             "and Secondary Imagination remains one of the most useful frameworks we "

@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 
-from author_library.config import DatabaseSettings, Settings
+from author_library.config import Settings
 from author_library.storage.manager import StorageManager
+from tests.conftest import TEST_NAMESPACE
 
 if TYPE_CHECKING:  # pragma: no cover
     from collections.abc import AsyncIterator
@@ -103,19 +104,29 @@ async def _clean_all(storage: StorageManager) -> None:
     await storage.pg.execute("DELETE FROM authors")
     await storage.pg.execute("DELETE FROM ingestion_lessons")
 
-    # Neo4j: scoped cleanup — only delete test-created nodes
-    # IMPORTANT: Never use unscoped MATCH (n) DETACH DELETE n
-    # which would wipe production data if TEST_NEO4J_URL is misconfigured.
-    for prefix in ("test--", "shakespeare--", "guite--"):
-        await storage.neo4j.execute_write(
-            "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
-            {"prefix": prefix},
-        )
-        await storage.neo4j.execute_write(
-            "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
-            {"prefix": prefix},
-        )
+    # Neo4j: scoped cleanup — only delete test-created nodes.
+    #
+    # IMPORTANT: every pattern here MUST be scoped to the test-- namespace.
+    #   1. Never use unscoped MATCH (n) DETACH DELETE n.
+    #   2. Never list a real author's prefix. The sibling fixture in
+    #      test_intelligence carried the production Guite prefix and deleted
+    #      all 5 production Guite works (3,495 chunks) on 2026-08-13.
+    #   3. Never orphan-sweep (MATCH (n:Label) WHERE NOT (n)--()). It
+    #      deletes unreferenced PRODUCTION entities; that is how three real
+    #      Author nodes were lost.
+    await storage.neo4j.execute_write(
+        "MATCH (c:Chunk) WHERE c.work_id STARTS WITH $prefix DETACH DELETE c",
+        {"prefix": TEST_NAMESPACE},
+    )
+    await storage.neo4j.execute_write(
+        "MATCH (w:Work) WHERE w.work_id STARTS WITH $prefix DETACH DELETE w",
+        {"prefix": TEST_NAMESPACE},
+    )
     for label in ("Theme", "Person", "Concept", "Argument", "Author"):
         await storage.neo4j.execute_write(
-            f"MATCH (n:{label}) WHERE NOT (n)--() DELETE n", {}
+            f"MATCH (n:{label}) "
+            "WHERE n.canonical_name STARTS WITH $prefix "
+            "   OR n.author_id STARTS WITH $prefix "
+            "DETACH DELETE n",
+            {"prefix": TEST_NAMESPACE},
         )

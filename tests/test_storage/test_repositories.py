@@ -24,14 +24,14 @@ if TYPE_CHECKING:
 # -- Helpers -----------------------------------------------------------------
 
 SAMPLE_AUTHOR: dict[str, str] = {
-    "id": "malcolm-guite",
+    "id": "test--guite",
     "canonical_name": "Malcolm Guite",
 }
 
 SAMPLE_WORK: dict[str, Any] = {
-    "work_id": "malcolm-guite--faith-hope-and-poetry",
+    "work_id": "test--faith-hope-and-poetry",
     "title": "Faith, Hope and Poetry",
-    "author": "malcolm-guite",
+    "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
         "Authored by Malcolm Guite, the subject author of this collection"
@@ -46,7 +46,7 @@ SAMPLE_WORK: dict[str, Any] = {
 }
 
 SAMPLE_CHUNK: dict[str, Any] = {
-    "work_id": "malcolm-guite--faith-hope-and-poetry",
+    "work_id": "test--faith-hope-and-poetry",
     "text": (
         "The imagination is not merely a faculty for producing images; "
         "it is the living power and prime agent of all human perception."
@@ -86,7 +86,7 @@ async def test_work_crud(pg_pool: PostgresPool) -> None:
     assert work["source_class"] == "primary"
 
     # List by author
-    works = await repo.list_by_author("malcolm-guite")
+    works = await repo.list_by_author("test--guite")
     assert len(works) == 1
 
     # Update
@@ -275,7 +275,7 @@ async def test_thematic_crud(pg_pool: PostgresPool) -> None:
 
     # Create entry
     entry_id = await thematic.create_entry({
-        "author_id": "malcolm-guite",
+        "author_id": "test--guite",
         "theme": "Imagination and Perception",
         "author_stance": "Imagination is the primary faculty of perception",
         "related_themes": ["Coleridge", "Romanticism"],
@@ -288,7 +288,7 @@ async def test_thematic_crud(pg_pool: PostgresPool) -> None:
     assert entry["theme"] == "Imagination and Perception"
 
     # List entries
-    entries = await thematic.list_entries("malcolm-guite")
+    entries = await thematic.list_entries("test--guite")
     assert len(entries) == 1
 
     # Add appearance
@@ -324,25 +324,25 @@ async def test_voice_profile_store_and_get(pg_pool: PostgresPool) -> None:
         ],
         "vocabulary_level": "elevated",
     }
-    v1_id = await profiles.store("malcolm-guite", profile_data, version=1)
+    v1_id = await profiles.store("test--guite", profile_data, version=1)
     assert isinstance(v1_id, uuid.UUID)
 
     # Get current
-    current = await profiles.get_current("malcolm-guite")
+    current = await profiles.get_current("test--guite")
     assert current is not None
     assert current["version"] == 1
     assert current["is_current"] is True
 
     # Store version 2 — should supersede v1
     v2_data = {**profile_data, "register": "more conversational"}
-    await profiles.store("malcolm-guite", v2_data, version=2)
+    await profiles.store("test--guite", v2_data, version=2)
 
-    current = await profiles.get_current("malcolm-guite")
+    current = await profiles.get_current("test--guite")
     assert current is not None
     assert current["version"] == 2
 
     # List all versions
-    versions = await profiles.list_versions("malcolm-guite")
+    versions = await profiles.list_versions("test--guite")
     assert len(versions) == 2
 
 
@@ -441,9 +441,9 @@ async def test_chunk_creates_part_of_edge_to_work(neo4j_conn: Neo4jConnection) -
 
     # Create work node first (as ingestion pipeline does)
     await graph.upsert_work_node({
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "title": "Faith, Hope and Poetry",
-        "author": "malcolm-guite",
+        "author": "test--guite",
         "source_class": "primary",
         "publication_year": 2010,
     })
@@ -451,7 +451,7 @@ async def test_chunk_creates_part_of_edge_to_work(neo4j_conn: Neo4jConnection) -
     # Create chunk node — should automatically create PART_OF edge
     await graph.upsert_chunk_node({
         "chunk_id": "chunk-001",
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "text_preview": "The imagination is not merely a faculty...",
         "granularity": "meso",
         "source_class": "primary",
@@ -464,7 +464,7 @@ async def test_chunk_creates_part_of_edge_to_work(neo4j_conn: Neo4jConnection) -
         {"chunk_id": "chunk-001"},
     )
     assert len(results) == 1
-    assert results[0]["work_id"] == "malcolm-guite--faith-hope-and-poetry"
+    assert results[0]["work_id"] == "test--faith-hope-and-poetry"
     assert results[0]["title"] == "Faith, Hope and Poetry"
 
 
@@ -473,11 +473,11 @@ async def test_all_chunks_connected_to_work_via_part_of(neo4j_conn: Neo4jConnect
     await neo4j_conn.init_schema()
     graph = Neo4jGraphRepository(neo4j_conn)
 
-    work_id = "malcolm-guite--faith-hope-and-poetry"
+    work_id = "test--faith-hope-and-poetry"
     await graph.upsert_work_node({
         "work_id": work_id,
         "title": "Faith, Hope and Poetry",
-        "author": "malcolm-guite",
+        "author": "test--guite",
         "source_class": "primary",
         "publication_year": 2010,
     })
@@ -517,9 +517,9 @@ async def test_work_node_has_correct_properties(neo4j_conn: Neo4jConnection) -> 
     graph = Neo4jGraphRepository(neo4j_conn)
 
     await graph.upsert_work_node({
-        "work_id": "malcolm-guite--faith-hope-and-poetry",
+        "work_id": "test--faith-hope-and-poetry",
         "title": "Faith, Hope and Poetry",
-        "author": "malcolm-guite",
+        "author": "test--guite",
         "source_class": "primary",
         "publication_year": 2010,
     })
@@ -529,11 +529,11 @@ async def test_work_node_has_correct_properties(neo4j_conn: Neo4jConnection) -> 
         RETURN w.title AS title, w.author AS author,
                w.source_class AS source_class,
                w.publication_year AS publication_year""",
-        {"work_id": "malcolm-guite--faith-hope-and-poetry"},
+        {"work_id": "test--faith-hope-and-poetry"},
     )
     assert len(results) == 1
     assert results[0]["title"] == "Faith, Hope and Poetry"
-    assert results[0]["author"] == "malcolm-guite"
+    assert results[0]["author"] == "test--guite"
     assert results[0]["source_class"] == "primary"
     assert results[0]["publication_year"] == 2010
 

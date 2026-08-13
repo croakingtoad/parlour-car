@@ -185,7 +185,7 @@ class TestAuthorUpsertDuringIngestion:
 
         result = await pipeline.ingest(
             test_file,
-            subject_author_id="malcolm-guite",
+            subject_author_id="test--guite",
         )
 
         # Verify PG author upsert was called
@@ -196,7 +196,7 @@ class TestAuthorUpsertDuringIngestion:
         ]
         assert len(author_upsert_calls) == 1
         call_args = author_upsert_calls[0]
-        assert call_args[0][1] == "malcolm-guite"  # author id
+        assert call_args[0][1] == "test--guite"  # author id
         assert call_args[0][2] == "Malcolm Guite"  # canonical name
 
         # Verify Neo4j Author node + AUTHORED edge
@@ -207,7 +207,7 @@ class TestAuthorUpsertDuringIngestion:
         ]
         assert len(author_neo4j_calls) == 1
         neo4j_params = author_neo4j_calls[0][0][1]
-        assert neo4j_params["author_id"] == "malcolm-guite"
+        assert neo4j_params["author_id"] == "test--guite"
         assert neo4j_params["name"] == "Malcolm Guite"
         assert neo4j_params["work_id"] == "guite--bibliography"
 

@@ -187,9 +187,9 @@ class TestGatherer:
         """Speaker filter narrows by work author."""
         mock_storage.pg.fetch_all = AsyncMock(return_value=[])
 
-        result = await gatherer.gather(speaker="malcolm-guite")
+        result = await gatherer.gather(speaker="test--guite")
 
-        assert result.filters_applied["speaker"] == "malcolm-guite"
+        assert result.filters_applied["speaker"] == "test--guite"
         call_args = mock_storage.pg.fetch_all.call_args
         sql = call_args[0][0]
         assert "author" in sql.lower()
