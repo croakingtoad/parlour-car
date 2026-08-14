@@ -41,7 +41,7 @@ class TestThematicModels:
             ),
             appearances=[
                 ThematicAppearance(
-                    work_id="malcolm-guite--faith-hope-and-poetry",
+                    work_id="test--faith-hope-and-poetry",
                     chapters=["Chapter 1", "Chapter 3"],
                     treatment_summary="Central argument developed across multiple chapters",
                 ),
@@ -51,7 +51,7 @@ class TestThematicModels:
                 KeyPassage(
                     chunk_id="abc123",
                     text_excerpt="the poem functions sacramentally",
-                    work_id="malcolm-guite--faith-hope-and-poetry",
+                    work_id="test--faith-hope-and-poetry",
                 ),
             ],
         )
@@ -136,13 +136,13 @@ class TestFormatChunks:
         """Formatted output should include work_id."""
         chunks = [
             {
-                "work_id": "malcolm-guite--faith",
+                "work_id": "test--faith",
                 "text": "Sample text here.",
                 "id": "chunk-1",
             }
         ]
         result = _format_chunks_for_prompt(chunks)
-        assert "malcolm-guite--faith" in result
+        assert "test--faith" in result
         assert "Sample text here." in result
         assert "chunk-1" in result
 
@@ -185,7 +185,7 @@ async def test_thematic_index_generation_integration(
 
     generator = ThematicIndexGenerator(app_settings)
     themes = await generator.generate(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         author_name="Malcolm Guite",
         work_repo=work_repo,
         chunk_repo=chunk_repo,
@@ -201,5 +201,5 @@ async def test_thematic_index_generation_integration(
     ), f"Expected core themes, got: {theme_names}"
 
     # Verify storage
-    stored = await thematic_repo.list_entries("malcolm-guite")
+    stored = await thematic_repo.list_entries("test--guite")
     assert len(stored) == len(themes)

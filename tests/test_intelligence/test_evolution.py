@@ -34,7 +34,7 @@ class TestEvolutionModels:
     def test_evolution_step_creation(self) -> None:
         """An evolution step should validate."""
         step = EvolutionStep(
-            work_id="malcolm-guite--faith-hope-and-poetry",
+            work_id="test--faith-hope-and-poetry",
             publication_year=2010,
             summary="Introduces the sacramental imagination framework",
             key_chunk_ids=["chunk-1", "chunk-2"],
@@ -46,7 +46,7 @@ class TestEvolutionModels:
     def test_evolution_step_with_self_reflection(self) -> None:
         """An evolution step with self-reflection should validate."""
         step = EvolutionStep(
-            work_id="malcolm-guite--mariner",
+            work_id="test--mariner",
             publication_year=2017,
             summary="Revises earlier understanding of Imagination distinction",
             key_chunk_ids=["chunk-6"],
@@ -70,12 +70,12 @@ class TestEvolutionModels:
             ),
             steps=[
                 EvolutionStep(
-                    work_id="malcolm-guite--faith-hope-and-poetry",
+                    work_id="test--faith-hope-and-poetry",
                     publication_year=2010,
                     summary="Initial framework established",
                 ),
                 EvolutionStep(
-                    work_id="malcolm-guite--mariner",
+                    work_id="test--mariner",
                     publication_year=2017,
                     summary="Framework revisited and refined",
                     self_reflection=True,
@@ -136,7 +136,7 @@ async def test_evolution_analysis_integration(
 
         # Create chunk nodes in Neo4j for edge creation
         for chunk in await chunk_repo.list_by_work(
-            "malcolm-guite--faith-hope-and-poetry", granularity="meso"
+            "test--faith-hope-and-poetry", granularity="meso"
         ):
             await graph_repo.upsert_chunk_node(
                 {
@@ -157,12 +157,12 @@ async def test_evolution_analysis_integration(
                 ),
                 appearances=[
                     ThematicAppearance(
-                        work_id="malcolm-guite--faith-hope-and-poetry",
+                        work_id="test--faith-hope-and-poetry",
                         chapters=["Chapter 2"],
                         treatment_summary="Introduces the Coleridgean framework",
                     ),
                     ThematicAppearance(
-                        work_id="malcolm-guite--mariner",
+                        work_id="test--mariner",
                         chapters=["Chapter 4"],
                         treatment_summary="Revisits and refines the framework",
                     ),
@@ -172,7 +172,7 @@ async def test_evolution_analysis_integration(
 
         analyzer = ThematicEvolutionAnalyzer(app_settings)
         evolutions = await analyzer.analyze(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             themes=themes,
             work_repo=work_repo,
             chunk_repo=chunk_repo,

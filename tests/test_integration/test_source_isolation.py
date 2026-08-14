@@ -112,7 +112,7 @@ class TestClassificationGate:
 
         # Insert a secondary work
         await clean_storage.works.create({
-            "work_id": "guite--critic-analysis",
+            "work_id": "test--critic-analysis",
             "title": "A Critic's Analysis",
             "author": "guite",
             "source_class": "secondary",
@@ -138,7 +138,7 @@ class TestClassificationGate:
 
         for sc in ("primary", "secondary", "contextual", "tertiary"):
             await clean_storage.works.create({
-                "work_id": f"guite--test-{sc}",
+                "work_id": f"test--test-{sc}",
                 "title": f"Test {sc.title()} Work",
                 "author": "guite",
                 "source_class": sc,
@@ -173,14 +173,14 @@ class TestGraphSourceIsolation:
         # Create primary and secondary chunk nodes
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "primary-chunk-1",
-            "work_id": "guite--faith-imagination",
+            "work_id": "test--faith-imagination",
             "text_preview": "The imagination is not a faculty for creating illusions",
             "granularity": "meso",
             "source_class": "primary",
         })
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "secondary-chunk-1",
-            "work_id": "guite--critic-analysis",
+            "work_id": "test--critic-analysis",
             "text_preview": "Dr. Smith argues that Guite's poetic theology",
             "granularity": "meso",
             "source_class": "secondary",
@@ -207,14 +207,14 @@ class TestGraphSourceIsolation:
         """Primary source chunks can have MAKES_ARGUMENT edges."""
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "primary-arg-1",
-            "work_id": "guite--faith-imagination",
+            "work_id": "test--faith-imagination",
             "text_preview": "Poetry is a form of prayer",
             "granularity": "meso",
             "source_class": "primary",
         })
         await clean_storage.graph.upsert_chunk_node({
             "chunk_id": "primary-arg-2",
-            "work_id": "guite--faith-imagination",
+            "work_id": "test--faith-imagination",
             "text_preview": "The poet's task is to hold tension",
             "granularity": "meso",
             "source_class": "primary",

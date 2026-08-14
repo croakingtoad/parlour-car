@@ -54,7 +54,7 @@ class TestTerminologyModels:
     def test_terminology_map_creation(self) -> None:
         """A complete terminology map should validate."""
         tm = TerminologyMap(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             mappings=[
                 TermMapping(
                     variant="Secondary Imagination",
@@ -189,11 +189,11 @@ async def test_terminology_normalization_integration(
     normalizer = TerminologyNormalizer(app_settings)
 
     result = await normalizer.normalize(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         author_name="Malcolm Guite",
         chunks=PRIMARY_CHUNKS,
     )
 
-    assert result.author_id == "malcolm-guite"
+    assert result.author_id == "test--guite"
     # Should have identified some canonical terms from the literary text
     assert len(result.canonical_terms) > 0 or len(result.mappings) > 0

@@ -100,7 +100,7 @@ async def test_store_and_retrieve_profile(pg_pool: PostgresPool, app_settings: S
     manager = VoiceProfileManager(app_settings)
 
     profile = VoiceProfile(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         register="academic but accessible, conversational scholarly",
         sentence_patterns=[
             "favors complex sentences with embedded clauses",
@@ -129,11 +129,11 @@ async def test_store_and_retrieve_profile(pg_pool: PostgresPool, app_settings: S
 
     # Retrieve
     current = await manager.get_current(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         voice_repo=voice_repo,
     )
     assert current is not None
-    assert current.author_id == "malcolm-guite"
+    assert current.author_id == "test--guite"
     assert current.register == "academic but accessible, conversational scholarly"
     assert current.confidence == 0.85
 
@@ -147,7 +147,7 @@ async def test_versioning(pg_pool: PostgresPool, app_settings: Settings) -> None
 
     # Version 1
     profile_v1 = VoiceProfile(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         register="scholarly",
         sentence_patterns=["pattern1"],
         vocabulary_tendencies=["vocab1"],
@@ -159,7 +159,7 @@ async def test_versioning(pg_pool: PostgresPool, app_settings: Settings) -> None
 
     # Version 2
     profile_v2 = VoiceProfile(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         register="conversational scholarly",
         sentence_patterns=["pattern1", "pattern2"],
         vocabulary_tendencies=["vocab1", "vocab2"],
@@ -171,7 +171,7 @@ async def test_versioning(pg_pool: PostgresPool, app_settings: Settings) -> None
 
     # Current should be v2
     current = await manager.get_current(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         voice_repo=voice_repo,
     )
     assert current is not None
@@ -180,7 +180,7 @@ async def test_versioning(pg_pool: PostgresPool, app_settings: Settings) -> None
 
     # Should have 2 versions
     versions = await manager.list_versions(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         voice_repo=voice_repo,
     )
     assert len(versions) == 2
@@ -201,7 +201,7 @@ async def test_get_specific_version(pg_pool: PostgresPool, app_settings: Setting
     # Store two versions
     for i in range(2):
         profile = VoiceProfile(
-            author_id="malcolm-guite",
+            author_id="test--guite",
             register=f"register-v{i + 1}",
             sentence_patterns=[],
             vocabulary_tendencies=[],
@@ -213,7 +213,7 @@ async def test_get_specific_version(pg_pool: PostgresPool, app_settings: Setting
 
     # Get version 1
     v1 = await manager.get_version(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         version=1,
         voice_repo=voice_repo,
     )
@@ -222,7 +222,7 @@ async def test_get_specific_version(pg_pool: PostgresPool, app_settings: Setting
 
     # Get version 2
     v2 = await manager.get_version(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         version=2,
         voice_repo=voice_repo,
     )
@@ -231,7 +231,7 @@ async def test_get_specific_version(pg_pool: PostgresPool, app_settings: Setting
 
     # Non-existent version
     v99 = await manager.get_version(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         version=99,
         voice_repo=voice_repo,
     )
@@ -246,7 +246,7 @@ async def test_no_profile_returns_none(pg_pool: PostgresPool, app_settings: Sett
     manager = VoiceProfileManager(app_settings)
 
     result = await manager.get_current(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         voice_repo=voice_repo,
     )
     assert result is None
@@ -275,7 +275,7 @@ async def test_refresh_profile_integration(
 
     # Store an initial profile
     initial = VoiceProfile(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         register="scholarly",
         sentence_patterns=["pattern1"],
         vocabulary_tendencies=["vocab1"],
@@ -287,14 +287,14 @@ async def test_refresh_profile_integration(
 
     # Refresh (re-extract from corpus)
     new_profile, diff = await manager.refresh_profile(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         author_name="Malcolm Guite",
         work_repo=work_repo,
         chunk_repo=chunk_repo,
         voice_repo=voice_repo,
     )
 
-    assert new_profile.author_id == "malcolm-guite"
+    assert new_profile.author_id == "test--guite"
     assert new_profile.confidence > 0.0
     assert diff is not None
     # The LLM-extracted profile should differ from our hand-crafted initial
@@ -302,7 +302,7 @@ async def test_refresh_profile_integration(
 
     # Should now have 2 versions
     versions = await manager.list_versions(
-        author_id="malcolm-guite",
+        author_id="test--guite",
         voice_repo=voice_repo,
     )
     assert len(versions) == 2

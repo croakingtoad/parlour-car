@@ -100,7 +100,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Persons
         await neo4j.execute_write(
             "MERGE (p:Person {canonical_name: $cn}) SET p.name = $name",
-            {"cn": "samuel-taylor-coleridge", "name": "Samuel Taylor Coleridge"},
+            {"cn": "test--stc", "name": "Samuel Taylor Coleridge"},
         )
 
         # Arguments
@@ -141,7 +141,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Edges: REFERENCES_PERSON
         await neo4j.execute_write(
             """MATCH (c:Chunk {chunk_id: 'chunk-p1'}),
-                   (p:Person {canonical_name: 'samuel-taylor-coleridge'})
+                   (p:Person {canonical_name: 'test--stc'})
             MERGE (c)-[r:REFERENCES_PERSON]->(p) SET r.role = 'discussed'"""
         )
 
@@ -220,7 +220,7 @@ class TestGraphQueryServiceWithNeo4j:
 
         # Coleridge should be referenced
         person_names = {p["canonical_name"] for p in network.persons_referenced}
-        assert "samuel-taylor-coleridge" in person_names
+        assert "test--stc" in person_names
 
     async def test_get_cross_work_links(self, neo4j_conn: Neo4jConnection) -> None:
         """Get all passage links from/to a work."""
