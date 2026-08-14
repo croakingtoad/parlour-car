@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 SAMPLE_AUTHOR: dict[str, str] = {
     "id": "test--guite",
-    "canonical_name": "Malcolm Guite",
+    "canonical_name": "Test Guite",
 }
 
 SAMPLE_WORK: dict[str, Any] = {
@@ -34,7 +34,7 @@ SAMPLE_WORK: dict[str, Any] = {
     "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
-        "Authored by Malcolm Guite, the subject author of this collection"
+        "Authored by Test Guite, the subject author of this collection"
     ),
     "publication_year": 2010,
     "publisher": "Ashgate Publishing",
@@ -192,7 +192,7 @@ async def test_chunk_annotation_persisted(pg_pool: PostgresPool) -> None:
     annotated_chunk = {
         **SAMPLE_CHUNK,
         "annotation": (
-            '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Malcolm Guite.\n'
+            '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Test Guite.\n'
             "This meso covers: the role of imagination in perception."
         ),
     }
@@ -220,7 +220,7 @@ async def test_similarity_search_returns_annotation(pg_pool: PostgresPool) -> No
 
     chunk_repo = PgChunkRepository(pg_pool)
     annotation_text = (
-        '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Malcolm Guite.\n'
+        '[PRIMARY] From "Faith, Hope and Poetry" (2010) by Test Guite.\n'
         "This meso covers: the role of imagination in perception."
     )
     annotated_chunk = {**SAMPLE_CHUNK, "annotation": annotation_text}

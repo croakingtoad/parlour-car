@@ -218,6 +218,62 @@ class TestNormalizeAuthorName:
         ]:
             assert ClassificationPipeline._normalize_author_name(raw) == expected, raw
 
+    def test_trailing_comma_still_reorders(self) -> None:
+        """A MARC 100 field carries a trailing comma when $d follows.
+
+        Regression: the life-date fix made the empty tail segment fail the
+        all(parts[1:]) check, skipping the reorder entirely and slugifying the
+        raw string — forking a SECOND work_id for an author that already had
+        one, i.e. reintroducing the very bug it fixed.
+        """
+        assert (
+            ClassificationPipeline._normalize_author_name("Coleridge, Samuel Taylor,")
+            == "Samuel Taylor Coleridge"
+        )
+        assert ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor,", "Some Title"
+        ) == ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor", "Some Title"
+        )
+
+    def test_other_marc_date_forms_stripped(self) -> None:
+        """Bracketed RDA dates, approximations and centuries also fork."""
+        for raw, expected in [
+            ("Author, Name, [1900-1980]", "Name Author"),
+            ("Author, Name, approximately 1200", "Name Author"),
+            ("Author, Name, 19th cent.", "Name Author"),
+            ("Author, Name, fl. 1550-1600", "Name Author"),
+            ("Author, Name, d. 1674?", "Name Author"),
+        ]:
+            assert ClassificationPipeline._normalize_author_name(raw) == expected, raw
+
+    def test_date_stripped_when_not_the_last_segment(self) -> None:
+        """'Smith, John, 1900-1980, Jr.' — date is interior, suffix is last."""
+        assert (
+            ClassificationPipeline._normalize_author_name("Smith, John, 1900-1980, Jr.")
+            == "John, Jr. Smith"
+        )
+
+    def test_diacritics_folded_not_deleted(self) -> None:
+        """Deleting diacritics forks 'Böll' from the same author as 'Boll'."""
+        assert ClassificationPipeline._generate_work_id(
+            "Böll, Heinrich, 1917-1985", "Some Title"
+        ) == ClassificationPipeline._generate_work_id("Boll, Heinrich", "Some Title")
+        assert ClassificationPipeline._generate_work_id(
+            "Böll, Heinrich", "Some Title"
+        ).startswith("heinrich-boll--")
+
+    def test_non_latin_author_does_not_collapse_to_empty(self) -> None:
+        """A non-Latin author must not yield a malformed '--title' work_id.
+
+        Every such author would otherwise collide into one id per title.
+        """
+        a = ClassificationPipeline._generate_work_id("Достоевский, Фёдор", "Some Title")
+        b = ClassificationPipeline._generate_work_id("村上, 春樹", "Some Title")
+        assert not a.startswith("--"), a
+        assert not b.startswith("--"), b
+        assert a != b, "distinct non-Latin authors must not collide"
+
     def test_surname_with_dates_only(self) -> None:
         """No given name — return the surname, not a date fragment."""
         assert (
@@ -233,10 +289,18 @@ class TestNormalizeAuthorName:
         )
 
     def test_empty_parts_not_swapped(self) -> None:
-        """A trailing comma with no given name should not corrupt the output."""
-        # "Guite," has an empty second part — should not swap
+        """A trailing comma with no given name must not corrupt the output.
+
+        Empty segments are now dropped, so the stray comma is removed rather
+        than echoed: "Guite," normalizes to "Guite". What matters is that it
+        cannot fork a second identity — assert on the work_id, which is the
+        thing a difference here would actually break.
+        """
         result = ClassificationPipeline._normalize_author_name("Guite,")
-        assert result.strip() == "Guite,"
+        assert result == "Guite"
+        assert ClassificationPipeline._generate_work_id(
+            "Guite,", "Mariner"
+        ) == ClassificationPipeline._generate_work_id("Guite", "Mariner")
 
 
 # ---------------------------------------------------------------------------

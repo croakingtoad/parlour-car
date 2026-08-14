@@ -47,7 +47,7 @@ class TestExtractionResponseParsing:
                 ],
                 "persons": [
                     {
-                        "name": "Samuel Taylor Coleridge",
+                        "name": "Test Coleridge",
                         "canonical_name": "test--stc",
                         "role": "discussed",
                     },
@@ -221,7 +221,7 @@ class TestEntityExtractionWithNeo4j:
         result = await extractor.extract_and_persist(
             primary_chunks[:1],
             work_title="Faith Hope and Poetry",
-            author="Malcolm Guite",
+            author="Test Guite",
         )
 
         assert result.nodes_created > 0
@@ -250,7 +250,7 @@ class TestEntityExtractionWithNeo4j:
         await extractor.extract_and_persist(
             primary_chunks[:1],
             work_title="Faith Hope and Poetry",
-            author="Malcolm Guite",
+            author="Test Guite",
         )
 
         # Check for MAKES_ARGUMENT (PRIMARY only)
@@ -302,7 +302,7 @@ class TestEntityExtractionWithNeo4j:
         await extractor.extract_and_persist(
             primary_chunks[:1],
             work_title="Faith Hope and Poetry",
-            author="Malcolm Guite",
+            author="Test Guite",
         )
 
         persons = await neo4j_conn.execute_read(

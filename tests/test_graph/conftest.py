@@ -35,7 +35,9 @@ requires_anthropic = pytest.mark.skipif(
 
 
 @pytest.fixture
-async def neo4j_conn() -> AsyncGenerator[Neo4jConnection]:
+async def neo4j_conn(
+    assert_graph_is_disposable: None,
+) -> AsyncGenerator[Neo4jConnection]:
     """Provide a connected Neo4j instance with clean schema.
 
     IMPORTANT: Only cleans up test-created nodes (work_id starting with
@@ -269,19 +271,19 @@ def works_metadata() -> dict[str, dict[str, str]]:
         "coleridge--biographia-literaria": {
             "work_id": "coleridge--biographia-literaria",
             "title": "Biographia Literaria",
-            "author": "Samuel Taylor Coleridge",
+            "author": "Test Coleridge",
             "source_class": "contextual",
         },
         "coleridge--statesmans-manual": {
             "work_id": "coleridge--statesmans-manual",
             "title": "The Statesman's Manual",
-            "author": "Samuel Taylor Coleridge",
+            "author": "Test Coleridge",
             "source_class": "contextual",
         },
         "guite--faith-hope-poetry": {
             "work_id": "guite--faith-hope-poetry",
             "title": "Faith Hope and Poetry",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
         },
         "ward--romantic-theology": {
