@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 import structlog
 
@@ -23,6 +24,29 @@ if TYPE_CHECKING:
     from author_library.storage.manager import StorageManager
 
 log = structlog.get_logger(__name__)
+
+CHUNK_ID_SAMPLE_LIMIT = 20
+
+
+def _normalize_chunk_id(chunk_id: object) -> str:
+    """Normalize UUID chunk IDs while preserving non-UUID identifiers."""
+    value = str(chunk_id)
+    try:
+        return UUID(value).hex
+    except ValueError:
+        return value
+
+
+def _index_chunk_ids_by_work(rows: list[Any]) -> dict[str, dict[str, str]]:
+    """Index grouped chunk IDs by work and retain their stored representation."""
+    indexed: dict[str, dict[str, str]] = {}
+    for row in rows:
+        work_id = row["work_id"]
+        work_index = indexed.setdefault(work_id, {})
+        for chunk_id in row["chunk_ids"]:
+            raw_chunk_id = str(chunk_id)
+            work_index.setdefault(_normalize_chunk_id(raw_chunk_id), raw_chunk_id)
+    return indexed
 
 
 @dataclass
@@ -364,7 +388,8 @@ async def check_pg_neo4j_consistency(
     - neo4j_work_count: total Work nodes in Neo4j
     - missing_from_neo4j: list of work_ids in PG but not Neo4j
     - extra_in_neo4j: list of work_ids in Neo4j but not PG
-    - chunk_counts: per-work chunk count comparison
+    - chunk_counts: per-work chunk count and identity comparison, with bounded
+      samples of IDs present in only one store
     """
     # Get PG works
     pg_works = await get_pg_work_ids(storage)
@@ -385,17 +410,44 @@ async def check_pg_neo4j_consistency(
     )
     neo4j_chunk_counts = {r["work_id"]: r["chunk_count"] for r in neo4j_chunk_records}
 
+    # Fetch identities once per store. PostgreSQL UUIDs are hyphenated while
+    # some Neo4j UUIDs are stored as 32-character hex, so UUID-shaped IDs are
+    # normalized before comparison. Samples retain each store's original form.
+    pg_chunk_id_rows = await storage.pg.fetch_all(
+        "SELECT work_id, array_agg(id::text) AS chunk_ids FROM chunks GROUP BY work_id"
+    )
+    neo4j_chunk_id_records = await storage.neo4j.execute_read(
+        "MATCH (c:Chunk) "
+        "RETURN c.work_id AS work_id, collect(c.chunk_id) AS chunk_ids"
+    )
+    pg_chunk_ids = _index_chunk_ids_by_work(pg_chunk_id_rows)
+    neo4j_chunk_ids = _index_chunk_ids_by_work(neo4j_chunk_id_records)
+
     # Build per-work comparison
     all_work_ids = pg_work_ids | neo4j_work_ids
     chunk_comparison: list[dict[str, Any]] = []
     for wid in sorted(all_work_ids):
         pg_count = pg_chunk_counts.get(wid, 0)
         neo4j_count = neo4j_chunk_counts.get(wid, 0)
+        pg_ids = set(pg_chunk_ids.get(wid, {}))
+        neo4j_ids = set(neo4j_chunk_ids.get(wid, {}))
+        pg_only_ids = pg_ids - neo4j_ids
+        neo4j_only_ids = neo4j_ids - pg_ids
         chunk_comparison.append({
             "work_id": wid,
             "pg_chunks": pg_count,
             "neo4j_chunks": neo4j_count,
-            "in_sync": pg_count == neo4j_count,
+            "in_sync": pg_count == neo4j_count
+            and not pg_only_ids
+            and not neo4j_only_ids,
+            "pg_only_chunk_count": len(pg_only_ids),
+            "neo4j_only_chunk_count": len(neo4j_only_ids),
+            "pg_only_chunk_ids_sample": sorted(
+                pg_chunk_ids[wid][chunk_id] for chunk_id in pg_only_ids
+            )[:CHUNK_ID_SAMPLE_LIMIT],
+            "neo4j_only_chunk_ids_sample": sorted(
+                neo4j_chunk_ids[wid][chunk_id] for chunk_id in neo4j_only_ids
+            )[:CHUNK_ID_SAMPLE_LIMIT],
         })
 
     return {
