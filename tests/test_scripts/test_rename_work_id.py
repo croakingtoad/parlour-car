@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,25 +43,84 @@ class FakeConnection:
         return []
 
 
-class FakePg:
-    def __init__(self, conn: FakeConnection) -> None:
-        self.conn = conn
+class FakeStorage:
+    pg = object()
+
+
+class StatefulPg:
+    """In-memory PostgreSQL double that rolls back applied row mutations."""
+
+    def __init__(self, *, fail_on: str | None = None) -> None:
+        self.fail_on = fail_on
+        self.rows = {
+            "works": {"old"},
+            "chunks": {"old"},
+            "thematic_appearances": {"old"},
+            "session_sources": {"old"},
+        }
+        self.applied_updates: list[str] = []
         self.rolled_back = False
 
     @asynccontextmanager
-    async def transaction(self) -> AsyncIterator[FakeConnection]:
+    async def transaction(self) -> AsyncIterator[StatefulPg]:
+        before = {table: values.copy() for table, values in self.rows.items()}
         try:
-            yield self.conn
+            yield self
         except Exception:
+            self.rows = before
             self.rolled_back = True
             raise
 
-    async def fetch_all(self, *args: Any) -> list[dict[str, str]]:
-        return []
+    async def execute(self, query: str, *args: Any) -> str:
+        if query == "SET CONSTRAINTS ALL DEFERRED":
+            return "SET CONSTRAINTS"
+        table = next(table for table in self.rows if f'"{table}"' in query)
+        if self.fail_on == table:
+            raise RuntimeError("injected PostgreSQL failure")
+        new_id, old_id = args
+        changed = int(old_id in self.rows[table])
+        if changed:
+            self.rows[table].remove(old_id)
+            self.rows[table].add(new_id)
+            self.applied_updates.append(table)
+        return f"UPDATE {changed}"
+
+    async def fetch_val(self, query: str, work_id: str) -> int:
+        table = re.search(r'FROM "([a-z_]+)"', query)
+        assert table is not None
+        return int(work_id in self.rows[table.group(1)])
+
+    async def fetch_all(self, *args: Any) -> list[dict[str, Any]]:
+        return [
+            {
+                "schema_name": child.schema,
+                "table_name": child.table,
+                "column_name": child.column,
+                "is_deferrable": True,
+                "on_update": "a",
+            }
+            for child in _children()
+        ]
 
 
-class FakeStorage:
-    pg = object()
+class StatefulNeo4j:
+    def __init__(self) -> None:
+        self.rows = {"Work": {"old"}, "Chunk": {"old"}}
+
+    async def execute_read(self, _query: str, params: dict[str, str]) -> list[dict[str, int]]:
+        work_id = params["work_id"]
+        return [
+            {
+                "work_count": int(work_id in self.rows["Work"]),
+                "chunk_count": int(work_id in self.rows["Chunk"]),
+            }
+        ]
+
+
+class StatefulStorage:
+    def __init__(self, *, fail_on: str) -> None:
+        self.pg = StatefulPg(fail_on=fail_on)
+        self.neo4j = StatefulNeo4j()
 
 
 def _children() -> list[Any]:
@@ -88,14 +148,26 @@ async def test_children_update_before_parent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mid_transaction_failure_rolls_back() -> None:
-    conn = FakeConnection(fail_on="thematic_appearances")
-    pg = FakePg(conn)
+async def test_mid_transaction_failure_rolls_back_prior_child_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = StatefulStorage(fail_on="thematic_appearances")
+
+    async def clean(*args: Any) -> None:
+        return None
+
+    monkeypatch.setattr(rename, "_assert_global_consistency", clean)
     with pytest.raises(RuntimeError, match="injected"):
-        async with pg.transaction() as tx:
-            await rename._apply_postgres(tx, "old", "new", _children(), _counts())
-    assert pg.rolled_back is True
-    assert not any("UPDATE works" in query for query in conn.calls)
+        await rename.execute_rename(storage, "old", "new")
+
+    assert storage.pg.applied_updates == ["chunks"]
+    assert storage.pg.rows == {
+        "works": {"old"},
+        "chunks": {"old"},
+        "thematic_appearances": {"old"},
+        "session_sources": {"old"},
+    }
+    assert storage.pg.rolled_back is True
 
 
 def test_immediate_fk_constraints_are_refused() -> None:
