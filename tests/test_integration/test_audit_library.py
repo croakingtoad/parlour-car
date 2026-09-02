@@ -17,12 +17,14 @@ import json
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+from author_library.graph import backfill
 from author_library.tools.meta import handle_audit_library
 
 from .conftest import SKIP_NO_DB
 
 if TYPE_CHECKING:
     import pytest
+    from pytest import MonkeyPatch
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +182,7 @@ class TestAuditLibraryResponseStructure:
         assert "works" in result, "Missing works key"
         assert "graph" in result, "Missing graph key"
         assert "pg_neo4j" in result, "Missing pg_neo4j key"
+        assert "chunk_noise" in result, "Missing chunk_noise key"
         assert "recommendations" in result, "Missing recommendations key"
 
     async def test_overall_status_is_valid_value(self, clean_storage: Any) -> None:
@@ -230,7 +233,9 @@ class TestAuditLibraryPerWorkStats:
         assert "chunks" in work
         assert "embeddings" in work
         assert "entities" in work
+        assert "noise_chunks" in work
         assert "warnings" in work
+        assert "info" in work
 
     async def test_chunk_count_reflects_inserted_chunks(self, clean_storage: Any) -> None:
         """audit_library reports the exact chunk count per work."""
@@ -315,6 +320,113 @@ class TestAuditLibraryPerWorkStats:
             assert f"test--audit-multi-{i}" in reported_ids, (
                 f"test--audit-multi-{i} missing from audit report"
             )
+
+    async def test_by_design_noise_is_info_and_library_stays_healthy(
+        self,
+        clean_storage: Any,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        """Short chunks in a short-line genre are visible without warning."""
+        work_id = "test--audit-by-design-noise"
+        await clean_storage.works.create(
+            _make_work(work_id, "By-design Noise", source_class="primary")
+        )
+        await clean_storage.graph.upsert_work_node(
+            {
+                "work_id": work_id,
+                "title": "By-design Noise",
+                "author": "Test Author",
+                "source_class": "primary",
+                "publication_year": 2000,
+            }
+        )
+        await clean_storage.neo4j.execute_write(
+            "MERGE (t:Theme {canonical_name: $name}) SET t.name = $name",
+            {"name": "test--by-design-theme"},
+        )
+
+        for position, text in enumerate(("Short line one", "Short line two")):
+            chunk_id = await clean_storage.chunks.create(_make_chunk(work_id, text, position))
+            await clean_storage.embeddings.store(
+                chunk_id,
+                [0.1] * 1024,
+                "test",
+                "test-model",
+                1024,
+            )
+            await clean_storage.graph.upsert_chunk_node(
+                {
+                    "chunk_id": str(chunk_id),
+                    "work_id": work_id,
+                    "text_preview": text,
+                    "granularity": "meso",
+                    "source_class": "primary",
+                }
+            )
+            await clean_storage.graph.create_edge(
+                "Chunk",
+                "chunk_id",
+                str(chunk_id),
+                "EXPLORES_THEME",
+                "Theme",
+                "canonical_name",
+                "test--by-design-theme",
+            )
+
+        async def _consistent_test_graph(storage: Any) -> dict[str, Any]:
+            return {
+                "pg_work_count": 1,
+                "neo4j_work_count": 1,
+                "missing_from_neo4j": [],
+                "extra_in_neo4j": [],
+                "chunk_counts": [
+                    {
+                        "work_id": work_id,
+                        "pg_chunks": 2,
+                        "neo4j_chunks": 2,
+                        "in_sync": True,
+                    }
+                ],
+                "is_consistent": True,
+            }
+
+        monkeypatch.setattr(
+            backfill,
+            "check_pg_neo4j_consistency",
+            _consistent_test_graph,
+        )
+
+        original_execute_read = clean_storage.neo4j.execute_read
+
+        async def _ignore_unrelated_global_graph_findings(
+            query: str,
+            *args: Any,
+        ) -> list[dict[str, Any]]:
+            if "MATCH (t:Theme)" in query or "WHERE n:Person" in query:
+                return []
+            return await original_execute_read(query, *args)
+
+        monkeypatch.setattr(
+            clean_storage.neo4j,
+            "execute_read",
+            _ignore_unrelated_global_graph_findings,
+        )
+
+        result = json.loads(await handle_audit_library({}, storage=clean_storage))
+        work = next(w for w in result["works"] if w["work_id"] == work_id)
+
+        assert result["overall_status"] == "healthy"
+        assert work["noise_chunks"] == 2
+        assert work["warnings"] == []
+        assert len(work["info"]) == 1
+        assert "literary form" in work["info"][0]
+        assert "excluded from retrieval" in work["info"][0]
+        assert result["chunk_noise"] == {
+            "sub_50_chunks": 2,
+            "total_chunks": 2,
+            "warning_work_ids": [],
+            "informational_work_ids": [work_id],
+        }
 
 
 # ---------------------------------------------------------------------------
