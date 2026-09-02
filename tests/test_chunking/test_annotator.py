@@ -6,7 +6,11 @@ import os
 
 import pytest
 
-from author_library.chunking.annotator import AnnotationContext, ChunkAnnotator
+from author_library.chunking.annotator import (
+    AnnotationContext,
+    ChunkAnnotator,
+    _publication_year_label,
+)
 from author_library.chunking.models import Chunk, ChunkGranularity
 
 
@@ -139,6 +143,9 @@ class TestAnnotationTemplates:
         annotator = ChunkAnnotator()
         result = await annotator.annotate_chunks([], primary_context)
         assert result == []
+
+    def test_unknown_publication_year_is_labeled_undated(self) -> None:
+        assert _publication_year_label(None) == "undated"
 
     async def test_annotation_includes_chapter_info(
         self, sample_chunks: list[Chunk], primary_context: AnnotationContext

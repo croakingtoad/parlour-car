@@ -80,6 +80,11 @@ class TestCatalogEntry:
         assert entry.original_publication_year == 2010
         assert entry.ocr_quality == OcrQuality.NOT_APPLICABLE
 
+    def test_unknown_publication_metadata_is_nullable(self) -> None:
+        entry = CatalogEntry(**_core_fields(publication_year=None, publisher=None))
+        assert entry.publication_year is None
+        assert entry.publisher is None
+
     def test_genre_tags_lowercased(self) -> None:
         entry = CatalogEntry(**_core_fields(genre_tags=["Monograph", "THEOLOGY"]))
         assert entry.genre_tags == ["monograph", "theology"]

@@ -382,7 +382,7 @@ class PgWorkRepository(WorkRepository):
                OR source_metadata->>'about_author_id' = $1
                OR source_metadata->>'referenced_by' = $1
                OR author ILIKE $1
-            ORDER BY publication_year""",
+            ORDER BY publication_year ASC NULLS LAST, title""",
             author,
         )
         return [dict(r) for r in rows]

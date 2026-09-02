@@ -29,6 +29,16 @@ from pydantic import BaseModel, Field
 log = structlog.get_logger(__name__)
 
 
+def _dated_primary_work_years(works: list[dict[str, Any]]) -> dict[str, int]:
+    """Map dated primary works to years for chronological analysis."""
+    years: dict[str, int] = {}
+    for work in works:
+        year = work.get("publication_year")
+        if work.get("source_class") == "primary" and isinstance(year, int):
+            years[work["work_id"]] = year
+    return years
+
+
 # ---------------------------------------------------------------------------
 # Evolution data models
 # ---------------------------------------------------------------------------
@@ -153,11 +163,7 @@ class ThematicEvolutionAnalyzer:
 
         # Build work chronology
         works = await work_repo.list_by_author(author_id)
-        work_years: dict[str, int] = {
-            w["work_id"]: w.get("publication_year", 0)
-            for w in works
-            if w.get("source_class") == "primary"
-        }
+        work_years = _dated_primary_work_years(works)
 
         evolutions: list[ThematicEvolution] = []
 
@@ -217,7 +223,9 @@ class ThematicEvolutionAnalyzer:
         work_chunks: list[tuple[str, int, list[dict[str, Any]]]] = []
 
         for appearance in theme.appearances:
-            year = work_years.get(appearance.work_id, 0)
+            year = work_years.get(appearance.work_id)
+            if year is None:
+                continue
             chunks = await chunk_repo.list_by_work(
                 appearance.work_id, granularity="meso"
             )
@@ -261,10 +269,13 @@ class ThematicEvolutionAnalyzer:
         # Build evolution steps
         steps: list[EvolutionStep] = []
         for step_data in data.get("steps", []):
+            publication_year = work_years.get(step_data.get("work_id"))
+            if publication_year is None:
+                continue
             steps.append(
                 EvolutionStep(
                     work_id=step_data["work_id"],
-                    publication_year=step_data.get("publication_year", 0),
+                    publication_year=publication_year,
                     summary=step_data.get("summary", ""),
                     key_chunk_ids=step_data.get("key_chunk_ids", []),
                     self_reflection=step_data.get("self_reflection", False),

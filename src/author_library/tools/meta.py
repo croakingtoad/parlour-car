@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
+def _format_year_range(earliest_year: int | None, latest_year: int | None) -> str:
+    """Format an author's dated range, explicitly labeling an undated catalog."""
+    if earliest_year is None or latest_year is None:
+        return "undated"
+    return f"{earliest_year}-{latest_year}"
+
+
 async def handle_list_authors(
     arguments: dict[str, Any],
     *,
@@ -61,7 +68,7 @@ async def handle_list_authors(
             "contextual_works": r["contextual_count"],
             "tertiary_works": r["tertiary_count"],
             "total_words": r["total_words"] or 0,
-            "year_range": f"{r['earliest_year']}-{r['latest_year']}",
+            "year_range": _format_year_range(r["earliest_year"], r["latest_year"]),
         })
 
     return json.dumps({"authors": authors, "total_authors": len(authors)}, indent=2)

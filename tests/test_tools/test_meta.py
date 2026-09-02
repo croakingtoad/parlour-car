@@ -6,9 +6,15 @@ import pytest
 
 from author_library.errors import RetrievalError
 from author_library.tools.meta import (
+    _format_year_range,
     handle_author_bio,
     handle_list_works,
 )
+
+
+def test_undated_year_range_has_explicit_label() -> None:
+    assert _format_year_range(None, None) == "undated"
+    assert _format_year_range(1990, 2020) == "1990-2020"
 
 
 class TestHandleAuthorBioValidation:

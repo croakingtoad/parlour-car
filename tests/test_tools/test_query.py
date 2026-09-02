@@ -9,6 +9,7 @@ import pytest
 
 from author_library.errors import RetrievalError
 from author_library.tools.query import (
+    _partition_work_chronology,
     _result_to_quote,
     _style_instruction,
     handle_ask_author,
@@ -151,6 +152,20 @@ class TestHandleTraceThemeValidation:
                 storage=None,  # type: ignore[arg-type]
                 embedding_provider=None,  # type: ignore[arg-type]
             )
+
+    def test_undated_works_are_separate_from_chronology(self) -> None:
+        chronology, undated = _partition_work_chronology(
+            [
+                {"work_id": "author--late", "publication_year": 2020},
+                {"work_id": "author--undated", "publication_year": None},
+                {"work_id": "author--early", "publication_year": 1990},
+            ]
+        )
+        assert [work["work_id"] for work in chronology] == [
+            "author--early",
+            "author--late",
+        ]
+        assert [work["work_id"] for work in undated] == ["author--undated"]
 
 
 class TestHandleFindQuotesValidation:

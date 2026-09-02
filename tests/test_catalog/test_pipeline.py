@@ -42,6 +42,8 @@ def _make_document(
     author: str = "Malcolm Guite",
     raw_text: str = "Text about poetic imagination.",
     format: str = "epub",
+    publisher: str | None = "Ashgate",
+    publication_date: str | None = "2012",
 ) -> ParsedDocument:
     return ParsedDocument(
         source_path="/tmp/test.epub",
@@ -49,8 +51,8 @@ def _make_document(
         metadata=DocumentMetadata(
             title=title,
             author=author,
-            publisher="Ashgate",
-            publication_date="2012",
+            publisher=publisher,
+            publication_date=publication_date,
             word_count=85000,
         ),
         tree=DocumentNode(node_type=NodeType.BOOK, text=raw_text),
@@ -129,6 +131,18 @@ class TestWorkIdGeneration:
         pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+)*$")
         assert pattern.match(work_id), f"work_id {work_id!r} does not match pattern"
 
+    @pytest.mark.parametrize(
+        ("author", "title"),
+        [
+            ("", ""),
+            ("Unknown", "A Real Title"),
+            ("A Real Author", "Untitled"),
+        ],
+    )
+    def test_missing_or_sentinel_identity_raises(self, author: str, title: str) -> None:
+        with pytest.raises(ValueError, match="Cannot generate work_id"):
+            ClassificationPipeline._generate_work_id(author, title)
+
     def test_comma_format_author_normalized(self) -> None:
         """'Guite, Malcolm' and 'Malcolm Guite' must produce the same slug."""
         natural = ClassificationPipeline._generate_work_id(
@@ -194,7 +208,10 @@ class TestNormalizeAuthorName:
         assert ClassificationPipeline._normalize_author_name("Guite, Malcolm") == "Malcolm Guite"
 
     def test_whitespace_stripped(self) -> None:
-        assert ClassificationPipeline._normalize_author_name("  Guite , Malcolm  ") == "Malcolm Guite"
+        assert (
+            ClassificationPipeline._normalize_author_name("  Guite , Malcolm  ")
+            == "Malcolm Guite"
+        )
 
     def test_no_comma_no_change(self) -> None:
         assert ClassificationPipeline._normalize_author_name("Malcolm Guite") == "Malcolm Guite"
@@ -239,6 +256,35 @@ class TestNormalizeAuthorName:
         assert result.strip() == "Guite,"
 
 
+class TestMetadataFallbacks:
+    def test_parseable_year_is_preserved(self) -> None:
+        assert ClassificationPipeline._extract_year("2007-05-01") == 2007
+
+    @pytest.mark.parametrize("publication_date", [None, "", "not-a-date", "????-01-01"])
+    def test_unparseable_year_is_undated(self, publication_date: str | None) -> None:
+        # The old current-year fallback stamped seven works with their ingestion year
+        # and corrupted trace_theme chronology; an unknown year must remain unknown.
+        assert ClassificationPipeline._extract_year(publication_date) is None
+
+    @pytest.mark.parametrize(
+        "publisher",
+        [
+            "Adobe Acrobat 9.0 Paper Capture Plug-in",
+            "Internet Archive PDF 1.4.16; including mupdf and pymupdf/skimage",
+            "Recoded by LuraDocument PDF v2.68",
+        ],
+    )
+    def test_pdf_producer_is_not_a_publisher(self, publisher: str) -> None:
+        assert ClassificationPipeline._clean_publisher(publisher) is None
+
+    @pytest.mark.parametrize("publisher", [None, "", "Unknown", " unknown "])
+    def test_missing_publisher_remains_unknown(self, publisher: str | None) -> None:
+        assert ClassificationPipeline._clean_publisher(publisher) is None
+
+    def test_real_publisher_is_preserved(self) -> None:
+        assert ClassificationPipeline._clean_publisher(" Ashgate ") == "Ashgate"
+
+
 # ---------------------------------------------------------------------------
 # Pipeline routing tests
 # ---------------------------------------------------------------------------
@@ -281,6 +327,38 @@ class TestPipelineProcess:
         assert isinstance(result.catalog_entry, PrimaryCatalogEntry)
         assert result.catalog_entry.source_class == SourceClass.PRIMARY
         assert result.catalog_entry.work_id in repo.works
+
+    async def test_empty_document_identity_cannot_create_work_id(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with (
+            patch.object(pipeline._classifier, "classify", return_value=classification),
+            patch.object(pipeline, "_resolve_author_name", return_value=None),
+            pytest.raises(ValueError, match="Cannot generate work_id"),
+        ):
+            await pipeline.process(_make_document(title="", author=""))
+
+        assert repo.works == {}
+
+    async def test_unknown_publication_metadata_stays_null(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(
+                _make_document(
+                    publisher="Adobe Acrobat 9.0 Paper Capture Plug-in",
+                    publication_date="not-a-date",
+                )
+            )
+
+        assert result.catalog_entry.publication_year is None
+        assert result.catalog_entry.publisher is None
 
     async def test_secondary_route(self, settings: Settings, repo: FakeWorkRepository) -> None:
         pipeline = self._make_pipeline(settings, repo)
