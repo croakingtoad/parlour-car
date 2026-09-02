@@ -23,6 +23,20 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+# Flag either a sizable absolute gap or a systemic share of a smaller work.
+ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS = 10
+ENTITY_EDGE_GAP_WARNING_MIN_SHARE = 0.1
+
+
+def _entity_edge_gap_is_warning(total_chunks: int, uncovered_chunks: int) -> bool:
+    """Return whether missing entity edges are material for one work."""
+    if total_chunks <= 0 or uncovered_chunks <= 0:
+        return False
+    return (
+        uncovered_chunks >= ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS
+        or uncovered_chunks / total_chunks >= ENTITY_EDGE_GAP_WARNING_MIN_SHARE
+    )
+
 
 async def handle_list_authors(
     arguments: dict[str, Any],
@@ -486,17 +500,26 @@ async def handle_audit_library(
             if noise > total * 0.1:
                 has_warnings = True
 
-        work_audit.append({
-            "work_id": work_id,
-            "title": w.get("title", ""),
-            "source_class": w.get("source_class", ""),
-            "chunks": total,
-            "embeddings": embedded,
-            "entities": entities,
-            "orphaned_neo4j_chunks": orphans,
-            "noise_chunks": noise,
-            "warnings": work_warnings,
-        })
+        if _entity_edge_gap_is_warning(total, orphans):
+            work_warnings.append(
+                f"entity_edge_coverage_gap ({orphans}/{total} Neo4j chunks without entity edges)"
+            )
+            has_warnings = True
+
+        work_audit.append(
+            {
+                "work_id": work_id,
+                "title": w.get("title", ""),
+                "source_class": w.get("source_class", ""),
+                "chunks": total,
+                "embeddings": embedded,
+                "entities": entities,
+                "neo4j_chunks_without_entity_edges": orphans,
+                "orphaned_neo4j_chunks": orphans,
+                "noise_chunks": noise,
+                "warnings": work_warnings,
+            }
+        )
 
     # ------------------------------------------------------------------
     # 2. PG / Neo4j consistency
@@ -506,9 +529,10 @@ async def handle_audit_library(
         consistency = await check_pg_neo4j_consistency(storage)
         missing = consistency.get("missing_from_neo4j", [])
         extra = consistency.get("extra_in_neo4j", [])
-        chunk_delta = [
-            c for c in consistency.get("chunk_counts", [])
-            if not c.get("in_sync")
+        chunk_delta = [c for c in consistency.get("chunk_counts", []) if not c.get("in_sync")]
+        pg_only_chunk_drift = [c for c in chunk_delta if int(c.get("pg_only_chunk_count") or 0) > 0]
+        neo4j_only_chunk_drift = [
+            c for c in chunk_delta if int(c.get("neo4j_only_chunk_count") or 0) > 0
         ]
         pg_neo4j = {
             "is_consistent": consistency.get("is_consistent", False),
@@ -527,6 +551,31 @@ async def handle_audit_library(
             if extra:
                 recommendations.append(
                     f"{len(extra)} Neo4j works have no PG record — check for orphaned graph data."
+                )
+            if pg_only_chunk_drift:
+                pg_only_count = sum(
+                    int(work.get("pg_only_chunk_count") or 0) for work in pg_only_chunk_drift
+                )
+                pg_only_work_ids = [work["work_id"] for work in pg_only_chunk_drift]
+                recommendations.append(
+                    f"{pg_only_count} PostgreSQL chunks across "
+                    f"{len(pg_only_work_ids)} works are missing from Neo4j — run "
+                    "scripts/backfill_graph_and_entities.py for: "
+                    f"{', '.join(pg_only_work_ids[:3])}"
+                    + (" ..." if len(pg_only_work_ids) > 3 else "")
+                )
+            if neo4j_only_chunk_drift:
+                neo4j_only_count = sum(
+                    int(work.get("neo4j_only_chunk_count") or 0) for work in neo4j_only_chunk_drift
+                )
+                neo4j_only_work_ids = [work["work_id"] for work in neo4j_only_chunk_drift]
+                recommendations.append(
+                    f"{neo4j_only_count} Neo4j chunks across "
+                    f"{len(neo4j_only_work_ids)} works have no PostgreSQL row — correct the "
+                    "scope of scripts/cleanup_neo4j_orphans.py to: "
+                    f"{', '.join(neo4j_only_work_ids[:3])}"
+                    + (" ..." if len(neo4j_only_work_ids) > 3 else "")
+                    + "; then inspect a dry-run. Deletion requires explicit approval."
                 )
     except Exception as exc:
         log.warning("audit_consistency_failed", error=str(exc))
@@ -622,8 +671,22 @@ async def handle_audit_library(
             + (" ..." if len(works_no_entities) > 3 else "")
         )
 
-    if not recommendations:
-        recommendations.append("Library is healthy — no issues detected.")
+    works_with_entity_edge_gaps = [
+        w["work_id"]
+        for w in work_audit
+        if _entity_edge_gap_is_warning(
+            int(w["chunks"]),
+            int(w["neo4j_chunks_without_entity_edges"]),
+        )
+    ]
+    if works_with_entity_edge_gaps:
+        recommendations.append(
+            f"{len(works_with_entity_edge_gaps)} works have material Neo4j entity-edge "
+            "coverage gaps — review extraction coverage; if incomplete, run "
+            "scripts/backfill_graph_and_entities.py for: "
+            f"{', '.join(works_with_entity_edge_gaps[:3])}"
+            + (" ..." if len(works_with_entity_edge_gaps) > 3 else "")
+        )
 
     # ------------------------------------------------------------------
     # Overall status
@@ -634,6 +697,14 @@ async def handle_audit_library(
         overall_status = "warnings"
     else:
         overall_status = "healthy"
+
+    if overall_status == "healthy" and not recommendations:
+        recommendations.append("Library is healthy — no issues detected.")
+    elif overall_status != "healthy" and not recommendations:
+        recommendations.append(
+            "The audit found unresolved issues — inspect the warning and error fields, "
+            "correct them, and rerun the audit."
+        )
 
     report = {
         "overall_status": overall_status,
