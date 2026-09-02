@@ -316,7 +316,7 @@ class TestHandleAuditLibraryRecommendations:
             "library is healthy" in recommendation.lower() for recommendation in recommendations
         )
 
-    async def test_warning_without_specific_remedy_never_claims_library_is_healthy(
+    async def test_noise_warning_has_specific_remedy_and_never_claims_health(
         self,
         monkeypatch: MonkeyPatch,
     ) -> None:
@@ -328,6 +328,6 @@ class TestHandleAuditLibraryRecommendations:
             for recommendation in result["recommendations"]
         )
         assert any(
-            "unresolved issues" in recommendation.lower()
+            "noise chunks" in recommendation.lower() and "re-chunk" in recommendation.lower()
             for recommendation in result["recommendations"]
         )

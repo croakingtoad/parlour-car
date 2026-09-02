@@ -14,13 +14,15 @@ Runs against the test database (author_library_test).
 from __future__ import annotations
 
 import json
-from typing import Any
-
-import pytest
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 from author_library.tools.meta import handle_audit_library
 
 from .conftest import SKIP_NO_DB
+
+if TYPE_CHECKING:
+    import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +77,64 @@ def _make_chunk(
     }
 
 
+async def _run_targeted_audit(
+    clean_storage: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    noise_count: int = 0,
+    orphan_count: int = 0,
+    anomalies: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run an otherwise healthy audit with one targeted warning source."""
+    work_id = "test--audit-targeted"
+
+    async def fetch_all(query: str, *_args: Any) -> list[dict[str, Any]]:
+        if "FROM works ORDER BY work_id" in query:
+            return [
+                {
+                    "work_id": work_id,
+                    "title": "Targeted Audit Work",
+                    "source_class": "primary",
+                    "author": "Test Author",
+                }
+            ]
+        if "COUNT(*) AS chunk_count" in query:
+            return [{"work_id": work_id, "chunk_count": 10}]
+        if "COUNT(DISTINCT ce.chunk_id)" in query:
+            return [{"work_id": work_id, "embedded_chunks": 10}]
+        if "length(text) < 50" in query:
+            return [{"work_id": work_id, "noise_count": noise_count}] if noise_count else []
+        if "source_metadata->>'subject_author_id'" in query:
+            return anomalies or []
+        raise AssertionError(f"Unexpected PG query: {query}")
+
+    async def execute_read(query: str, *_args: Any) -> list[dict[str, Any]]:
+        if "COUNT(r) AS entity_edges" in query:
+            return [{"work_id": work_id, "entity_edges": 1}]
+        if "COUNT(c) AS orphan_count" in query:
+            return [{"work_id": work_id, "orphan_count": orphan_count}] if orphan_count else []
+        if "MATCH (t:Theme)" in query or "WHERE n:Person" in query:
+            return []
+        raise AssertionError(f"Unexpected Neo4j query: {query}")
+
+    consistency = {
+        "is_consistent": True,
+        "pg_work_count": 1,
+        "neo4j_work_count": 1,
+        "missing_from_neo4j": [],
+        "extra_in_neo4j": [],
+        "chunk_counts": [],
+    }
+    monkeypatch.setattr(clean_storage.pg, "fetch_all", AsyncMock(side_effect=fetch_all))
+    monkeypatch.setattr(clean_storage.neo4j, "execute_read", AsyncMock(side_effect=execute_read))
+    monkeypatch.setattr(
+        "author_library.graph.backfill.check_pg_neo4j_consistency",
+        AsyncMock(return_value=consistency),
+    )
+
+    return json.loads(await handle_audit_library({}, storage=clean_storage))
+
+
 # ---------------------------------------------------------------------------
 # TestAuditLibraryEmpty
 # ---------------------------------------------------------------------------
@@ -108,9 +168,7 @@ class TestAuditLibraryResponseStructure:
 
     async def test_response_has_required_keys(self, clean_storage: Any) -> None:
         """audit_library response always includes all required top-level keys."""
-        await clean_storage.works.create(
-            _make_work("test--audit-struct", "Structure Test Work")
-        )
+        await clean_storage.works.create(_make_work("test--audit-struct", "Structure Test Work"))
         await clean_storage.chunks.create(
             _make_chunk("test--audit-struct", "A test chunk for structure verification.", 0)
         )
@@ -126,9 +184,7 @@ class TestAuditLibraryResponseStructure:
 
     async def test_overall_status_is_valid_value(self, clean_storage: Any) -> None:
         """overall_status is one of: healthy, warnings, errors."""
-        await clean_storage.works.create(
-            _make_work("test--audit-status", "Status Test Work")
-        )
+        await clean_storage.works.create(_make_work("test--audit-status", "Status Test Work"))
 
         result_str = await handle_audit_library({}, storage=clean_storage)
         result = json.loads(result_str)
@@ -155,9 +211,7 @@ class TestAuditLibraryPerWorkStats:
 
     async def test_work_entry_has_required_fields(self, clean_storage: Any) -> None:
         """Each work entry includes work_id, title, source_class, chunks, etc."""
-        await clean_storage.works.create(
-            _make_work("test--audit-work-fields", "Fields Test")
-        )
+        await clean_storage.works.create(_make_work("test--audit-work-fields", "Fields Test"))
         await clean_storage.chunks.create(
             _make_chunk("test--audit-work-fields", "Testing per-work fields.", 0)
         )
@@ -180,9 +234,7 @@ class TestAuditLibraryPerWorkStats:
 
     async def test_chunk_count_reflects_inserted_chunks(self, clean_storage: Any) -> None:
         """audit_library reports the exact chunk count per work."""
-        await clean_storage.works.create(
-            _make_work("test--audit-chunk-count", "Chunk Count Test")
-        )
+        await clean_storage.works.create(_make_work("test--audit-chunk-count", "Chunk Count Test"))
         for i in range(3):
             await clean_storage.chunks.create(
                 _make_chunk("test--audit-chunk-count", f"Chunk number {i} for testing.", i)
@@ -200,9 +252,7 @@ class TestAuditLibraryPerWorkStats:
 
     async def test_work_with_no_chunks_gets_warning(self, clean_storage: Any) -> None:
         """Works with no chunks receive a 'no_chunks' warning."""
-        await clean_storage.works.create(
-            _make_work("test--audit-no-chunks", "No Chunks Work")
-        )
+        await clean_storage.works.create(_make_work("test--audit-no-chunks", "No Chunks Work"))
 
         result_str = await handle_audit_library({}, storage=clean_storage)
         result = json.loads(result_str)
@@ -216,9 +266,7 @@ class TestAuditLibraryPerWorkStats:
             f"Expected 'no_chunks' warning, got: {work['warnings']}"
         )
 
-    async def test_work_with_no_chunks_triggers_error_status(
-        self, clean_storage: Any
-    ) -> None:
+    async def test_work_with_no_chunks_triggers_error_status(self, clean_storage: Any) -> None:
         """A work with no chunks makes overall_status 'errors'."""
         await clean_storage.works.create(
             _make_work("test--audit-error-status", "Error Status Work")
@@ -233,9 +281,7 @@ class TestAuditLibraryPerWorkStats:
 
     async def test_work_with_no_embeddings_gets_warning(self, clean_storage: Any) -> None:
         """Works with chunks but no embeddings receive a 'no_embeddings' warning."""
-        await clean_storage.works.create(
-            _make_work("test--audit-no-embeds", "No Embeddings Work")
-        )
+        await clean_storage.works.create(_make_work("test--audit-no-embeds", "No Embeddings Work"))
         await clean_storage.chunks.create(
             _make_chunk("test--audit-no-embeds", "A chunk without an embedding.", 0)
         )
@@ -256,9 +302,7 @@ class TestAuditLibraryPerWorkStats:
         """audit_library reports all ingested works, not just the first."""
         for i in range(3):
             wid = f"test--audit-multi-{i}"
-            await clean_storage.works.create(
-                _make_work(wid, f"Multi Work {i}")
-            )
+            await clean_storage.works.create(_make_work(wid, f"Multi Work {i}"))
             await clean_storage.chunks.create(
                 _make_chunk(wid, f"Text for work {i} in multi-work test.", 0)
             )
@@ -296,13 +340,9 @@ class TestAuditLibraryPgNeo4j:
             f"pg_neo4j section missing is_consistent or error: {pg_neo4j}"
         )
 
-    async def test_pg_neo4j_missing_from_neo4j_is_list(
-        self, clean_storage: Any
-    ) -> None:
+    async def test_pg_neo4j_missing_from_neo4j_is_list(self, clean_storage: Any) -> None:
         """pg_neo4j.missing_from_neo4j is a list (may be empty or populated)."""
-        await clean_storage.works.create(
-            _make_work("test--audit-missing", "Missing Neo4j Work")
-        )
+        await clean_storage.works.create(_make_work("test--audit-missing", "Missing Neo4j Work"))
 
         result_str = await handle_audit_library({}, storage=clean_storage)
         result = json.loads(result_str)
@@ -321,9 +361,7 @@ class TestAuditLibraryPgNeo4j:
 class TestAuditLibraryRecommendations:
     """audit_library provides actionable recommendations."""
 
-    async def test_healthy_library_gets_healthy_recommendation(
-        self, clean_storage: Any
-    ) -> None:
+    async def test_healthy_library_gets_healthy_recommendation(self, clean_storage: Any) -> None:
         """Empty library reports healthy with a 'no issues' recommendation."""
         result_str = await handle_audit_library({}, storage=clean_storage)
         result = json.loads(result_str)
@@ -333,15 +371,15 @@ class TestAuditLibraryRecommendations:
         assert isinstance(recs, list)
         assert len(recs) > 0, "Expected at least one recommendation"
 
-    async def test_no_embeddings_generates_recommendation(
-        self, clean_storage: Any
-    ) -> None:
+    async def test_no_embeddings_generates_recommendation(self, clean_storage: Any) -> None:
         """Works without embeddings appear in recommendations."""
         await clean_storage.works.create(
             _make_work("test--audit-rec-embeds", "Recommendation Embeddings Work")
         )
         await clean_storage.chunks.create(
-            _make_chunk("test--audit-rec-embeds", "A chunk without embeddings for recommendations.", 0)
+            _make_chunk(
+                "test--audit-rec-embeds", "A chunk without embeddings for recommendations.", 0
+            )
         )
 
         result_str = await handle_audit_library({}, storage=clean_storage)
@@ -349,6 +387,50 @@ class TestAuditLibraryRecommendations:
 
         recs = result["recommendations"]
         has_embed_rec = any("embed" in r.lower() for r in recs)
-        assert has_embed_rec, (
-            f"Expected embedding recommendation, got: {recs}"
+        assert has_embed_rec, f"Expected embedding recommendation, got: {recs}"
+
+    async def test_excessive_noise_never_claims_library_is_healthy(
+        self, clean_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Noise above the warning threshold produces actionable advice."""
+        result = await _run_targeted_audit(clean_storage, monkeypatch, noise_count=2)
+
+        assert result["overall_status"] == "warnings"
+        assert not any("library is healthy" in rec.lower() for rec in result["recommendations"])
+        assert any(
+            "noise chunks" in rec.lower() and "re-chunk" in rec.lower()
+            for rec in result["recommendations"]
+        )
+
+    async def test_entity_edge_gap_generates_safe_recommendation(
+        self, clean_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Material entity-edge gaps produce the non-destructive backfill advice."""
+        result = await _run_targeted_audit(clean_storage, monkeypatch, orphan_count=2)
+
+        assert result["overall_status"] == "warnings"
+        assert any(
+            "entity-edge" in rec.lower()
+            and "extraction coverage" in rec.lower()
+            and "scripts/backfill_graph_and_entities.py" in rec
+            for rec in result["recommendations"]
+        )
+
+    async def test_classification_anomaly_recommends_review_and_reclassification(
+        self, clean_storage: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Classification anomalies explain the corrective next step."""
+        anomaly = {
+            "work_id": "test--audit-targeted",
+            "title": "Targeted Audit Work",
+            "author": "Test Author",
+            "source_class": "secondary",
+            "subject_author_id": "Test Author",
+        }
+        result = await _run_targeted_audit(clean_storage, monkeypatch, anomalies=[anomaly])
+
+        assert result["overall_status"] == "warnings"
+        assert any(
+            "classification anomaly" in rec.lower() and "reclassify" in rec.lower()
+            for rec in result["recommendations"]
         )
