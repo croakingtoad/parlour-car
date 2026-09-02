@@ -1,6 +1,6 @@
 """Tests for the Ollama embedding provider.
 
-Integration tests skip if the local Ollama server is not reachable.
+Integration tests skip unless the local Ollama server has the required model.
 """
 
 from __future__ import annotations
@@ -10,17 +10,20 @@ import pytest
 
 from author_library.embeddings.ollama import (
     _DEFAULT_BASE_URL,
+    _DEFAULT_MODEL,
     OllamaEmbeddingProvider,
 )
 from author_library.errors import EmbeddingError
 
 
-def _ollama_reachable() -> bool:
-    """Check if a local Ollama server is available."""
+def _ollama_model_available() -> bool:
+    """Check whether the local Ollama server has the integration-test model."""
     try:
         resp = httpx.get(f"{_DEFAULT_BASE_URL}/api/tags", timeout=2.0)
-        return resp.status_code == 200
-    except (httpx.ConnectError, httpx.TimeoutException):
+        resp.raise_for_status()
+        models = resp.json().get("models", [])
+        return any(model.get("name", "").partition(":")[0] == _DEFAULT_MODEL for model in models)
+    except (httpx.HTTPError, TypeError, ValueError):
         return False
 
 
@@ -71,10 +74,13 @@ class TestOllamaConnectionError:
 
 # -- Integration tests (require local Ollama) --------------------------------
 
-_has_ollama = _ollama_reachable()
+_has_ollama_model = _ollama_model_available()
 
 
-@pytest.mark.skipif(not _has_ollama, reason="Ollama not reachable at localhost:11434")
+@pytest.mark.skipif(
+    not _has_ollama_model,
+    reason=f"Ollama is unavailable or {_DEFAULT_MODEL} is not installed",
+)
 class TestOllamaIntegration:
     """Integration tests against a running Ollama instance."""
 

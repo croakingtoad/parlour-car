@@ -38,6 +38,14 @@ def _entity_edge_gap_is_warning(total_chunks: int, uncovered_chunks: int) -> boo
     )
 
 
+def _graph_entity_backfill_commands(work_ids: list[str]) -> str:
+    """Format bounded, non-destructive-by-default backfill invocations."""
+    return ", ".join(
+        f"`uv run python scripts/backfill_graph_and_entities.py {work_id}`"
+        for work_id in work_ids[:3]
+    ) + (" ..." if len(work_ids) > 3 else "")
+
+
 async def handle_list_authors(
     arguments: dict[str, Any],
     *,
@@ -454,17 +462,19 @@ async def handle_audit_library(
     orphan_counts: dict[str, int] = {}
     try:
         entity_rows = await storage.neo4j.execute_read(
-            """MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
-               RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"""
+            "MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT|"
+            "ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->() "
+            "RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"
         )
         for r in entity_rows:
             entity_counts[r["work_id"]] = int(r["entity_edges"])
 
         # Orphaned chunks: in Neo4j but no entity relationships
         orphan_rows = await storage.neo4j.execute_read(
-            """MATCH (c:Chunk)
-               WHERE NOT (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
-               RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"""
+            "MATCH (c:Chunk) "
+            "WHERE NOT (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|"
+            "CONCEPT_USED_IN|REFERENCES_PERSON]->() "
+            "RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"
         )
         for r in orphan_rows:
             orphan_counts[r["work_id"]] = int(r["orphan_count"])
@@ -559,10 +569,10 @@ async def handle_audit_library(
                 pg_only_work_ids = [work["work_id"] for work in pg_only_chunk_drift]
                 recommendations.append(
                     f"{pg_only_count} PostgreSQL chunks across "
-                    f"{len(pg_only_work_ids)} works are missing from Neo4j — run "
-                    "scripts/backfill_graph_and_entities.py for: "
-                    f"{', '.join(pg_only_work_ids[:3])}"
-                    + (" ..." if len(pg_only_work_ids) > 3 else "")
+                    f"{len(pg_only_work_ids)} works are missing from Neo4j — run the "
+                    "non-destructive default graph/entity backfill for each affected work: "
+                    f"{_graph_entity_backfill_commands(pg_only_work_ids)}. "
+                    "Do not pass --deduplicate-themes."
                 )
             if neo4j_only_chunk_drift:
                 neo4j_only_count = sum(
@@ -682,10 +692,10 @@ async def handle_audit_library(
     if works_with_entity_edge_gaps:
         recommendations.append(
             f"{len(works_with_entity_edge_gaps)} works have material Neo4j entity-edge "
-            "coverage gaps — review extraction coverage; if incomplete, run "
-            "scripts/backfill_graph_and_entities.py for: "
-            f"{', '.join(works_with_entity_edge_gaps[:3])}"
-            + (" ..." if len(works_with_entity_edge_gaps) > 3 else "")
+            "coverage gaps — review extraction coverage; only if extraction is confirmed "
+            "incomplete, run the non-destructive default graph/entity backfill: "
+            f"{_graph_entity_backfill_commands(works_with_entity_edge_gaps)}. "
+            "Do not pass --deduplicate-themes."
         )
 
     # ------------------------------------------------------------------

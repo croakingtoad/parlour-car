@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from author_library.config import (
     APIKeySettings,
     DatabaseSettings,
@@ -12,9 +14,20 @@ from author_library.config import (
     get_settings,
 )
 
+if TYPE_CHECKING:
+    import pytest
+
 
 class TestDatabaseSettings:
-    def test_defaults(self) -> None:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "DB_POSTGRES_URL",
+            "DB_NEO4J_URL",
+            "DB_NEO4J_USER",
+            "DB_NEO4J_PASSWORD",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
         s = DatabaseSettings()
         assert "5432" in s.postgres_url
         assert "7687" in s.neo4j_url

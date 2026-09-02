@@ -3,14 +3,24 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
+from scripts.backfill_graph_and_entities import (
+    DESTRUCTIVE_GRAPH_STEPS,
+    build_execution_plan,
+    parse_args,
+)
 
 from author_library.errors import RetrievalError
 from author_library.tools.meta import (
+    ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS,
+    ENTITY_EDGE_GAP_WARNING_MIN_SHARE,
+    _entity_edge_gap_is_warning,
     handle_audit_library,
     handle_author_bio,
     handle_list_works,
@@ -135,7 +145,11 @@ class TestHandleAuditLibraryRecommendations:
         self,
         monkeypatch: MonkeyPatch,
     ) -> None:
-        result = await _run_targeted_audit(monkeypatch, orphan_count=10)
+        result = await _run_targeted_audit(
+            monkeypatch,
+            chunk_count=200,
+            orphan_count=ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS,
+        )
 
         recommendations = result["recommendations"]
         assert result["overall_status"] == "warnings"
@@ -150,6 +164,38 @@ class TestHandleAuditLibraryRecommendations:
         assert not any(
             "library is healthy" in recommendation.lower() for recommendation in recommendations
         )
+
+    async def test_recommended_backfill_execution_plan_cannot_delete_graph(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        result = await _run_targeted_audit(
+            monkeypatch,
+            chunk_count=200,
+            orphan_count=ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS,
+        )
+        recommendation = next(
+            item
+            for item in result["recommendations"]
+            if "scripts/backfill_graph_and_entities.py" in item
+        )
+        command_match = re.search(
+            r"`(uv run python scripts/backfill_graph_and_entities\.py [^`]+)`",
+            recommendation,
+        )
+
+        assert command_match is not None
+        command = shlex.split(command_match.group(1))
+        args = parse_args(command[4:])
+        execution_plan = build_execution_plan(args)
+
+        assert command[:4] == [
+            "uv",
+            "run",
+            "python",
+            "scripts/backfill_graph_and_entities.py",
+        ]
+        assert not DESTRUCTIVE_GRAPH_STEPS.intersection(execution_plan)
 
     async def test_no_entity_edge_gap_has_no_backfill_recommendation(
         self,
@@ -185,7 +231,7 @@ class TestHandleAuditLibraryRecommendations:
     ) -> None:
         result = await _run_targeted_audit(
             monkeypatch,
-            chunk_count=5,
+            chunk_count=10,
             orphan_count=1,
         )
 
@@ -194,6 +240,33 @@ class TestHandleAuditLibraryRecommendations:
             "scripts/backfill_graph_and_entities.py" in recommendation
             for recommendation in result["recommendations"]
         )
+
+    @pytest.mark.parametrize(
+        ("total_chunks", "uncovered_chunks", "expected"),
+        [
+            pytest.param(
+                200,
+                ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS,
+                True,
+                id="exact-absolute-boundary-only",
+            ),
+            pytest.param(
+                10,
+                1,
+                True,
+                id="exact-percentage-boundary-only",
+            ),
+            pytest.param(100, 9, False, id="just-below-both-boundaries"),
+        ],
+    )
+    def test_entity_edge_gap_threshold_boundaries(
+        self,
+        total_chunks: int,
+        uncovered_chunks: int,
+        expected: bool,
+    ) -> None:
+        assert ENTITY_EDGE_GAP_WARNING_MIN_SHARE == 0.1
+        assert _entity_edge_gap_is_warning(total_chunks, uncovered_chunks) is expected
 
     async def test_identity_drift_recommends_directional_remedies(
         self,
