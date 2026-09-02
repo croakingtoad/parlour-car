@@ -107,8 +107,8 @@ TOOLS: list[Tool] = [
                     "type": "object",
                     "description": (
                         "Optional overrides for classification and catalog fields. "
-                        "Keys may include: source_class, genre_tags, work_type, "
-                        "publication_year, publisher, etc."
+                        "Keys may include: source_class, genre_tags, subject_headings, "
+                        "work_type, publication_year, publisher, etc."
                     ),
                 },
                 "auto_confirm": {
@@ -453,7 +453,10 @@ TOOLS: list[Tool] = [
                 },
                 "metadata_overrides": {
                     "type": "object",
-                    "description": "User corrections to auto-detected metadata.",
+                    "description": (
+                        "User corrections to auto-detected metadata, including "
+                        "subject_headings."
+                    ),
                 },
             },
             "required": ["file_path", "source_class"],

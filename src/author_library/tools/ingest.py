@@ -42,7 +42,8 @@ async def handle_ingest_book(
     Arguments:
         file_path (str): Path to the document file.
         subject_author_id (str): The subject author's slug identifier.
-        metadata_hints (dict, optional): Overrides for classification and catalog fields.
+        metadata_hints (dict, optional): Overrides for classification and catalog fields,
+            including subject_headings. Omitted headings are stored as ``["Unclassified"]``.
         auto_confirm (bool, optional): When True (default), runs the full pipeline.
             When False, pauses after classification and returns the suggested
             source class for human review.

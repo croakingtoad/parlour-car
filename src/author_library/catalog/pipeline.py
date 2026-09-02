@@ -40,6 +40,11 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+# ``subject_headings`` is required and non-empty in both the catalog model and
+# database schema. Use an explicit absence marker when callers omit it so an
+# unknown topic cannot be mistaken for the broad but meaningful topic "General".
+UNCLASSIFIED_SUBJECT_HEADING = "Unclassified"
+
 
 # ---------------------------------------------------------------------------
 # Pipeline result
@@ -314,7 +319,9 @@ class ClassificationPipeline:
             "language": overrides.get("language", document.metadata.language),
             "word_count": overrides.get("word_count", document.metadata.word_count),
             "genre_tags": overrides.get("genre_tags", ["unclassified"]),
-            "subject_headings": overrides.get("subject_headings", ["General"]),
+            "subject_headings": overrides.get(
+                "subject_headings", [UNCLASSIFIED_SUBJECT_HEADING]
+            ),
             "ocr_quality": overrides.get("ocr_quality"),
             "ingestion_date": overrides.get("ingestion_date", date.today()),
             "notes": overrides.get("notes"),

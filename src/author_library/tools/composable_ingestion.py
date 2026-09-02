@@ -218,7 +218,8 @@ async def handle_catalog_source(
         file_path (str): Path to the document file.
         source_class (str): Confirmed source class (primary/secondary/contextual/tertiary/personal).
         work_type (str): Confirmed work type.
-        metadata_overrides (dict, optional): User corrections to auto-detected metadata.
+        metadata_overrides (dict, optional): User corrections to auto-detected metadata,
+            including subject_headings. Omitted headings are stored as ``["Unclassified"]``.
 
     Returns:
         JSON with work_id, catalog_record, chapters_detected, table_of_contents.
