@@ -186,9 +186,9 @@ class TestGetPgWorkIds:
         """Should query PG works table and return all work records."""
         works = [
             {"work_id": "guite--faith-hope-poetry", "title": "Faith Hope and Poetry",
-             "author": "Malcolm Guite", "source_class": "primary", "publication_year": 2010},
+             "author": "Test Guite", "source_class": "primary", "publication_year": 2010},
             {"work_id": "guite--word-in-the-wilderness", "title": "Word in the Wilderness",
-             "author": "Malcolm Guite", "source_class": "primary", "publication_year": 2014},
+             "author": "Test Guite", "source_class": "primary", "publication_year": 2014},
         ]
         storage = _make_mock_storage(pg_works=works)
         result = await get_pg_work_ids(storage)
@@ -240,7 +240,7 @@ class TestBackfillWorkGraph:
         work = {
             "work_id": "guite--faith-hope-poetry",
             "title": "Faith Hope and Poetry",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
             "publication_year": 2010,
         }
@@ -266,7 +266,7 @@ class TestBackfillWorkGraph:
         work = {
             "work_id": "guite--word-in-the-wilderness",
             "title": "Word in the Wilderness",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
             "publication_year": 2014,
         }
@@ -295,7 +295,7 @@ class TestBackfillWorkGraph:
         work = {
             "work_id": "guite--word-in-the-wilderness",
             "title": "Word in the Wilderness",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
             "publication_year": 2014,
         }
@@ -323,7 +323,7 @@ class TestBackfillWorkGraph:
         work = {
             "work_id": "guite--empty-work",
             "title": "Empty Work",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
         }
         storage = _make_mock_storage(pg_chunks=[], neo4j_chunk_ids=[])
@@ -339,7 +339,7 @@ class TestBackfillWorkGraph:
         work = {
             "work_id": "guite--problematic",
             "title": "Problematic Work",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
         }
         pg_chunks = [
@@ -419,9 +419,9 @@ class TestBackfillMissingGraphData:
         """Should identify missing works and backfill their graph data."""
         works = [
             {"work_id": "guite--faith-hope-poetry", "title": "FHP",
-             "author": "Malcolm Guite", "source_class": "primary", "publication_year": 2010},
+             "author": "Test Guite", "source_class": "primary", "publication_year": 2010},
             {"work_id": "guite--word-in-the-wilderness", "title": "WitW",
-             "author": "Malcolm Guite", "source_class": "primary", "publication_year": 2014},
+             "author": "Test Guite", "source_class": "primary", "publication_year": 2014},
         ]
         pg_chunks = [
             {"id": "chunk-001", "text": "Sample chunk text",
@@ -478,7 +478,7 @@ class TestBackfillMissingGraphData:
         """When run_entity_extraction=True, should invoke entity extraction."""
         works = [
             {"work_id": "guite--missing", "title": "Missing",
-             "author": "Malcolm Guite", "source_class": "primary",
+             "author": "Test Guite", "source_class": "primary",
              "publication_year": 2020},
         ]
         pg_chunks = [
@@ -771,7 +771,7 @@ class TestEntityExtractionBackfill:
         work = {
             "work_id": "guite--test",
             "title": "Test",
-            "author": "Malcolm Guite",
+            "author": "Test Guite",
             "source_class": "primary",
         }
         pg_chunks = [
