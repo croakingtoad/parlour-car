@@ -292,6 +292,20 @@ async def handle_catalog_source(
     catalog_entry = pipeline_result.catalog_entry
     work_id = catalog_entry.work_id
 
+    # Step 2.5: Persist the source path. chunk_source re-reads the original
+    # file and looks for it here; without this the composable path always
+    # fails at chunking with "no file_path found in work record".
+    stored = await storage.works.get(work_id)
+    stored_meta_raw = (stored or {}).get("source_metadata") or {}
+    stored_meta = (
+        json.loads(stored_meta_raw)
+        if isinstance(stored_meta_raw, str)
+        else dict(stored_meta_raw)
+    )
+    stored_meta["file_path"] = str(path)
+    # PgWorkRepository.update serializes source_metadata itself — pass the dict.
+    await storage.works.update(work_id, {"source_metadata": stored_meta})
+
     # Step 3: Upsert work node in Neo4j graph
     await storage.graph.upsert_work_node({
         "work_id": work_id,
