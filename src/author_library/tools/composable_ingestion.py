@@ -206,7 +206,7 @@ async def handle_catalog_source(
     *,
     settings: Settings,
     storage: StorageManager,
-    embedding_provider: EmbeddingProvider,
+    embedding_provider: EmbeddingProvider | None,
     cache_manager: CacheManager | None = None,
 ) -> str:
     """Handle the catalog_source MCP tool call.

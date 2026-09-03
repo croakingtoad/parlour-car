@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from author_library.errors import ClassificationError
 from author_library.tools.composable_ingestion import (
     handle_catalog_source,
     handle_chunk_source,
@@ -269,6 +270,46 @@ class TestCatalogSource:
 class TestReferenceCatalogSource:
     """A confirmed reference source catalogs without an LLM reclassification."""
 
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["external_author", "reference_type", "subject_domain"],
+    )
+    async def test_catalog_reference_rejects_missing_required_metadata(
+        self,
+        clean_storage: StorageManager,
+        integration_settings: Settings,
+        missing_field: str,
+    ) -> None:
+        metadata_overrides = {
+            "author": "Test Reference Author",
+            "title": "Incomplete Reference Catalog",
+            "external_author": "Test Reference Author",
+            "reference_type": "craft-handbook",
+            "subject_domain": "dramatic-verse",
+        }
+        metadata_overrides.pop(missing_field)
+        if missing_field == "external_author":
+            metadata_overrides.pop("author")
+
+        temp_path = _write_temp_text("Standalone reference text without a byline.")
+        try:
+            with pytest.raises(
+                ClassificationError,
+                match=rf'source_class="reference" requires metadata field "{missing_field}"',
+            ):
+                await handle_catalog_source(
+                    {
+                        "file_path": str(temp_path),
+                        "source_class": "reference",
+                        "metadata_overrides": metadata_overrides,
+                    },
+                    settings=integration_settings,
+                    storage=clean_storage,
+                    embedding_provider=None,
+                )
+        finally:
+            temp_path.unlink(missing_ok=True)
+
     async def test_catalog_reference_creates_reference_record(
         self,
         clean_storage: StorageManager,
@@ -292,7 +333,7 @@ class TestReferenceCatalogSource:
                 },
                 settings=integration_settings,
                 storage=clean_storage,
-                embedding_provider=None,  # type: ignore[arg-type]
+                embedding_provider=None,
             ))
 
             work = await clean_storage.works.get(result["work_id"])
@@ -361,6 +402,7 @@ class TestReferenceCatalogSource:
             },
             settings=integration_settings,
             storage=clean_storage,
+            # scan_types=["none"] exercises routing without an embedding scan.
             embedding_provider=None,  # type: ignore[arg-type]
         ))
 

@@ -435,6 +435,45 @@ class TestPipelineProcess:
         assert stored["source_metadata"]["external_author"] == "Paul Fussell"
         assert "voice_profile_eligible" not in stored["source_metadata"]
 
+    @pytest.mark.parametrize(
+        ("missing_field", "document_author"),
+        [
+            ("external_author", ""),
+            ("reference_type", "Paul Fussell"),
+            ("subject_domain", "Paul Fussell"),
+        ],
+    )
+    async def test_reference_route_rejects_missing_required_metadata(
+        self,
+        settings: Settings,
+        repo: FakeWorkRepository,
+        missing_field: str,
+        document_author: str,
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        overrides = {
+            "source_class": "reference",
+            "external_author": "Paul Fussell",
+            "reference_type": "prosody-handbook",
+            "subject_domain": "prosody",
+            "genre_tags": ["prosody"],
+        }
+        overrides.pop(missing_field)
+
+        with pytest.raises(
+            ClassificationError,
+            match=rf'source_class="reference" requires metadata field "{missing_field}"',
+        ):
+            await pipeline.process(
+                _make_document(
+                    author=document_author,
+                    title="Poetic Meter and Poetic Form",
+                ),
+                user_overrides=overrides,
+            )
+
+        assert repo.works == {}
+
     async def test_entry_stored_in_repository(
         self, settings: Settings, repo: FakeWorkRepository
     ) -> None:
