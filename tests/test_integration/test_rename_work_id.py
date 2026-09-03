@@ -403,7 +403,7 @@ async def test_reverse_scope_mismatch_leaves_captured_neo4j_nodes_untouched(
         ORDER BY labels(n), chunk_id""",
         {"work_ids": [old_id, new_id, drifted_id]},
     )
-    assert records == [
+    expected_records = [
         {"labels": ["Chunk"], "chunk_id": str(first_graph_chunk_id), "work_id": new_id},
         {
             "labels": ["Chunk"],
@@ -412,6 +412,12 @@ async def test_reverse_scope_mismatch_leaves_captured_neo4j_nodes_untouched(
         },
         {"labels": ["Work"], "chunk_id": None, "work_id": new_id},
     ]
+    assert sorted(
+        records, key=lambda record: (record["labels"], record["chunk_id"] or "")
+    ) == sorted(
+        expected_records,
+        key=lambda record: (record["labels"], record["chunk_id"] or ""),
+    )
 
 
 @SKIP_NO_DB
