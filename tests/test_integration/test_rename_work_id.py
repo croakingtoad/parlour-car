@@ -70,7 +70,9 @@ async def test_execution_refuses_immediate_fks_before_cross_store_writes(
 async def test_execution_renames_all_postgresql_and_neo4j_records(
     clean_storage: StorageManager,
     assert_graph_is_disposable: None,
+    reset_disposable_graph,
 ) -> None:
+    await reset_disposable_graph(clean_storage.neo4j)
     old_id = "test--rename-source"
     new_id = "test--rename-target"
     await _insert_rename_source(clean_storage, old_id, with_children=True)

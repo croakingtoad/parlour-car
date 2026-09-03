@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import pytest
 import pytest_asyncio
@@ -22,10 +23,15 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 def _db_available() -> bool:
-    """Check if Docker-based databases are reachable."""
+    """Check whether PostgreSQL and the configured disposable Neo4j are reachable."""
     import socket
 
-    for host, port in [("localhost", 5432), ("localhost", 7687)]:
+    neo4j_url = os.environ.get("TEST_NEO4J_URL", "bolt://localhost:7688")
+    parsed_neo4j_url = urlparse(neo4j_url)
+    neo4j_host = parsed_neo4j_url.hostname or "localhost"
+    neo4j_port = parsed_neo4j_url.port or 7687
+
+    for host, port in [("localhost", 5432), (neo4j_host, neo4j_port)]:
         try:
             with socket.create_connection((host, port), timeout=2):
                 pass
