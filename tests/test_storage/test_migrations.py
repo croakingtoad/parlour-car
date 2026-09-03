@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     """Running migrations ensures all migration files are tracked."""
     applied = await run_migrations(pg_pool)
-    # May be 0 (all applied) up to 13 (first run). Test DB state varies.
-    assert len(applied) <= 13
+    # May be 0 (all applied) up to 14 (first run). Test DB state varies.
+    assert len(applied) <= 14
     # Verify all 13 are recorded in the _migrations table
     rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
     filenames = [r["filename"] for r in rows]
@@ -34,6 +34,7 @@ async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     assert "011_backfill_section_type.sql" in filenames
     assert "012_delete_noise_chunks.sql" in filenames
     assert "013_ingestion_lessons.sql" in filenames
+    assert "015_deferrable_work_id_foreign_keys.sql" in filenames
 
 
 async def test_migrations_idempotent(pg_pool: PostgresPool) -> None:
@@ -85,8 +86,7 @@ def test_no_duplicate_migration_prefixes() -> None:
     for m in migrations:
         prefix = m.name.split("_", 1)[0]
         assert prefix not in prefixes, (
-            f"Duplicate migration prefix {prefix!r}: "
-            f"{prefixes[prefix]} and {m.name}"
+            f"Duplicate migration prefix {prefix!r}: {prefixes[prefix]} and {m.name}"
         )
         prefixes[prefix] = m.name
 
@@ -100,15 +100,9 @@ async def test_rename_from_004_is_not_reapplied(pg_pool: PostgresPool) -> None:
     # Simulate a pre-rename database: remove the new name and insert the old.
     # This handles the case where the DB already has both rows from a prior
     # test run (the _migrations table is not cleaned between tests).
-    await pg_pool.execute(
-        "DELETE FROM _migrations WHERE filename = '009_transcript_cache.sql'"
-    )
-    await pg_pool.execute(
-        "DELETE FROM _migrations WHERE filename = '004_transcript_cache.sql'"
-    )
-    await pg_pool.execute(
-        "INSERT INTO _migrations (filename) VALUES ('004_transcript_cache.sql')"
-    )
+    await pg_pool.execute("DELETE FROM _migrations WHERE filename = '009_transcript_cache.sql'")
+    await pg_pool.execute("DELETE FROM _migrations WHERE filename = '004_transcript_cache.sql'")
+    await pg_pool.execute("INSERT INTO _migrations (filename) VALUES ('004_transcript_cache.sql')")
 
     # Running migrations again should apply the rename, not re-run the SQL
     newly_applied = await run_migrations(pg_pool)
