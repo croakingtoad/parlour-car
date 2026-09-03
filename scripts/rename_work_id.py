@@ -331,6 +331,10 @@ def _expected_global_report_after_rename(
         "pg_chunks": source.pg_children.get("chunks", 0),
         "neo4j_chunks": source.neo_chunk,
         "in_sync": True,
+        "pg_only_chunk_count": 0,
+        "neo4j_only_chunk_count": 0,
+        "pg_only_chunk_ids_sample": [],
+        "neo4j_only_chunk_ids_sample": [],
     }
     if old_entries != [expected_source] or new_entries:
         raise RenameError(
