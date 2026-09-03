@@ -172,6 +172,52 @@ async def test_neo4j_count_change_after_preflight_compensates_both_stores(
     ]
 
 
+@SKIP_NO_DB
+@pytest.mark.asyncio
+async def test_target_side_neo4j_drift_preserves_independent_target_nodes(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    await _insert_rename_source(clean_storage, old_id, with_children=True)
+    apply_postgres = rename._apply_postgres
+
+    async def apply_postgres_then_insert_target_drift(*args: object) -> None:
+        await apply_postgres(*args)
+        # Work.work_id is unique in the disposable graph. Chunk.work_id is
+        # intentionally non-unique, which is the reverse-scope hole here.
+        await clean_storage.neo4j.execute_write(
+            "CREATE (:Chunk {chunk_id: 'test--rename-target-racing-chunk', work_id: $work_id})",
+            {"work_id": new_id},
+        )
+
+    monkeypatch.setattr(rename, "_apply_postgres", apply_postgres_then_insert_target_drift)
+
+    with pytest.raises(rename.RenameError, match="new work_id post-condition failed"):
+        await rename.execute_rename(clean_storage, old_id, new_id)
+
+    for table in ("works", "chunks", "thematic_appearances"):
+        assert await clean_storage.pg.fetch_val(
+            f"SELECT count(*) FROM {table} WHERE work_id = $1", old_id
+        ) == 1
+        assert await clean_storage.pg.fetch_val(
+            f"SELECT count(*) FROM {table} WHERE work_id = $1", new_id
+        ) == 0
+    records = await clean_storage.neo4j.execute_read(
+        """MATCH (n) WHERE (n:Work OR n:Chunk) AND n.work_id IN [$old_id, $new_id]
+        RETURN labels(n) AS labels, n.work_id AS work_id, count(n) AS count
+        ORDER BY labels(n), work_id""",
+        {"old_id": old_id, "new_id": new_id},
+    )
+    assert records == [
+        {"labels": ["Chunk"], "work_id": old_id, "count": 1},
+        {"labels": ["Chunk"], "work_id": new_id, "count": 1},
+        {"labels": ["Work"], "work_id": old_id, "count": 1},
+    ]
+
+
 async def _insert_rename_source(
     storage: StorageManager, work_id: str, *, with_children: bool = False
 ) -> None:

@@ -51,6 +51,18 @@ class StoreCounts:
     neo_chunk: int
 
 
+@dataclass(frozen=True)
+class Neo4jRename:
+    """The exact nodes committed by one Neo4j rename transaction."""
+
+    work_ids: tuple[str, ...]
+    chunk_ids: tuple[str, ...]
+
+    @property
+    def counts(self) -> tuple[int, int]:
+        return len(self.work_ids), len(self.chunk_ids)
+
+
 class PgConnection(Protocol):
     async def execute(self, query: str, *args: Any) -> str: ...
 
@@ -106,14 +118,48 @@ NEO_RENAME_QUERY = """
 CALL () {
   MATCH (w:Work {work_id: $from_id})
   SET w.work_id = $to_id
-  RETURN count(w) AS work_count
+  RETURN count(w) AS work_count, collect(elementId(w)) AS work_ids
 }
 CALL () {
   MATCH (c:Chunk {work_id: $from_id})
   SET c.work_id = $to_id
-  RETURN count(c) AS chunk_count
+  RETURN count(c) AS chunk_count, collect(elementId(c)) AS chunk_ids
 }
-RETURN work_count, chunk_count
+RETURN work_count, work_ids, chunk_count, chunk_ids
+"""
+
+# Both SET clauses are conditional on every captured identity still carrying
+# the replacement id. A changed scope therefore commits a no-op, never a
+# partial or broad reverse rename.
+NEO_COMPENSATE_QUERY = """
+CALL () {
+  UNWIND $work_ids AS work_element_id
+  OPTIONAL MATCH (w:Work)
+  WHERE elementId(w) = work_element_id AND w.work_id = $from_id
+  RETURN collect(w) AS works
+}
+CALL () {
+  UNWIND $chunk_ids AS chunk_element_id
+  OPTIONAL MATCH (c:Chunk)
+  WHERE elementId(c) = chunk_element_id AND c.work_id = $from_id
+  RETURN collect(c) AS chunks
+}
+WITH works, chunks,
+     size($work_ids) AS expected_work_count,
+     size($chunk_ids) AS expected_chunk_count
+WITH works, chunks, expected_work_count, expected_chunk_count,
+     size(works) = expected_work_count AND size(chunks) = expected_chunk_count
+       AS exact_scope
+FOREACH (w IN CASE WHEN exact_scope THEN works ELSE [] END |
+  SET w.work_id = $to_id
+)
+FOREACH (c IN CASE WHEN exact_scope THEN chunks ELSE [] END |
+  SET c.work_id = $to_id
+)
+RETURN size(works) AS work_count,
+       expected_work_count,
+       size(chunks) AS chunk_count,
+       expected_chunk_count
 """
 
 
@@ -250,11 +296,23 @@ async def _apply_neo4j(storage: Storage, old_id: str, new_id: str) -> list[Any]:
     return await storage.neo4j.execute_write(NEO_RENAME_QUERY, {"from_id": old_id, "to_id": new_id})
 
 
-def _neo4j_affected_counts(records: list[Any]) -> tuple[int, int]:
+def _neo4j_rename_result(records: list[Any]) -> Neo4jRename:
     if len(records) != 1:
         raise RenameError("Neo4j rename returned an unexpected result")
     actual = records[0]
-    return int(actual["work_count"]), int(actual["chunk_count"])
+    work_ids = tuple(str(element_id) for element_id in actual["work_ids"])
+    chunk_ids = tuple(str(element_id) for element_id in actual["chunk_ids"])
+    result = Neo4jRename(work_ids=work_ids, chunk_ids=chunk_ids)
+    reported_counts = int(actual["work_count"]), int(actual["chunk_count"])
+    if result.counts != reported_counts:
+        raise RenameError(
+            "Neo4j rename returned counts inconsistent with captured identities: "
+            f"counts Work={reported_counts[0]}, Chunk={reported_counts[1]}; "
+            f"identities Work={result.counts[0]}, Chunk={result.counts[1]}"
+        )
+    if len(set(work_ids)) != len(work_ids) or len(set(chunk_ids)) != len(chunk_ids):
+        raise RenameError("Neo4j rename returned duplicate captured identities")
+    return result
 
 
 def _assert_neo4j_affected_counts(actual: tuple[int, int], expected: tuple[int, int]) -> None:
@@ -268,36 +326,53 @@ async def _compensate_neo4j(
     storage: Storage,
     old_id: str,
     new_id: str,
-    forward_counts: tuple[int, int] | None,
+    forward: Neo4jRename | None,
     preflight_counts: tuple[int, int],
+    cause: Exception,
 ) -> None:
-    expected = forward_counts or preflight_counts
     reverse_counts: tuple[int, int] | None = None
     try:
-        records = await _apply_neo4j(storage, new_id, old_id)
-        reverse_counts = _neo4j_affected_counts(records)
-        if reverse_counts != expected:
+        if forward is None:
             raise RenameError(
-                "reverse rename affected unexpected counts: "
-                f"Work={reverse_counts[0]}, Chunk={reverse_counts[1]}"
+                "forward: unavailable; reverse: not attempted"
+            )
+        records = await storage.neo4j.execute_write(
+            NEO_COMPENSATE_QUERY,
+            {
+                "from_id": new_id,
+                "to_id": old_id,
+                "work_ids": list(forward.work_ids),
+                "chunk_ids": list(forward.chunk_ids),
+            },
+        )
+        if len(records) != 1:
+            raise RenameError("reverse: unexpected Neo4j result")
+        actual = records[0]
+        reverse_counts = int(actual["work_count"]), int(actual["chunk_count"])
+        expected_counts = int(actual["expected_work_count"]), int(actual["expected_chunk_count"])
+        if reverse_counts != expected_counts or expected_counts != forward.counts:
+            raise RenameError(
+                "reverse: captured identity scope did not match before mutation: "
+                f"matched Work={reverse_counts[0]}/{expected_counts[0]}, "
+                f"Chunk={reverse_counts[1]}/{expected_counts[1]}"
             )
     except Exception as exc:
-        forward = (
-            f"Work={forward_counts[0]}, Chunk={forward_counts[1]}"
-            if forward_counts is not None
+        forward_details = (
+            f"Work={forward.counts[0]}, Chunk={forward.counts[1]}"
+            if forward is not None
             else "unavailable"
         )
-        reverse = (
+        reverse_details = (
             f"Work={reverse_counts[0]}, Chunk={reverse_counts[1]}"
             if reverse_counts is not None
-            else "unavailable"
+            else "not attempted"
         )
         raise RenameError(
             "Neo4j compensation failed; manual repair required: "
             f"rename Work/Chunk work_id from {new_id!r} back to {old_id!r}. "
             f"Preflight Work={preflight_counts[0]}, Chunk={preflight_counts[1]}; "
-            f"forward committed {forward}; reverse affected {reverse}. "
-            f"Reverse error: {exc}"
+            f"forward: {forward_details}; reverse: {reverse_details}. "
+            f"Cause: {cause}. Reverse error: {exc}"
         ) from exc
 
 
@@ -342,7 +417,7 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
     await _assert_global_consistency(storage)
 
     neo_changed = False
-    neo_affected: tuple[int, int] | None = None
+    neo_affected: Neo4jRename | None = None
     pg_committed = False
     try:
         async with storage.pg.transaction() as conn:
@@ -352,13 +427,13 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
             # that fact before inspecting its result, because every validation
             # below can raise and must trigger the reverse rename.
             neo_changed = True
-            neo_affected = _neo4j_affected_counts(records)
-            _assert_neo4j_affected_counts(neo_affected, (source.neo_work, source.neo_chunk))
+            neo_affected = _neo4j_rename_result(records)
+            _assert_neo4j_affected_counts(neo_affected.counts, (source.neo_work, source.neo_chunk))
             await _assert_local_postconditions(storage, conn, old_id, new_id, children, source)
         pg_committed = True
         await _assert_global_consistency(storage)
         return source
-    except Exception:
+    except Exception as exc:
         # PostgreSQL rolls back automatically while inside its transaction. If
         # Neo4j committed before the PostgreSQL context exited; put it back if
         # the enclosing PG transaction is about to roll back.  If a later
@@ -371,6 +446,7 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
                 new_id,
                 neo_affected,
                 (source.neo_work, source.neo_chunk),
+                exc,
             )
         raise
 

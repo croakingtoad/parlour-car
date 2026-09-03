@@ -49,10 +49,15 @@ class FakeStorage:
 
 class FailingCompensationStorage:
     class Neo4j:
+        def __init__(self) -> None:
+            self.write_calls = 0
+
         async def execute_write(self, *args: Any, **kwargs: Any) -> list[dict[str, int]]:
+            self.write_calls += 1
             raise RuntimeError("injected reverse failure")
 
-    neo4j = Neo4j()
+    def __init__(self) -> None:
+        self.neo4j = self.Neo4j()
 
 
 class StatefulPg:
@@ -82,7 +87,9 @@ class StatefulPg:
     async def execute(self, query: str, *args: Any) -> str:
         if query == "SET CONSTRAINTS ALL DEFERRED":
             return "SET CONSTRAINTS"
-        table = next(table for table in self.rows if f'"{table}"' in query)
+        table = next(
+            table for table in self.rows if f'"{table}"' in query or f"UPDATE {table} " in query
+        )
         if self.fail_on == table:
             raise RuntimeError("injected PostgreSQL failure")
         new_id, old_id = args
@@ -114,6 +121,7 @@ class StatefulPg:
 class StatefulNeo4j:
     def __init__(self) -> None:
         self.rows = {"Work": {"old"}, "Chunk": {"old"}}
+        self.write_calls = 0
 
     async def execute_read(self, _query: str, params: dict[str, str]) -> list[dict[str, int]]:
         work_id = params["work_id"]
@@ -123,6 +131,10 @@ class StatefulNeo4j:
                 "chunk_count": int(work_id in self.rows["Chunk"]),
             }
         ]
+
+    async def execute_write(self, *args: Any, **kwargs: Any) -> list[dict[str, int]]:
+        self.write_calls += 1
+        raise AssertionError("reverse write must not be attempted without captured identities")
 
 
 class StatefulStorage:
@@ -178,22 +190,66 @@ async def test_mid_transaction_failure_rolls_back_prior_child_update(
 
 
 @pytest.mark.asyncio
-async def test_failed_neo4j_compensation_reports_manual_repair_details() -> None:
+async def test_failed_neo4j_compensation_reports_manual_repair_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     with pytest.raises(rename.RenameError) as raised:
         await rename._compensate_neo4j(
             FailingCompensationStorage(),
             "old-id",
             "new-id",
-            (1, 2),
+            rename.Neo4jRename(("work-1",), ("chunk-1", "chunk-2")),
             (1, 1),
+            RuntimeError("original forward validation failure"),
         )
 
     message = str(raised.value)
     assert "from 'new-id' back to 'old-id'" in message
     assert "Preflight Work=1, Chunk=1" in message
-    assert "forward committed Work=1, Chunk=2" in message
-    assert "reverse affected unavailable" in message
+    assert "forward: Work=1, Chunk=2" in message
+    assert "reverse: not attempted" in message
+    assert "original forward validation failure" in message
     assert "injected reverse failure" in message
+
+    storage = FailingCompensationStorage()
+    with pytest.raises(rename.RenameError) as raised:
+        await rename._compensate_neo4j(
+            storage,
+            "old-id",
+            "new-id",
+            None,
+            (1, 1),
+            rename.RenameError("Neo4j rename returned an unexpected result"),
+        )
+
+    message = str(raised.value)
+    assert "Preflight Work=1, Chunk=1" in message
+    assert "forward: unavailable" in message
+    assert "reverse: not attempted" in message
+    assert "Neo4j rename returned an unexpected result" in message
+    assert storage.neo4j.write_calls == 0
+
+    storage = StatefulStorage(fail_on="")
+
+    async def clean(*args: Any) -> None:
+        return None
+
+    async def malformed_forward(*args: Any) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(rename, "_assert_global_consistency", clean)
+    monkeypatch.setattr(rename, "_apply_neo4j", malformed_forward)
+
+    with pytest.raises(rename.RenameError) as raised:
+        await rename.execute_rename(storage, "old", "new")
+
+    message = str(raised.value)
+    assert "Preflight Work=1, Chunk=1" in message
+    assert "forward: unavailable" in message
+    assert "reverse: not attempted" in message
+    assert "Neo4j rename returned an unexpected result" in message
+    assert storage.neo4j.write_calls == 0
+    assert storage.pg.rolled_back is True
 
 
 def test_immediate_fk_constraints_are_refused() -> None:
