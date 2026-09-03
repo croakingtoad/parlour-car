@@ -143,7 +143,7 @@ class TestAuthorUpsertDuringIngestion:
         mock_catalog_entry = MagicMock()
         mock_catalog_entry.work_id = "guite--bibliography"
         mock_catalog_entry.title = "A Bibliography"
-        mock_catalog_entry.author = "Malcolm Guite"
+        mock_catalog_entry.author = "Test Guite"
         mock_catalog_entry.publication_year = 2020
         mock_catalog_entry.genre_tags = ["bibliography"]
 
@@ -197,7 +197,7 @@ class TestAuthorUpsertDuringIngestion:
         assert len(author_upsert_calls) == 1
         call_args = author_upsert_calls[0]
         assert call_args[0][1] == "test--guite"  # author id
-        assert call_args[0][2] == "Malcolm Guite"  # canonical name
+        assert call_args[0][2] == "Test Guite"  # canonical name
 
         # Verify Neo4j Author node + AUTHORED edge
         neo4j_write_calls = mock_neo4j.execute_write.call_args_list
@@ -208,7 +208,7 @@ class TestAuthorUpsertDuringIngestion:
         assert len(author_neo4j_calls) == 1
         neo4j_params = author_neo4j_calls[0][0][1]
         assert neo4j_params["author_id"] == "test--guite"
-        assert neo4j_params["name"] == "Malcolm Guite"
+        assert neo4j_params["name"] == "Test Guite"
         assert neo4j_params["work_id"] == "guite--bibliography"
 
 

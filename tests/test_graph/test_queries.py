@@ -63,7 +63,7 @@ class TestGraphQueryServiceWithNeo4j:
         """Create a test graph with known structure."""
         # Works
         for work in [
-            ("guite--faith-hope-poetry", "Faith Hope and Poetry", "Malcolm Guite", "primary"),
+            ("guite--faith-hope-poetry", "Faith Hope and Poetry", "Test Guite", "primary"),
             ("coleridge--biographia", "Biographia Literaria", "Coleridge", "contextual"),
         ]:
             await neo4j.execute_write(
@@ -100,7 +100,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Persons
         await neo4j.execute_write(
             "MERGE (p:Person {canonical_name: $cn}) SET p.name = $name",
-            {"cn": "test--stc", "name": "Samuel Taylor Coleridge"},
+            {"cn": "test--stc", "name": "Test Coleridge"},
         )
 
         # Arguments

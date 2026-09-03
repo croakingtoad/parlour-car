@@ -354,36 +354,47 @@ class ClassificationPipeline:
         if "," not in author:
             return author
 
-        parts = [p.strip() for p in author.split(",")]
+        # Drop empty segments immediately. A MARC 100 field carries a trailing
+        # comma when $d follows ("Coleridge, Samuel Taylor,"), and an empty tail
+        # segment used to abort the reorder entirely, slugifying the raw string
+        # into a SECOND work_id for an author that already had one.
+        parts = [p.strip() for p in author.split(",") if p.strip()]
+        if not parts:
+            return author
 
-        # A trailing segment that is only a life date / bibliographic
-        # qualifier: "1772-1834", "1637?-1674", "1950-", "b. 1900",
-        # "ca. 1200", "fl. 1550", "d. 1674".
+        # A segment that is only a life date / bibliographic qualifier:
+        # "1772-1834", "1637?-1674", "1950-", "b. 1900", "ca. 1200",
+        # "fl. 1550-1600", "d. 1674?", "[1900-1980]" (RDA), "approximately
+        # 1200", "19th cent.".
         date_qualifier = re.compile(
-            r"^(?:b|d|ca|fl|active)?\.?\s*\d{1,4}\??"
-            r"(?:\s*[-\u2013\u2014]\s*\d{0,4}\??)?\.?$",
+            r"^\[?\s*(?:b|d|ca|fl|active|approximately|circa)?\.?\s*"
+            r"\d{1,4}(?:st|nd|rd|th)?\??"
+            r"(?:\s*[-\u2013\u2014]\s*\d{0,4}\??)?"
+            r"\s*(?:cent\.?|century)?\s*\]?\.?$",
             re.IGNORECASE,
         )
 
-        while len(parts) > 2 and date_qualifier.match(parts[-1]):
-            parts.pop()
+        # Strip date segments anywhere in the tail, not only the last one:
+        # "Smith, John, 1900-1980, Jr." carries the date interior to a suffix.
+        head = parts[0]
+        tail = [p for p in parts[1:] if not date_qualifier.match(p)]
 
         # "Coleridge, 1772-1834" — surname plus dates, no given name.
-        if len(parts) == 2 and date_qualifier.match(parts[-1]) and parts[0]:
-            return parts[0]
+        if not tail:
+            return head
 
-        # Reorder to natural order. Segments beyond the first stay joined
-        # so non-date suffixes keep their prior behaviour ("Smith, John, Jr."
-        # -> "John, Jr. Smith").
-        if len(parts) >= 2 and parts[0] and all(parts[1:]):
-            return f"{', '.join(parts[1:])} {parts[0]}"
+        # Reorder to natural order. Remaining segments stay joined so non-date
+        # suffixes keep their prior behaviour ("Smith, John, Jr." -> "John, Jr.
+        # Smith").
+        return f"{', '.join(tail)} {head}"
 
-        return author
 
     @staticmethod
     def _generate_work_id(author: str | None, title: str | None) -> str:
         """Generate a work_id from author and title per catalog-schema.md §6."""
+        import hashlib
         import re
+        import unicodedata
 
         sentinels = {"unknown", "untitled"}
 
@@ -403,7 +414,12 @@ class ClassificationPipeline:
         title = require_identity_field("title", title)
 
         def slugify(text: str) -> str:
-            slug = text.lower().strip()
+            # Fold diacritics to ASCII rather than deleting them: stripping the
+            # umlaut turned "Böll" into "bll", forking it from the same author
+            # recorded as "Boll" — realistic MARC-vs-EPUB metadata variance.
+            slug = unicodedata.normalize("NFKD", text)
+            slug = "".join(c for c in slug if not unicodedata.combining(c))
+            slug = slug.lower().strip()
             slug = re.sub(r"[^a-z0-9\s-]", "", slug)
             slug = re.sub(r"[\s]+", "-", slug)
             slug = re.sub(r"-+", "-", slug)
@@ -414,6 +430,14 @@ class ClassificationPipeline:
 
         author_slug = slugify(author)
         title_slug = slugify(title)
+
+        if not author_slug:
+            # A fully non-Latin name slugifies to nothing, which produced a
+            # malformed "--title" work_id and collapsed EVERY such author into
+            # one id per title. Fall back to a deterministic digest of the
+            # original name so distinct authors stay distinct.
+            digest = hashlib.sha256(author.encode("utf-8")).hexdigest()[:12]
+            author_slug = f"author-{digest}"
 
         work_id = f"{author_slug}--{title_slug}"
 

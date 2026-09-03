@@ -148,7 +148,7 @@ async def _cleanup_neo4j(neo4j_conn: Neo4jConnection) -> AsyncIterator[None]:
 
 SAMPLE_AUTHOR: dict[str, str] = {
     "id": "test--guite",
-    "canonical_name": "Malcolm Guite",
+    "canonical_name": "Test Guite",
 }
 
 
@@ -158,7 +158,7 @@ SAMPLE_PRIMARY_WORK: dict[str, Any] = {
     "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
-        "Authored by Malcolm Guite, the subject author of this collection"
+        "Authored by Test Guite, the subject author of this collection"
     ),
     "publication_year": 2010,
     "publisher": "Ashgate Publishing",
@@ -172,11 +172,11 @@ SAMPLE_PRIMARY_WORK: dict[str, Any] = {
 
 SAMPLE_PRIMARY_WORK_2: dict[str, Any] = {
     "work_id": "test--mariner",
-    "title": "Mariner: A Voyage with Samuel Taylor Coleridge",
+    "title": "Mariner: A Voyage with Test Coleridge",
     "author": "test--guite",
     "source_class": "primary",
     "source_class_note": (
-        "Authored by Malcolm Guite, the subject author of this collection"
+        "Authored by Test Guite, the subject author of this collection"
     ),
     "publication_year": 2017,
     "publisher": "Hodder & Stoughton",

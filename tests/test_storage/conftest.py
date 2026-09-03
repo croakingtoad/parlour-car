@@ -41,7 +41,10 @@ async def pg_pool(db_settings: DatabaseSettings) -> AsyncIterator[PostgresPool]:
 
 
 @pytest.fixture
-async def neo4j_conn(db_settings: DatabaseSettings) -> AsyncIterator[Neo4jConnection]:
+async def neo4j_conn(
+    db_settings: DatabaseSettings,
+    assert_graph_is_disposable: None,
+) -> AsyncIterator[Neo4jConnection]:
     """Provide a connected Neo4j driver, cleaned up after the test."""
     conn = Neo4jConnection(db_settings)
     await conn.connect()
@@ -50,7 +53,10 @@ async def neo4j_conn(db_settings: DatabaseSettings) -> AsyncIterator[Neo4jConnec
 
 
 @pytest.fixture
-async def storage(db_settings: DatabaseSettings) -> AsyncIterator[StorageManager]:
+async def storage(
+    db_settings: DatabaseSettings,
+    assert_graph_is_disposable: None,
+) -> AsyncIterator[StorageManager]:
     """Provide a fully connected StorageManager with migrations applied."""
     mgr = StorageManager(db_settings, pg_min_pool=1, pg_max_pool=3)
     await mgr.connect(run_pg_migrations=True, init_neo4j_schema=True)
