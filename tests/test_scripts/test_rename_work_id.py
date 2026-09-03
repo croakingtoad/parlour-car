@@ -47,6 +47,14 @@ class FakeStorage:
     pg = object()
 
 
+class FailingCompensationStorage:
+    class Neo4j:
+        async def execute_write(self, *args: Any, **kwargs: Any) -> list[dict[str, int]]:
+            raise RuntimeError("injected reverse failure")
+
+    neo4j = Neo4j()
+
+
 class StatefulPg:
     """In-memory PostgreSQL double that rolls back applied row mutations."""
 
@@ -141,8 +149,7 @@ async def test_children_update_before_parent() -> None:
     await rename._apply_postgres(conn, "old", "new", _children(), _counts())
     expected_order = ["chunks", "thematic_appearances", "session_sources", "works"]
     actual_order = [
-        next(name for name in expected_order if name in query)
-        for query in conn.calls[1:]
+        next(name for name in expected_order if name in query) for query in conn.calls[1:]
     ]
     assert actual_order == expected_order
 
@@ -168,6 +175,25 @@ async def test_mid_transaction_failure_rolls_back_prior_child_update(
         "session_sources": {"old"},
     }
     assert storage.pg.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_failed_neo4j_compensation_reports_manual_repair_details() -> None:
+    with pytest.raises(rename.RenameError) as raised:
+        await rename._compensate_neo4j(
+            FailingCompensationStorage(),
+            "old-id",
+            "new-id",
+            (1, 2),
+            (1, 1),
+        )
+
+    message = str(raised.value)
+    assert "from 'new-id' back to 'old-id'" in message
+    assert "Preflight Work=1, Chunk=1" in message
+    assert "forward committed Work=1, Chunk=2" in message
+    assert "reverse affected unavailable" in message
+    assert "injected reverse failure" in message
 
 
 def test_immediate_fk_constraints_are_refused() -> None:

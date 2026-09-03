@@ -150,8 +150,7 @@ async def discover_child_tables(pg: Any) -> list[PgChildTable]:
 
 async def _pg_count(pg: Any, table: str, column: str, work_id: str) -> int:
     query = (
-        f"SELECT count(*) FROM {_quote_identifier(table)} "
-        f"WHERE {_quote_identifier(column)} = $1"
+        f"SELECT count(*) FROM {_quote_identifier(table)} WHERE {_quote_identifier(column)} = $1"
     )
     # PostgresPool calls the helper fetch_val; an acquired asyncpg connection
     # calls it fetchval.  Supporting both keeps post-condition reads on the
@@ -181,19 +180,17 @@ async def collect_counts(
     )
 
 
-def _same_counts(actual: StoreCounts, expected: StoreCounts) -> bool:
-    return actual == expected
-
-
 def _format_counts(label: str, counts: StoreCounts) -> list[str]:
     lines = [f"{label} PostgreSQL:", f"  works: {counts.pg_work}"]
     for table, count in counts.pg_children.items():
         lines.append(f"  {table}: {count}")
-    lines.extend([
-        f"{label} Neo4j:",
-        f"  Work: {counts.neo_work}",
-        f"  Chunk: {counts.neo_chunk}",
-    ])
+    lines.extend(
+        [
+            f"{label} Neo4j:",
+            f"  Work: {counts.neo_work}",
+            f"  Chunk: {counts.neo_chunk}",
+        ]
+    )
     return lines
 
 
@@ -202,13 +199,11 @@ def _assert_source_is_renameable(source: StoreCounts, target: StoreCounts) -> No
         raise RenameError("target work_id already exists in PostgreSQL or Neo4j")
     if source.pg_work != 1:
         raise RenameError(
-            "expected exactly one PostgreSQL works row for source, "
-            f"found {source.pg_work}"
+            f"expected exactly one PostgreSQL works row for source, found {source.pg_work}"
         )
     if source.neo_work != 1:
         raise RenameError(
-            "expected exactly one Neo4j Work node for source, "
-            f"found {source.neo_work}"
+            f"expected exactly one Neo4j Work node for source, found {source.neo_work}"
         )
 
 
@@ -246,28 +241,64 @@ async def _apply_postgres(
                 f"{child.display_name}: expected to update {expected_rows} rows, updated {actual}"
             )
 
-    status = await conn.execute(
-        "UPDATE works SET work_id = $1 WHERE work_id = $2", new_id, old_id
-    )
+    status = await conn.execute("UPDATE works SET work_id = $1 WHERE work_id = $2", new_id, old_id)
     if _updated_row_count(status) != 1:
         raise RenameError("works: expected to update exactly one row")
 
 
-async def _apply_neo4j(storage: Storage, old_id: str, new_id: str, expected: StoreCounts) -> None:
-    records = await storage.neo4j.execute_write(
-        NEO_RENAME_QUERY, {"from_id": old_id, "to_id": new_id}
-    )
+async def _apply_neo4j(storage: Storage, old_id: str, new_id: str) -> list[Any]:
+    return await storage.neo4j.execute_write(NEO_RENAME_QUERY, {"from_id": old_id, "to_id": new_id})
+
+
+def _neo4j_affected_counts(records: list[Any]) -> tuple[int, int]:
     if len(records) != 1:
         raise RenameError("Neo4j rename returned an unexpected result")
     actual = records[0]
-    if (
-        int(actual["work_count"]) != expected.neo_work
-        or int(actual["chunk_count"]) != expected.neo_chunk
-    ):
+    return int(actual["work_count"]), int(actual["chunk_count"])
+
+
+def _assert_neo4j_affected_counts(actual: tuple[int, int], expected: tuple[int, int]) -> None:
+    if actual != expected:
         raise RenameError(
-            "Neo4j rename count changed during operation: "
-            f"Work={actual['work_count']}, Chunk={actual['chunk_count']}"
+            f"Neo4j rename count changed during operation: Work={actual[0]}, Chunk={actual[1]}"
         )
+
+
+async def _compensate_neo4j(
+    storage: Storage,
+    old_id: str,
+    new_id: str,
+    forward_counts: tuple[int, int] | None,
+    preflight_counts: tuple[int, int],
+) -> None:
+    expected = forward_counts or preflight_counts
+    reverse_counts: tuple[int, int] | None = None
+    try:
+        records = await _apply_neo4j(storage, new_id, old_id)
+        reverse_counts = _neo4j_affected_counts(records)
+        if reverse_counts != expected:
+            raise RenameError(
+                "reverse rename affected unexpected counts: "
+                f"Work={reverse_counts[0]}, Chunk={reverse_counts[1]}"
+            )
+    except Exception as exc:
+        forward = (
+            f"Work={forward_counts[0]}, Chunk={forward_counts[1]}"
+            if forward_counts is not None
+            else "unavailable"
+        )
+        reverse = (
+            f"Work={reverse_counts[0]}, Chunk={reverse_counts[1]}"
+            if reverse_counts is not None
+            else "unavailable"
+        )
+        raise RenameError(
+            "Neo4j compensation failed; manual repair required: "
+            f"rename Work/Chunk work_id from {new_id!r} back to {old_id!r}. "
+            f"Preflight Work={preflight_counts[0]}, Chunk={preflight_counts[1]}; "
+            f"forward committed {forward}; reverse affected {reverse}. "
+            f"Reverse error: {exc}"
+        ) from exc
 
 
 async def _assert_local_postconditions(
@@ -311,12 +342,18 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
     await _assert_global_consistency(storage)
 
     neo_changed = False
+    neo_affected: tuple[int, int] | None = None
     pg_committed = False
     try:
         async with storage.pg.transaction() as conn:
             await _apply_postgres(conn, old_id, new_id, children, source)
-            await _apply_neo4j(storage, old_id, new_id, source)
+            records = await _apply_neo4j(storage, old_id, new_id)
+            # execute_write returns only after its transaction commits. Record
+            # that fact before inspecting its result, because every validation
+            # below can raise and must trigger the reverse rename.
             neo_changed = True
+            neo_affected = _neo4j_affected_counts(records)
+            _assert_neo4j_affected_counts(neo_affected, (source.neo_work, source.neo_chunk))
             await _assert_local_postconditions(storage, conn, old_id, new_id, children, source)
         pg_committed = True
         await _assert_global_consistency(storage)
@@ -328,7 +365,13 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
         # global read detects concurrent external damage after both commits,
         # the tool fails loudly rather than attempting an unsafe second rename.
         if neo_changed and not pg_committed:
-            await _apply_neo4j(storage, new_id, old_id, source)
+            await _compensate_neo4j(
+                storage,
+                old_id,
+                new_id,
+                neo_affected,
+                (source.neo_work, source.neo_chunk),
+            )
         raise
 
 
