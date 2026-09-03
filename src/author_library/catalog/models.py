@@ -189,10 +189,10 @@ class CatalogEntry(BaseModel):
     author: NonEmptyStr
     source_class: SourceClass
     source_class_note: ClassificationNote
-    publication_year: int
+    publication_year: int | None
     original_publication_year: int | None = None
     edition: str | None = None
-    publisher: NonEmptyStr
+    publisher: NonEmptyStr | None
     isbn: str | None = None
     format_ingested: FormatIngested
     language: str = "en"

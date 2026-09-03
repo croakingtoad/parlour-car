@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     """Running migrations ensures all migration files are tracked."""
     applied = await run_migrations(pg_pool)
-    # May be 0 (all applied) up to 14 (first run). Test DB state varies.
-    assert len(applied) <= 14
-    # Verify all 13 are recorded in the _migrations table
+    # May be 0 (all applied) up to 15 (first run). Test DB state varies.
+    assert len(applied) <= 15
+    # Verify all 15 are recorded in the _migrations table
     rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
     filenames = [r["filename"] for r in rows]
     assert "001_initial.sql" in filenames
@@ -34,7 +34,21 @@ async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     assert "011_backfill_section_type.sql" in filenames
     assert "012_delete_noise_chunks.sql" in filenames
     assert "013_ingestion_lessons.sql" in filenames
+    assert "014_nullable_publication_metadata.sql" in filenames
     assert "015_deferrable_work_id_foreign_keys.sql" in filenames
+
+
+async def test_publication_metadata_is_nullable(pg_pool: PostgresPool) -> None:
+    """Unknown years and rejected PDF Producer values can be stored as NULL."""
+    await run_migrations(pg_pool)
+    rows = await pg_pool.fetch_all(
+        """SELECT column_name, is_nullable
+        FROM information_schema.columns
+        WHERE table_name = 'works'
+          AND column_name IN ('publication_year', 'publisher')"""
+    )
+    nullability = {row["column_name"]: row["is_nullable"] for row in rows}
+    assert nullability == {"publication_year": "YES", "publisher": "YES"}
 
 
 async def test_migrations_idempotent(pg_pool: PostgresPool) -> None:

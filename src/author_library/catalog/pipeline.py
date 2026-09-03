@@ -285,11 +285,16 @@ class ClassificationPipeline:
         overrides: dict[str, Any],
     ) -> dict[str, Any]:
         """Extract core catalog fields from the document and overrides."""
-        title = overrides.get("title", document.metadata.title or "Untitled")
-        author = overrides.get("author", document.metadata.author or "Unknown")
+        title = overrides.get("title", document.metadata.title)
+        author = overrides.get("author", document.metadata.author)
 
         # Build work_id from author and title slugs
-        work_id = overrides.get("work_id", self._generate_work_id(author, title))
+        if "work_id" in overrides:
+            work_id = overrides["work_id"]
+        else:
+            work_id = self._generate_work_id(author, title)
+
+        publisher = overrides.get("publisher", document.metadata.publisher)
 
         # Determine format from document
         format_ingested = overrides.get("format_ingested", document.format)
@@ -308,7 +313,7 @@ class ClassificationPipeline:
             ),
             "original_publication_year": overrides.get("original_publication_year"),
             "edition": overrides.get("edition"),
-            "publisher": overrides.get("publisher", document.metadata.publisher or "Unknown"),
+            "publisher": self._clean_publisher(publisher),
             "isbn": overrides.get("isbn", document.metadata.isbn),
             "format_ingested": format_ingested,
             "language": overrides.get("language", document.metadata.language),
@@ -376,9 +381,26 @@ class ClassificationPipeline:
         return author
 
     @staticmethod
-    def _generate_work_id(author: str, title: str) -> str:
+    def _generate_work_id(author: str | None, title: str | None) -> str:
         """Generate a work_id from author and title per catalog-schema.md §6."""
         import re
+
+        sentinels = {"unknown", "untitled"}
+
+        def require_identity_field(name: str, value: str | None) -> str:
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value.strip().casefold() in sentinels
+            ):
+                raise ValueError(
+                    "Cannot generate work_id without real author and title metadata; "
+                    f"invalid: {name}"
+                )
+            return value
+
+        author = require_identity_field("author", author)
+        title = require_identity_field("title", title)
 
         def slugify(text: str) -> str:
             slug = text.lower().strip()
@@ -402,14 +424,35 @@ class ClassificationPipeline:
         return work_id
 
     @staticmethod
-    def _extract_year(publication_date: str | None) -> int:
-        """Extract year from a date string, defaulting to current year."""
+    def _extract_year(publication_date: str | None) -> int | None:
+        """Extract a year from a date string, returning None when it is unknown."""
         if publication_date and len(publication_date) >= 4:
             try:
                 return int(publication_date[:4])
             except ValueError:
                 pass
-        return date.today().year
+        return None
+
+    @staticmethod
+    def _clean_publisher(publisher: str | None) -> str | None:
+        """Return real publisher metadata, excluding PDF Producer values."""
+        import re
+
+        if not publisher or not publisher.strip():
+            return None
+
+        publisher = publisher.strip()
+        if publisher.casefold() == "unknown":
+            return None
+
+        producer_pattern = re.compile(
+            r"acrobat|paper\s+capture|mupdf|pymupdf|luradocument|"
+            r"internet\s+archive\s+pdf|recoded\s+by|skimage",
+            re.IGNORECASE,
+        )
+        if producer_pattern.search(publisher):
+            return None
+        return publisher
 
     def _subject_author_slug(self) -> str:
         """Generate a slug from the subject author name."""

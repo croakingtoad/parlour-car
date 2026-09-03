@@ -194,6 +194,17 @@ async def handle_ask_author(
 # ---------------------------------------------------------------------------
 
 
+def _partition_work_chronology(
+    works: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Sort dated works chronologically and keep undated works separate."""
+    chronology = [work for work in works if isinstance(work.get("publication_year"), int)]
+    undated = [work for work in works if not isinstance(work.get("publication_year"), int)]
+    chronology.sort(key=lambda work: work["publication_year"])
+    undated.sort(key=lambda work: (work.get("title", ""), work.get("work_id", "")))
+    return chronology, undated
+
+
 async def handle_trace_theme(
     arguments: dict[str, Any],
     *,
@@ -257,13 +268,13 @@ async def handle_trace_theme(
                 break
 
     # Build chronological view from works metadata
-    chronology: list[dict[str, Any]] = []
+    works_for_theme: list[dict[str, Any]] = []
     work_ids = {c.work_id for c in subgraph.chunks}
     for work_id in sorted(work_ids):
         work = await storage.works.get(work_id)
         if work:
             work_chunks = [c for c in subgraph.chunks if c.work_id == work_id]
-            chronology.append({
+            works_for_theme.append({
                 "work_id": work_id,
                 "title": work.get("title", ""),
                 "publication_year": work.get("publication_year"),
@@ -272,13 +283,14 @@ async def handle_trace_theme(
                 "sample_passages": [c.text_preview for c in work_chunks[:3]],
             })
 
-    chronology.sort(key=lambda x: x.get("publication_year") or 0)
+    chronology, undated_works = _partition_work_chronology(works_for_theme)
 
     result = {
         "theme": subgraph.theme_name,
         "found": True,
         "author_stance": theme_narrative,
         "chronology": chronology,
+        "undated_works": undated_works,
         "arguments": [
             {
                 "claim": arg.claim,
