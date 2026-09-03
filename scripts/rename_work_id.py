@@ -114,6 +114,11 @@ CALL () {
 RETURN work_count, chunk_count
 """
 
+NEO_CHUNK_IDS_QUERY = """
+MATCH (c:Chunk {work_id: $work_id})
+RETURN c.chunk_id AS chunk_id
+"""
+
 NEO_RENAME_QUERY = """
 CALL () {
   MATCH (w:Work {work_id: $from_id})
@@ -253,12 +258,90 @@ def _assert_source_is_renameable(source: StoreCounts, target: StoreCounts) -> No
         )
 
 
-async def _assert_global_consistency(storage: Storage) -> None:
+async def _global_consistency_report(storage: Storage) -> dict[str, Any]:
+    """Return the existing corpus-wide report for a pre/post comparison."""
     from author_library.graph import check_pg_neo4j_consistency
 
-    report = await check_pg_neo4j_consistency(storage)
-    if not report["is_consistent"]:
-        raise RenameError(f"PG/Neo4j consistency check failed: {report}")
+    return await check_pg_neo4j_consistency(storage)
+
+
+async def _chunk_ids_for_work(
+    storage: Storage, work_id: str, *, pg: Any | None = None
+) -> tuple[set[str], set[str]]:
+    """Read the PG and Neo4j chunk identities for one work without mutation."""
+    pg_reader = pg or storage.pg
+    fetch_rows = getattr(pg_reader, "fetch_all", None) or pg_reader.fetch
+    pg_rows = await fetch_rows("SELECT id FROM chunks WHERE work_id = $1", work_id)
+    neo4j_rows = await storage.neo4j.execute_read(NEO_CHUNK_IDS_QUERY, {"work_id": work_id})
+    return (
+        {str(row["id"]) for row in pg_rows},
+        {str(row["chunk_id"]) for row in neo4j_rows},
+    )
+
+
+def _format_chunk_id_difference(pg_chunk_ids: set[str], neo4j_chunk_ids: set[str]) -> str:
+    """Describe an identity mismatch without dumping a production-sized set."""
+    missing_from_neo4j = sorted(pg_chunk_ids - neo4j_chunk_ids)
+    extra_in_neo4j = sorted(neo4j_chunk_ids - pg_chunk_ids)
+    return (
+        f"PG={len(pg_chunk_ids)}, Neo4j={len(neo4j_chunk_ids)}; "
+        f"missing from Neo4j={len(missing_from_neo4j)} {missing_from_neo4j[:3]}; "
+        f"extra in Neo4j={len(extra_in_neo4j)} {extra_in_neo4j[:3]}"
+    )
+
+
+async def _assert_scoped_chunk_identity(
+    storage: Storage, work_ids: tuple[str, str], *, pg: Any | None = None
+) -> None:
+    """Require exact PG/Neo4j chunk_id set equality for the rename scope only."""
+    for work_id in work_ids:
+        pg_chunk_ids, neo4j_chunk_ids = await _chunk_ids_for_work(storage, work_id, pg=pg)
+        if pg_chunk_ids != neo4j_chunk_ids:
+            raise RenameError(
+                f"scoped PG/Neo4j chunk_id mismatch for {work_id!r}: "
+                f"{_format_chunk_id_difference(pg_chunk_ids, neo4j_chunk_ids)}"
+            )
+
+
+def _expected_global_report_after_rename(
+    before: dict[str, Any], old_id: str, new_id: str, source: StoreCounts
+) -> dict[str, Any]:
+    """Express the only permitted corpus-wide report change: this exact remap."""
+    chunk_counts = before.get("chunk_counts")
+    if not isinstance(chunk_counts, list):
+        raise RenameError("global consistency report has no chunk_counts list")
+    old_entries = [entry for entry in chunk_counts if entry.get("work_id") == old_id]
+    new_entries = [entry for entry in chunk_counts if entry.get("work_id") == new_id]
+    expected_source = {
+        "work_id": old_id,
+        "pg_chunks": source.pg_children.get("chunks", 0),
+        "neo4j_chunks": source.neo_chunk,
+        "in_sync": True,
+    }
+    if old_entries != [expected_source] or new_entries:
+        raise RenameError(
+            "global consistency baseline does not describe the intended source/target remap"
+        )
+
+    expected = dict(before)
+    expected["chunk_counts"] = sorted(
+        [entry for entry in chunk_counts if entry.get("work_id") != old_id]
+        + [{**expected_source, "work_id": new_id}],
+        key=lambda entry: str(entry["work_id"]),
+    )
+    return expected
+
+
+def _assert_global_report_changed_only_for_rename(
+    before: dict[str, Any], after: dict[str, Any], old_id: str, new_id: str, source: StoreCounts
+) -> None:
+    """Fail closed if any corpus-wide inconsistency changed beyond this rename."""
+    expected = _expected_global_report_after_rename(before, old_id, new_id, source)
+    if after != expected:
+        raise RenameError(
+            "PG/Neo4j global consistency report changed outside the intended work_id remap: "
+            f"expected {expected}, got {after}"
+        )
 
 
 async def _apply_postgres(
@@ -414,7 +497,8 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
     target = await collect_counts(storage, new_id, children)
     _assert_source_is_renameable(source, target)
     _assert_constraints_are_deferrable(children)
-    await _assert_global_consistency(storage)
+    await _assert_scoped_chunk_identity(storage, (old_id, new_id))
+    global_report_before = await _global_consistency_report(storage)
 
     neo_changed = False
     neo_affected: Neo4jRename | None = None
@@ -430,8 +514,12 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
             neo_affected = _neo4j_rename_result(records)
             _assert_neo4j_affected_counts(neo_affected.counts, (source.neo_work, source.neo_chunk))
             await _assert_local_postconditions(storage, conn, old_id, new_id, children, source)
+            await _assert_scoped_chunk_identity(storage, (old_id, new_id), pg=conn)
         pg_committed = True
-        await _assert_global_consistency(storage)
+        global_report_after = await _global_consistency_report(storage)
+        _assert_global_report_changed_only_for_rename(
+            global_report_before, global_report_after, old_id, new_id, source
+        )
         return source
     except Exception as exc:
         # PostgreSQL rolls back automatically while inside its transaction. If
@@ -470,7 +558,8 @@ async def run(storage: Storage, old_id: str, new_id: str, *, execute: bool) -> i
     print(*_format_counts("target", target), sep="\n")
 
     if _is_completed_noop(source, target):
-        await _assert_global_consistency(storage)
+        await _assert_scoped_chunk_identity(storage, (old_id, new_id))
+        await _global_consistency_report(storage)
         print("NO-OP — source is already absent and target is present.")
         return 0
     _assert_source_is_renameable(source, target)

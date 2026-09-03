@@ -122,6 +122,81 @@ async def test_execution_renames_all_postgresql_and_neo4j_records(
 
 @SKIP_NO_DB
 @pytest.mark.asyncio
+async def test_unrelated_preexisting_drift_does_not_block_scoped_rename(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    unrelated_id = "test--rename-unrelated-drift"
+    await _insert_rename_source(clean_storage, old_id, with_children=True)
+    await clean_storage.neo4j.execute_write(
+        "CREATE (:Work {work_id: $work_id})-[:HAS_CHUNK]->"
+        "(:Chunk {chunk_id: 'test--unrelated-drift-chunk', work_id: $work_id})",
+        {"work_id": unrelated_id},
+    )
+
+    await rename.execute_rename(clean_storage, old_id, new_id)
+
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", new_id
+    ) == 1
+    records = await clean_storage.neo4j.execute_read(
+        "MATCH (c:Chunk {work_id: $work_id}) RETURN c.chunk_id AS chunk_id",
+        {"work_id": new_id},
+    )
+    pg_chunk_ids = await clean_storage.pg.fetch_all(
+        "SELECT id FROM chunks WHERE work_id = $1", new_id
+    )
+    assert {record["chunk_id"] for record in records} == {str(row["id"]) for row in pg_chunk_ids}
+
+
+@SKIP_NO_DB
+@pytest.mark.asyncio
+async def test_mid_rename_chunk_identity_drift_blocks_and_compensates(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    drifted_chunk_id = "test--rename-chunk-identity-drift"
+    await _insert_rename_source(clean_storage, old_id, with_children=True)
+    apply_neo4j = rename._apply_neo4j
+
+    async def apply_neo4j_then_change_chunk_identity(*args: object) -> object:
+        records = await apply_neo4j(*args)
+        await clean_storage.neo4j.execute_write(
+            "MATCH (c:Chunk {work_id: $work_id}) SET c.chunk_id = $chunk_id",
+            {"work_id": new_id, "chunk_id": drifted_chunk_id},
+        )
+        return records
+
+    monkeypatch.setattr(rename, "_apply_neo4j", apply_neo4j_then_change_chunk_identity)
+
+    with pytest.raises(rename.RenameError, match="scoped PG/Neo4j chunk_id mismatch"):
+        await rename.execute_rename(clean_storage, old_id, new_id)
+
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", old_id
+    ) == 1
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", new_id
+    ) == 0
+    records = await clean_storage.neo4j.execute_read(
+        "MATCH (n) WHERE (n:Work OR n:Chunk) AND n.work_id IN [$old_id, $new_id] "
+        "RETURN labels(n) AS labels, n.chunk_id AS chunk_id, n.work_id AS work_id "
+        "ORDER BY labels(n), chunk_id",
+        {"old_id": old_id, "new_id": new_id},
+    )
+    assert records == [
+        {"labels": ["Chunk"], "chunk_id": drifted_chunk_id, "work_id": old_id},
+        {"labels": ["Work"], "chunk_id": None, "work_id": old_id},
+    ]
+
+
+@SKIP_NO_DB
+@pytest.mark.asyncio
 async def test_neo4j_count_change_after_preflight_compensates_both_stores(
     clean_storage: StorageManager,
     assert_graph_is_disposable: None,
@@ -229,23 +304,27 @@ async def test_reverse_scope_mismatch_leaves_captured_neo4j_nodes_untouched(
     new_id = "test--rename-target"
     drifted_id = "test--rename-third-id"
     await _insert_rename_source(clean_storage, old_id, with_children=True)
-    await clean_storage.pg.execute(
+    first_graph_chunk_id = await clean_storage.pg.fetch_val(
+        "SELECT id FROM chunks WHERE work_id = $1 AND position = 1", old_id
+    )
+    graph_chunk_id = await clean_storage.pg.fetch_val(
         """INSERT INTO chunks (work_id, text, granularity, source_class, position)
-        VALUES ($1, 'Second source text', 'macro', 'secondary', 2)""",
+        VALUES ($1, 'Second source text', 'macro', 'secondary', 2)
+        RETURNING id""",
         old_id,
     )
     await clean_storage.neo4j.execute_write(
-        "CREATE (:Chunk {chunk_id: 'test--rename-drifted-chunk', work_id: $work_id})",
-        {"work_id": old_id},
+        "CREATE (:Chunk {chunk_id: $chunk_id, work_id: $work_id})",
+        {"chunk_id": str(graph_chunk_id), "work_id": old_id},
     )
     apply_neo4j = rename._apply_neo4j
 
     async def apply_neo4j_then_move_captured_chunk(*args: object) -> object:
         records = await apply_neo4j(*args)
         await clean_storage.neo4j.execute_write(
-            """MATCH (c:Chunk {chunk_id: 'test--rename-drifted-chunk'})
+            """MATCH (c:Chunk {chunk_id: $chunk_id})
             SET c.work_id = $work_id""",
-            {"work_id": drifted_id},
+            {"chunk_id": str(graph_chunk_id), "work_id": drifted_id},
         )
         return records
 
@@ -273,10 +352,10 @@ async def test_reverse_scope_mismatch_leaves_captured_neo4j_nodes_untouched(
         {"work_ids": [old_id, new_id, drifted_id]},
     )
     assert records == [
-        {"labels": ["Chunk"], "chunk_id": "test--rename-chunk", "work_id": new_id},
+        {"labels": ["Chunk"], "chunk_id": str(first_graph_chunk_id), "work_id": new_id},
         {
             "labels": ["Chunk"],
-            "chunk_id": "test--rename-drifted-chunk",
+            "chunk_id": str(graph_chunk_id),
             "work_id": drifted_id,
         },
         {"labels": ["Work"], "chunk_id": None, "work_id": new_id},
@@ -345,9 +424,10 @@ async def _insert_rename_source(
     if not with_children:
         return
 
-    await storage.pg.execute(
+    graph_chunk_id = await storage.pg.fetch_val(
         """INSERT INTO chunks (work_id, text, granularity, source_class, position)
-        VALUES ($1, 'Source text', 'macro', 'secondary', 1)""",
+        VALUES ($1, 'Source text', 'macro', 'secondary', 1)
+        RETURNING id""",
         work_id,
     )
     await storage.pg.execute(
@@ -364,6 +444,6 @@ async def _insert_rename_source(
         work_id,
     )
     await storage.neo4j.execute_write(
-        "CREATE (:Chunk {chunk_id: 'test--rename-chunk', work_id: $work_id})",
-        {"work_id": work_id},
+        "CREATE (:Chunk {chunk_id: $chunk_id, work_id: $work_id})",
+        {"chunk_id": str(graph_chunk_id), "work_id": work_id},
     )

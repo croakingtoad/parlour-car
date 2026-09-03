@@ -172,10 +172,11 @@ async def test_mid_transaction_failure_rolls_back_prior_child_update(
 ) -> None:
     storage = StatefulStorage(fail_on="thematic_appearances")
 
-    async def clean(*args: Any) -> None:
+    async def scoped_clean(*args: Any, **kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(rename, "_assert_global_consistency", clean)
+    monkeypatch.setattr(rename, "_assert_scoped_chunk_identity", scoped_clean)
+    monkeypatch.setattr(rename, "_global_consistency_report", scoped_clean)
     with pytest.raises(RuntimeError, match="injected"):
         await rename.execute_rename(storage, "old", "new")
 
@@ -231,13 +232,14 @@ async def test_failed_neo4j_compensation_reports_manual_repair_details(
 
     storage = StatefulStorage(fail_on="")
 
-    async def clean(*args: Any) -> None:
+    async def scoped_clean(*args: Any, **kwargs: Any) -> None:
         return None
 
     async def malformed_forward(*args: Any) -> list[Any]:
         return []
 
-    monkeypatch.setattr(rename, "_assert_global_consistency", clean)
+    monkeypatch.setattr(rename, "_assert_scoped_chunk_identity", scoped_clean)
+    monkeypatch.setattr(rename, "_global_consistency_report", scoped_clean)
     monkeypatch.setattr(rename, "_apply_neo4j", malformed_forward)
 
     with pytest.raises(rename.RenameError) as raised:
@@ -293,10 +295,14 @@ async def test_already_renamed_is_noop_without_writes(monkeypatch: pytest.Monkey
     async def fake_collect(_storage: Any, work_id: str, *args: Any, **kwargs: Any) -> Any:
         return empty if work_id == "old" else completed
 
-    async def clean(*args: Any) -> None:
+    async def scoped_clean(*args: Any, **kwargs: Any) -> None:
         return None
+
+    async def global_report(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
 
     monkeypatch.setattr(rename, "discover_child_tables", fake_discover)
     monkeypatch.setattr(rename, "collect_counts", fake_collect)
-    monkeypatch.setattr(rename, "_assert_global_consistency", clean)
+    monkeypatch.setattr(rename, "_assert_scoped_chunk_identity", scoped_clean)
+    monkeypatch.setattr(rename, "_global_consistency_report", global_report)
     assert await rename.run(FakeStorage(), "old", "new", execute=True) == 0
