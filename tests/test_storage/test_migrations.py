@@ -15,13 +15,14 @@ if TYPE_CHECKING:
 
 async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     """Running migrations ensures all migration files are tracked."""
-    applied = await run_migrations(pg_pool)
-    # May be 0 (all applied) up to every discovered migration (first run).
-    # Test DB state varies.
-    assert len(applied) <= len(_discover_migrations())
+    await run_migrations(pg_pool)
     # Verify all discovered migrations are recorded in the _migrations table
     rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
     filenames = [r["filename"] for r in rows]
+    discovered = {migration.name for migration in _discover_migrations()}
+    assert discovered.issubset(filenames), (
+        f"Not recorded: {discovered - set(filenames)}"
+    )
     assert "001_initial.sql" in filenames
     assert "002_indexes.sql" in filenames
     assert "003_fulltext.sql" in filenames
@@ -40,7 +41,7 @@ async def test_migrations_apply(pg_pool: PostgresPool) -> None:
 
 async def test_migrations_idempotent(pg_pool: PostgresPool) -> None:
     """Running migrations twice does not re-apply."""
-    # First run may apply 0 or 9 depending on test ordering
+    # First-run results depend on test ordering.
     await run_migrations(pg_pool)
     # Second run should always apply 0 — the idempotency guarantee
     second = await run_migrations(pg_pool)
