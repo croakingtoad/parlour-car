@@ -218,6 +218,114 @@ async def test_target_side_neo4j_drift_preserves_independent_target_nodes(
     ]
 
 
+@SKIP_NO_DB
+@pytest.mark.asyncio
+async def test_reverse_scope_mismatch_leaves_captured_neo4j_nodes_untouched(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    drifted_id = "test--rename-third-id"
+    await _insert_rename_source(clean_storage, old_id, with_children=True)
+    await clean_storage.pg.execute(
+        """INSERT INTO chunks (work_id, text, granularity, source_class, position)
+        VALUES ($1, 'Second source text', 'macro', 'secondary', 2)""",
+        old_id,
+    )
+    await clean_storage.neo4j.execute_write(
+        "CREATE (:Chunk {chunk_id: 'test--rename-drifted-chunk', work_id: $work_id})",
+        {"work_id": old_id},
+    )
+    apply_neo4j = rename._apply_neo4j
+
+    async def apply_neo4j_then_move_captured_chunk(*args: object) -> object:
+        records = await apply_neo4j(*args)
+        await clean_storage.neo4j.execute_write(
+            """MATCH (c:Chunk {chunk_id: 'test--rename-drifted-chunk'})
+            SET c.work_id = $work_id""",
+            {"work_id": drifted_id},
+        )
+        return records
+
+    monkeypatch.setattr(rename, "_apply_neo4j", apply_neo4j_then_move_captured_chunk)
+
+    with pytest.raises(
+        rename.RenameError,
+        match="reverse: captured identity scope did not match before mutation",
+    ):
+        await rename.execute_rename(clean_storage, old_id, new_id)
+
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", old_id
+    ) == 1
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM chunks WHERE work_id = $1", old_id
+    ) == 2
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", new_id
+    ) == 0
+    records = await clean_storage.neo4j.execute_read(
+        """MATCH (n) WHERE (n:Work OR n:Chunk) AND n.work_id IN $work_ids
+        RETURN labels(n) AS labels, n.chunk_id AS chunk_id, n.work_id AS work_id
+        ORDER BY labels(n), chunk_id""",
+        {"work_ids": [old_id, new_id, drifted_id]},
+    )
+    assert records == [
+        {"labels": ["Chunk"], "chunk_id": "test--rename-chunk", "work_id": new_id},
+        {
+            "labels": ["Chunk"],
+            "chunk_id": "test--rename-drifted-chunk",
+            "work_id": drifted_id,
+        },
+        {"labels": ["Work"], "chunk_id": None, "work_id": new_id},
+    ]
+
+
+@SKIP_NO_DB
+@pytest.mark.asyncio
+async def test_zero_chunk_source_compensates_its_captured_work_node(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    await _insert_rename_source(clean_storage, old_id)
+    apply_neo4j = rename._apply_neo4j
+
+    async def apply_neo4j_then_insert_target_drift(*args: object) -> object:
+        records = await apply_neo4j(*args)
+        await clean_storage.neo4j.execute_write(
+            "CREATE (:Chunk {chunk_id: 'test--rename-zero-chunk-drift', work_id: $work_id})",
+            {"work_id": new_id},
+        )
+        return records
+
+    monkeypatch.setattr(rename, "_apply_neo4j", apply_neo4j_then_insert_target_drift)
+
+    with pytest.raises(rename.RenameError, match="new work_id post-condition failed"):
+        await rename.execute_rename(clean_storage, old_id, new_id)
+
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", old_id
+    ) == 1
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM chunks WHERE work_id = $1", old_id
+    ) == 0
+    records = await clean_storage.neo4j.execute_read(
+        """MATCH (n) WHERE (n:Work OR n:Chunk) AND n.work_id IN [$old_id, $new_id]
+        RETURN labels(n) AS labels, n.work_id AS work_id, count(n) AS count
+        ORDER BY labels(n), work_id""",
+        {"old_id": old_id, "new_id": new_id},
+    )
+    assert records == [
+        {"labels": ["Chunk"], "work_id": new_id, "count": 1},
+        {"labels": ["Work"], "work_id": old_id, "count": 1},
+    ]
+
+
 async def _insert_rename_source(
     storage: StorageManager, work_id: str, *, with_children: bool = False
 ) -> None:
