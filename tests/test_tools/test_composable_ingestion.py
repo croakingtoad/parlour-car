@@ -262,8 +262,7 @@ class TestCanonicalChunkIds:
             )
 
         graph_chunks = [
-            call.args[0]["chunk_id"]
-            for call in storage.graph.upsert_chunk_node.await_args_list
+            call.args[0]["chunk_id"] for call in storage.graph.upsert_chunk_node.await_args_list
         ]
         extraction_chunks = extractor.extract_and_persist.await_args.args[0]
 
