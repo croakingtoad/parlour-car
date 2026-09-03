@@ -9,11 +9,13 @@ Two incidents motivate this file:
   works (3,495 Chunk nodes) from the production graph. The same fixture's
   orphan sweep also removed 3 real Author nodes.
 
-Neo4j Community Edition serves a single database, so TEST_NEO4J_URL usually
-points at the graph holding the production corpus. Prefix scoping is the only
-thing standing between teardown and real data. These tests assert that every
-destructive Cypher statement in the test tree stays inside the test--
-namespace, so the class of bug cannot silently return.
+Neo4j tests default to a separate, disposable instance. The production-graph
+guard fixture refuses to run graph tests against a graph holding production
+data unless the operator opts in explicitly, and prefix scoping confines
+teardown to test data. These layered protections respond to the incidents
+above; these tests assert that every destructive Cypher statement in the test
+tree stays inside the test-- namespace, so the class of bug cannot silently
+return.
 """
 
 from __future__ import annotations
