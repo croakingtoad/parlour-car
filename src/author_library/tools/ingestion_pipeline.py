@@ -33,6 +33,7 @@ from author_library.graph.linking_implicit import ImplicitEngagementDetector
 from author_library.graph.linking_thematic import ThematicParallelDetector
 from author_library.parsing import get_parser
 from author_library.parsing.models import SectionType
+from author_library.tools.chunk_persistence import canonicalize_stored_chunks
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -424,13 +425,13 @@ class IngestionPipeline:
             key=lambda c: (_gran_order.get(str(c.granularity), 9), c.position),
         )
 
-        chunk_id_map: dict[str, UUID] = {}
+        provisional_to_pg_id: dict[str, UUID] = {}
         pg_chunk_errors = 0
         for chunk in sorted_chunks:
             # Translate in-memory parent_chunk_id to DB-generated UUID
             resolved_parent: UUID | None = None
             if chunk.parent_chunk_id is not None:
-                resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
+                resolved_parent = provisional_to_pg_id.get(chunk.parent_chunk_id)
 
             metadata = dict(chunk.metadata)
             metadata["section_type"] = chunk.section_type
@@ -453,7 +454,7 @@ class IngestionPipeline:
 
             try:
                 pg_id = await self._storage.chunks.create(chunk_data)
-                chunk_id_map[chunk.id] = pg_id
+                provisional_to_pg_id[chunk.id] = pg_id
             except Exception as exc:
                 pg_chunk_errors += 1
                 if pg_chunk_errors <= 3:
@@ -475,7 +476,7 @@ class IngestionPipeline:
             log.error(
                 "pg_chunk_store_summary",
                 work_id=work_id,
-                stored=len(chunk_id_map),
+                stored=len(provisional_to_pg_id),
                 failed=pg_chunk_errors,
                 total=len(sorted_chunks),
             )
@@ -483,10 +484,15 @@ class IngestionPipeline:
                 f"PG chunk storage: {pg_chunk_errors}/{len(sorted_chunks)} chunks failed"
             )
 
+        chunks, chunk_id_map = canonicalize_stored_chunks(
+            chunks,
+            provisional_to_pg_id,
+        )
+
         log.info(
             "ingestion_chunks_stored",
             work_id=work_id,
-            count=len(chunk_id_map),
+            count=len(chunks),
             elapsed_seconds=round(time.monotonic() - stage_start, 1),
         )
 

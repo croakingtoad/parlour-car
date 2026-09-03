@@ -317,6 +317,13 @@ class TestFullPipelineE2E:
                 {"wid": work_id},
             )
             assert chunk_results[0]["cnt"] > 0, "No chunk nodes in Neo4j"
+            pg_chunk_ids = {str(chunk["id"]) for chunk in all_chunks}
+            graph_chunks = await clean_storage.neo4j.execute_read(
+                "MATCH (c:Chunk {work_id: $wid}) RETURN c.chunk_id AS chunk_id",
+                {"wid": work_id},
+            )
+            graph_chunk_ids = {row["chunk_id"] for row in graph_chunks}
+            assert graph_chunk_ids == pg_chunk_ids
 
             # Verify list_works returns the ingested work
             works_str = await handle_list_works(
