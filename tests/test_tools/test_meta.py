@@ -20,6 +20,7 @@ from author_library.errors import RetrievalError
 from author_library.tools.meta import (
     ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS,
     ENTITY_EDGE_GAP_WARNING_MIN_SHARE,
+    _classify_chunk_noise,
     _entity_edge_gap_is_warning,
     handle_audit_library,
     handle_author_bio,
@@ -105,6 +106,64 @@ async def _run_targeted_audit(
     )
 
     return json.loads(await handle_audit_library({}, storage=storage))
+
+
+class TestClassifyChunkNoise:
+    """Classify short chunks without requiring database fixtures."""
+
+    @pytest.mark.parametrize(
+        ("noise", "total"),
+        [
+            (0, 100),
+            (1, 0),
+        ],
+    )
+    def test_empty_noise_population_has_no_classification(self, noise: int, total: int) -> None:
+        assert _classify_chunk_noise(noise, total, ["prose"]) is None
+
+    def test_prose_at_threshold_has_no_classification(self) -> None:
+        assert _classify_chunk_noise(10, 100, ["prose"]) is None
+
+    def test_prose_above_threshold_is_warning(self) -> None:
+        classification = _classify_chunk_noise(11, 100, ["prose"])
+
+        assert classification is not None
+        severity, message = classification
+        assert severity == "warning"
+        assert "noise_chunks" in message
+
+    @pytest.mark.parametrize(
+        ("noise", "total", "genre"),
+        [
+            (2_392, 2_641, "blessings"),
+            (2_215, 14_704, "lecture"),
+        ],
+    )
+    def test_short_line_genre_is_informational(self, noise: int, total: int, genre: str) -> None:
+        classification = _classify_chunk_noise(noise, total, [genre])
+
+        assert classification is not None
+        severity, message = classification
+        assert severity == "info"
+        assert "literary form" in message
+        assert "excluded from retrieval" in message
+
+    @pytest.mark.parametrize("genre_tags", [[], None])
+    def test_missing_genre_uses_default_threshold(self, genre_tags: list[str] | None) -> None:
+        classification = _classify_chunk_noise(11, 100, genre_tags)
+
+        assert classification is not None
+        assert classification[0] == "warning"
+
+    def test_one_short_line_genre_in_mixed_tags_is_informational(self) -> None:
+        classification = _classify_chunk_noise(
+            15,
+            100,
+            ["history", "video-transcript"],
+        )
+
+        assert classification is not None
+        assert classification[0] == "info"
 
 
 class TestHandleAuthorBioValidation:
@@ -316,7 +375,7 @@ class TestHandleAuditLibraryRecommendations:
             "library is healthy" in recommendation.lower() for recommendation in recommendations
         )
 
-    async def test_warning_without_specific_remedy_never_claims_library_is_healthy(
+    async def test_noise_warning_has_specific_remedy_and_never_claims_health(
         self,
         monkeypatch: MonkeyPatch,
     ) -> None:
@@ -328,6 +387,6 @@ class TestHandleAuditLibraryRecommendations:
             for recommendation in result["recommendations"]
         )
         assert any(
-            "unresolved issues" in recommendation.lower()
+            "noise chunks" in recommendation.lower() and "re-chunk" in recommendation.lower()
             for recommendation in result["recommendations"]
         )
