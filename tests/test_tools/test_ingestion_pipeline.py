@@ -323,6 +323,22 @@ class TestRunQualityChecks:
         )
         assert result["classification_warning"] is None
 
+    async def test_no_classification_warning_for_reference_author_match(self) -> None:
+        """Reference works are filed under their own author without being primary."""
+        pipeline = _make_pipeline(
+            work_record={
+                "work_id": "paul-fussell--poetic-meter-and-poetic-form",
+                "author": "Paul Fussell",
+                "source_class": "reference",
+            },
+        )
+        result = await pipeline._run_quality_checks(
+            "paul-fussell--poetic-meter-and-poetic-form",
+            "reference",
+            "paul-fussell",
+        )
+        assert result["classification_warning"] is None
+
     async def test_noise_chunks_detected(self) -> None:
         """Micro/nano chunks under 50 chars are flagged."""
         pipeline = _make_pipeline(

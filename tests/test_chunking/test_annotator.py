@@ -125,6 +125,32 @@ class TestAnnotationTemplates:
         assert "Malcolm Guite" in result[0].annotation
         assert "Foundational text" in result[0].annotation
 
+    async def test_reference_annotation_is_neutral_about_author_relationship(self) -> None:
+        context = AnnotationContext(
+            work_title="Poetic Meter and Poetic Form",
+            publication_year=1979,
+            author="Paul Fussell",
+            subject_author="Paul Fussell",
+        )
+        chunks = [
+            Chunk(
+                text="Iambic pentameter consists of five iambic feet.",
+                granularity=ChunkGranularity.MESO,
+                work_id="paul-fussell--poetic-meter-and-poetic-form",
+                source_class="reference",
+                position=0,
+            )
+        ]
+
+        result = await ChunkAnnotator().annotate_chunks(chunks, context)
+
+        annotation = result[0].annotation or ""
+        assert "[REFERENCE:" in annotation
+        assert "Paul Fussell" in annotation
+        assert "Poetic Meter and Poetic Form" in annotation
+        assert "subject author" not in annotation.lower()
+        assert "referenced by" not in annotation.lower()
+
     async def test_source_class_markers_present(
         self, sample_chunks: list[Chunk], primary_context: AnnotationContext
     ) -> None:

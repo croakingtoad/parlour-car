@@ -37,11 +37,15 @@ Source classes:
 corpus for voice profile, knowledge graph, and thematic index.
 - SECONDARY: Works ABOUT the subject author by other people. These provide \
 scholarly context but MUST NEVER contaminate the author's voice profile.
-- CONTEXTUAL: Works by other authors that the subject author frequently \
-references or engages with. Not by or about the subject, but illuminates \
-their arguments.
-- TERTIARY: Reference works (bibliographies, encyclopedias, catalogs). \
-Metadata only, no content ingestion.
+- CONTEXTUAL: Works by other authors with specific evidence that the subject \
+author references or engages with them. Without evidence of that relationship, \
+do not classify a work as contextual.
+- TERTIARY: Catalogue-only records such as bibliographies, encyclopedia entries, \
+and catalogs. Metadata only, with no retrievable content ingestion.
+- REFERENCE: Standalone third-party works ingested for their content, such as \
+craft manuals, style guides, prosody handbooks, or dictionaries of literary \
+terms. They have no relationship to the subject author and are neither by nor \
+about that author.
 
 CRITICAL SAFETY RULE: When uncertain, classify as SECONDARY. It is far more \
 damaging to contaminate a voice profile with foreign prose than to temporarily \
@@ -49,7 +53,7 @@ exclude legitimate primary material from voice extraction.
 
 You must respond with valid JSON matching this schema:
 {
-  "source_class": "primary" | "secondary" | "contextual" | "tertiary",
+  "source_class": "primary" | "secondary" | "contextual" | "tertiary" | "reference",
   "confidence": <float 0.0-1.0>,
   "reasoning": "<1-3 sentence explanation>",
   "signals_detected": ["<signal1>", "<signal2>", ...]

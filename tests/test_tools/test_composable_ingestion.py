@@ -108,8 +108,15 @@ class TestHandleCatalogSourceValidation:
             )
 
     async def test_valid_source_class_values(self) -> None:
-        """All five source classes should be accepted (modulo file existence)."""
-        for sc in ("primary", "secondary", "contextual", "tertiary", "personal"):
+        """All six source classes should be accepted (modulo file existence)."""
+        for sc in (
+            "primary",
+            "secondary",
+            "contextual",
+            "tertiary",
+            "personal",
+            "reference",
+        ):
             with pytest.raises(IngestionError, match="File not found"):
                 await handle_catalog_source(
                     {

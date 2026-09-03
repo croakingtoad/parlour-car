@@ -30,6 +30,7 @@ async def get_library_overview(pg: "PostgresPool") -> dict[str, Any]:
             count(*) FILTER (WHERE source_class = 'contextual')               AS contextual_works,
             count(*) FILTER (WHERE source_class = 'tertiary')                 AS tertiary_works,
             count(*) FILTER (WHERE source_class = 'personal')                 AS personal_works,
+            count(*) FILTER (WHERE source_class = 'reference')                AS reference_works,
             coalesce(sum(word_count), 0)                                       AS total_words,
             count(DISTINCT author)                                             AS unique_authors,
             max(ingestion_date)                                                AS last_ingestion_date

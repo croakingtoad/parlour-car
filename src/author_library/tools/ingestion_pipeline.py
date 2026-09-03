@@ -9,6 +9,7 @@ Routes processing by source class:
   - CONTEXTUAL: embeddings + cross-resource link targets
   - TERTIARY: metadata only, no content processing
   - PERSONAL: embeddings + USER_REFLECTS_ON graph edges, NO voice profile
+  - REFERENCE: entities + passage links + connection surfacing, NO voice profile
 
 Supports idempotent re-ingestion: deletes old chunks/embeddings for a
 work before re-processing.
@@ -591,13 +592,17 @@ class IngestionPipeline:
                 chunk_node["user_id"] = getattr(catalog_entry, "user_id", "marty")
             await self._storage.graph.upsert_chunk_node(chunk_node)
 
-        # Step 9: Entity extraction (PRIMARY and SECONDARY only — NOT personal)
+        # Step 9: Entity extraction (PRIMARY, SECONDARY, and REFERENCE)
         # Filter to configured granularities (default: macro+meso) to skip
         # redundant extraction on micro/nano chunks whose parents already
         # capture the same entities.
         entity_count = 0
         edge_count = 0
-        if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_GRAPH):
+        if route in (
+            ProcessingRoute.FULL_ENRICHMENT,
+            ProcessingRoute.EMBEDDINGS_AND_GRAPH,
+            ProcessingRoute.REFERENCE_ENRICHMENT,
+        ):
             allowed_grans = {
                 g.strip()
                 for g in self._settings.llm.entity_extraction_granularities.split(",")
@@ -673,8 +678,12 @@ class IngestionPipeline:
                 log.error("ingestion_theme_dedup_failed", error=error_msg)
                 errors.append(error_msg)
 
-        # Step 10: Passage linking (PRIMARY and CONTEXTUAL)
-        if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_LINKS):
+        # Step 10: Passage linking (PRIMARY, CONTEXTUAL, and REFERENCE)
+        if route in (
+            ProcessingRoute.FULL_ENRICHMENT,
+            ProcessingRoute.EMBEDDINGS_AND_LINKS,
+            ProcessingRoute.REFERENCE_ENRICHMENT,
+        ):
             try:
                 link_edges = await self._create_passage_links(chunks, source_class)
                 edge_count += link_edges
@@ -703,6 +712,7 @@ class IngestionPipeline:
         if route in (
             ProcessingRoute.FULL_ENRICHMENT,
             ProcessingRoute.EMBEDDINGS_AND_LINKS,
+            ProcessingRoute.REFERENCE_ENRICHMENT,
         ):
             try:
                 surfacing_result = await self._surface_connections(
@@ -887,6 +897,7 @@ class IngestionPipeline:
         # If the work's author matches subject_author_id and source_class
         # is contextual or tertiary, that's suspicious — primary works by
         # the subject author should not be classified as contextual/tertiary.
+        # Reference is deliberately excluded: it is filed under its own author.
         try:
             work_record = await self._storage.works.get(work_id)
             if work_record:
@@ -1270,6 +1281,7 @@ class IngestionPipeline:
         edges_created = 0
         primary_chunks = [c for c in chunks if c.source_class == "primary"]
         contextual_chunks = [c for c in chunks if c.source_class == "contextual"]
+        reference_chunks = [c for c in chunks if c.source_class == "reference"]
 
         # For primary sources, we need to load existing contextual chunks to link against
         if source_class == SourceClass.PRIMARY and primary_chunks:
@@ -1312,14 +1324,28 @@ class IngestionPipeline:
                 )
                 edges_created += thematic_result.edges_created
 
-        # For contextual sources, link against existing primary chunks
-        elif source_class == SourceClass.CONTEXTUAL and contextual_chunks:
-            all_works = await self._storage.works.list_by_author(
-                contextual_chunks[0].work_id.split("--")[0]
+        # Contextual sources link within their subject-author corpus. References
+        # have no author relationship, so they link against all primary works.
+        elif source_class in (SourceClass.CONTEXTUAL, SourceClass.REFERENCE):
+            link_chunks = (
+                contextual_chunks
+                if source_class == SourceClass.CONTEXTUAL
+                else reference_chunks
             )
-            prim_work_ids = [
-                w["work_id"] for w in all_works if w.get("source_class") == "primary"
-            ]
+            if not link_chunks:
+                return edges_created
+            if source_class == SourceClass.REFERENCE:
+                primary_rows = await self._storage.pg.fetch_all(
+                    "SELECT work_id FROM works WHERE source_class = 'primary'"
+                )
+                prim_work_ids = [row["work_id"] for row in primary_rows]
+            else:
+                all_works = await self._storage.works.list_by_author(
+                    link_chunks[0].work_id.split("--")[0]
+                )
+                prim_work_ids = [
+                    w["work_id"] for w in all_works if w.get("source_class") == "primary"
+                ]
 
             primary_for_linking = await self._load_chunks_paginated(
                 prim_work_ids, granularity="meso", default_source_class="primary",
@@ -1328,7 +1354,7 @@ class IngestionPipeline:
             if primary_for_linking:
                 explicit = ExplicitLinkDetector(self._storage.neo4j)
                 explicit_result = await explicit.detect_and_link(
-                    primary_for_linking, contextual_chunks
+                    primary_for_linking, link_chunks
                 )
                 edges_created += explicit_result.edges_created
 
