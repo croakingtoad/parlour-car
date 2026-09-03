@@ -69,7 +69,10 @@ def integration_settings() -> Settings:
 
 
 @pytest_asyncio.fixture
-async def storage(integration_settings: Settings) -> AsyncIterator[StorageManager]:
+async def storage(
+    integration_settings: Settings,
+    assert_graph_is_disposable: None,
+) -> AsyncIterator[StorageManager]:
     """Connected storage manager for integration tests.
 
     Runs migrations and initializes Neo4j schema on connect.

@@ -69,11 +69,11 @@ class TestRelatedItem:
             granularity="meso",
             connection_type=ConnectionType.PASSAGE_LINK,
             relevance_score=0.85,
-            metadata={"work_title": "Faith, Hope and Poetry", "author": "Malcolm Guite"},
+            metadata={"work_title": "Faith, Hope and Poetry", "author": "Test Guite"},
         )
         assert item.chunk_id == "chunk-1"
         assert item.work_title == "Faith, Hope and Poetry"
-        assert item.author == "Malcolm Guite"
+        assert item.author == "Test Guite"
         assert item.connection_type == ConnectionType.PASSAGE_LINK
 
     def test_metadata_defaults(self):

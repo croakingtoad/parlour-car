@@ -306,7 +306,7 @@ class TestAnalyze:
 
         # Work info
         mock_storage.works.get = AsyncMock(return_value={
-            "title": "Faith, Hope and Poetry", "author": "Malcolm Guite",
+            "title": "Faith, Hope and Poetry", "author": "Test Guite",
         })
 
         # Graph themes

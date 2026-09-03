@@ -42,7 +42,7 @@ tension between knowing and unknowing.
 """
 
 SECONDARY_TEXT = """\
-A Critic's Analysis of Malcolm Guite
+A Critic's Analysis of Test Guite
 
 Dr. Smith argues that Guite's poetic theology represents a significant
 contribution to the field of theological aesthetics. According to Smith,
@@ -108,7 +108,7 @@ class TestClassificationGate:
 
         Verify by storing a secondary work and checking no voice profile exists.
         """
-        await _make_author(clean_storage, "guite", "Malcolm Guite")
+        await _make_author(clean_storage, "guite", "Test Guite")
 
         # Insert a secondary work
         await clean_storage.works.create({
@@ -134,7 +134,7 @@ class TestClassificationGate:
         self, clean_storage: StorageManager
     ) -> None:
         """Verify that source_class is persisted correctly in works table."""
-        await _make_author(clean_storage, "guite", "Malcolm Guite")
+        await _make_author(clean_storage, "guite", "Test Guite")
 
         for sc in ("primary", "secondary", "contextual", "tertiary"):
             await clean_storage.works.create({
@@ -254,7 +254,7 @@ class TestSourceIsolationE2E:
         from author_library.embeddings import ProviderRegistry
         from author_library.tools.ingest import handle_ingest_book
 
-        await _make_author(clean_storage, "guite", "Malcolm Guite")
+        await _make_author(clean_storage, "guite", "Test Guite")
         embedding_provider = ProviderRegistry.create(integration_settings)
 
         temp_path = _write_temp_text(SECONDARY_TEXT)
