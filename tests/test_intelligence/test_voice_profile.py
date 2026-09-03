@@ -363,6 +363,68 @@ class TestVoiceProfileSectionTypeFiltering:
 
         assert len(chunks) == 1
 
+    async def test_reference_work_never_enters_eligible_work_ids(
+        self,
+        pg_pool: PostgresPool,
+        app_settings: Settings,
+    ) -> None:
+        """The work-level primary gate excludes reference works before chunk lookup."""
+        from author_library.storage.repositories import PgChunkRepository, PgWorkRepository
+
+        work_repo = PgWorkRepository(pg_pool)
+        chunk_repo = PgChunkRepository(pg_pool)
+        common_work = {
+            "author": "test--voice-author",
+            "source_class_note": "Voice eligibility regression fixture",
+            "publication_year": 2026,
+            "publisher": "Test Publisher",
+            "format_ingested": "txt",
+            "word_count": 100,
+            "genre_tags": ["craft"],
+            "subject_headings": ["Prosody"],
+        }
+        await work_repo.create({
+            **common_work,
+            "work_id": "test--voice-primary",
+            "title": "Primary Work",
+            "source_class": "primary",
+            "source_metadata": {
+                "subject_author_id": "test--voice-author",
+                "voice_profile_eligible": True,
+            },
+        })
+        await work_repo.create({
+            **common_work,
+            "work_id": "test--voice-reference",
+            "title": "Reference Work",
+            "source_class": "reference",
+            "source_metadata": {
+                "external_author": "Test Voice Author",
+                "reference_type": "craft-handbook",
+                "subject_domain": "prosody",
+            },
+        })
+        for work_id in ("test--voice-primary", "test--voice-reference"):
+            await chunk_repo.create({
+                "work_id": work_id,
+                "text": f"Meso content for {work_id}",
+                "annotation": None,
+                "granularity": "meso",
+                # Deliberately primary-labelled: the work-level gate must still
+                # make the reference work structurally ineligible.
+                "source_class": "primary",
+                "position": 0,
+                "metadata": {"section_type": "chapter"},
+            })
+
+        chunks = await VoiceProfileExtractor(app_settings)._gather_eligible_chunks(
+            author_id="test--voice-author",
+            work_repo=work_repo,
+            chunk_repo=chunk_repo,
+        )
+
+        assert {chunk["work_id"] for chunk in chunks} == {"test--voice-primary"}
+
 
 # ---------------------------------------------------------------------------
 # Error handling tests

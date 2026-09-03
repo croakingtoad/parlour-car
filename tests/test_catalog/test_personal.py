@@ -76,8 +76,8 @@ class TestSourceClassPersonal:
         all_classes = list(SourceClass)
         assert SourceClass.PERSONAL in all_classes
 
-    def test_five_source_classes_total(self) -> None:
-        assert len(SourceClass) == 5
+    def test_six_source_classes_total(self) -> None:
+        assert len(SourceClass) == 6
 
 
 # ---------------------------------------------------------------------------

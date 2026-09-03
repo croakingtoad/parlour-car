@@ -24,6 +24,7 @@ from author_library.catalog.models import (
     PersonalCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     SecondaryCatalogEntry,
     SourceClass,
     TertiaryCatalogEntry,
@@ -122,12 +123,22 @@ class ClassificationPipeline:
         """
         overrides = user_overrides or {}
 
-        # Step 1: Run the classification engine
-        classification = await self._classifier.classify(
-            document,
-            subject_author=self._subject_author,
-            metadata_hints=metadata_hints,
-        )
+        # Step 1: Run the classification engine. Reference is a new user-confirmed
+        # class whose filing author may match the document author; honoring that
+        # confirmation prevents it from being reinterpreted as primary.
+        if overrides.get("source_class") == SourceClass.REFERENCE.value:
+            classification = ClassificationResult(
+                source_class=SourceClass.REFERENCE,
+                confidence=1.0,
+                reasoning="User-confirmed standalone reference work.",
+                signals_detected=["user_confirmed_reference"],
+            )
+        else:
+            classification = await self._classifier.classify(
+                document,
+                subject_author=self._subject_author,
+                metadata_hints=metadata_hints,
+            )
 
         log.info(
             "pipeline_classification_complete",
@@ -261,6 +272,15 @@ class ClassificationPipeline:
                     **core,
                     reference_type=overrides.get("reference_type", "bibliography"),
                     coverage_note=overrides.get("coverage_note"),
+                )
+            elif source_class == SourceClass.REFERENCE:
+                return ReferenceCatalogEntry(
+                    **core,
+                    external_author=overrides.get(
+                        "external_author", document.metadata.author or "Unknown"
+                    ),
+                    reference_type=overrides.get("reference_type", "reference-work"),
+                    subject_domain=overrides.get("subject_domain", "general"),
                 )
             else:
                 # Personal

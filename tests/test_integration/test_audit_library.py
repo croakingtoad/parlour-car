@@ -178,6 +178,28 @@ class TestAuditLibraryPerWorkStats:
         assert "entities" in work
         assert "warnings" in work
 
+    async def test_reference_work_is_visible_in_audit(self, clean_storage: Any) -> None:
+        await clean_storage.works.create(
+            _make_work(
+                "test--audit-reference",
+                "Reference Audit Work",
+                author="Test Reference Author",
+                source_class="reference",
+            )
+        )
+        await clean_storage.chunks.create(
+            _make_chunk(
+                "test--audit-reference",
+                "Reference content for audit visibility.",
+                source_class="reference",
+            )
+        )
+
+        result = json.loads(await handle_audit_library({}, storage=clean_storage))
+        work = next(w for w in result["works"] if w["work_id"] == "test--audit-reference")
+
+        assert work["source_class"] == "reference"
+
     async def test_chunk_count_reflects_inserted_chunks(self, clean_storage: Any) -> None:
         """audit_library reports the exact chunk count per work."""
         await clean_storage.works.create(

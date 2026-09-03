@@ -42,6 +42,7 @@ async def handle_list_authors(
                   count(*) FILTER (WHERE source_class = 'secondary') AS secondary_count,
                   count(*) FILTER (WHERE source_class = 'contextual') AS contextual_count,
                   count(*) FILTER (WHERE source_class = 'tertiary') AS tertiary_count,
+                  count(*) FILTER (WHERE source_class = 'reference') AS reference_count,
                   sum(word_count) AS total_words,
                   min(publication_year) AS earliest_year,
                   max(publication_year) AS latest_year
@@ -60,6 +61,7 @@ async def handle_list_authors(
             "secondary_works": r["secondary_count"],
             "contextual_works": r["contextual_count"],
             "tertiary_works": r["tertiary_count"],
+            "reference_works": r["reference_count"],
             "total_words": r["total_words"] or 0,
             "year_range": f"{r['earliest_year']}-{r['latest_year']}",
         })
@@ -220,6 +222,7 @@ async def handle_library_stats(
              count(*) FILTER (WHERE source_class = 'secondary') AS secondary_works,
              count(*) FILTER (WHERE source_class = 'contextual') AS contextual_works,
              count(*) FILTER (WHERE source_class = 'tertiary') AS tertiary_works,
+             count(*) FILTER (WHERE source_class = 'reference') AS reference_works,
              coalesce(sum(word_count), 0) AS total_words,
              count(DISTINCT author) AS unique_authors
            FROM works"""

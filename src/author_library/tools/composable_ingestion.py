@@ -216,7 +216,8 @@ async def handle_catalog_source(
 
     Arguments:
         file_path (str): Path to the document file.
-        source_class (str): Confirmed source class (primary/secondary/contextual/tertiary/personal).
+        source_class (str): Confirmed source class
+            (primary/secondary/contextual/tertiary/personal/reference).
         work_type (str): Confirmed work type.
         metadata_overrides (dict, optional): User corrections to auto-detected metadata.
 
@@ -243,7 +244,7 @@ async def handle_catalog_source(
     except ValueError as exc:
         raise IngestionError(
             f"Invalid source_class: {source_class_str}. "
-            f"Must be one of: primary, secondary, contextual, tertiary, personal",
+            f"Must be one of: primary, secondary, contextual, tertiary, personal, reference",
             context={"source_class": source_class_str},
         ) from exc
 
@@ -696,7 +697,7 @@ async def handle_chunk_source(
                     message="Further Neo4j chunk upsert errors will be suppressed",
                 )
 
-    # Entity extraction (PRIMARY and SECONDARY only)
+    # Entity extraction (PRIMARY, SECONDARY, and REFERENCE)
     # Structural sections are excluded even though they are already filtered out
     # by the section_type filter above; this is defense-in-depth.
     _ENTITY_EXTRACT_EXCLUDED = {
@@ -706,7 +707,11 @@ async def handle_chunk_source(
         SectionType.FRONT_MATTER.value,
     }
     entity_count = 0
-    if route in (ProcessingRoute.FULL_ENRICHMENT, ProcessingRoute.EMBEDDINGS_AND_GRAPH):
+    if route in (
+        ProcessingRoute.FULL_ENRICHMENT,
+        ProcessingRoute.EMBEDDINGS_AND_GRAPH,
+        ProcessingRoute.REFERENCE_ENRICHMENT,
+    ):
         extraction_chunks = [
             c for c in chunks if c.section_type not in _ENTITY_EXTRACT_EXCLUDED
         ]
@@ -926,7 +931,13 @@ async def handle_detect_passage_links(
     # Determine which chunks to link against
     # Extract author slug from work_id (everything before --)
     author_slug = work_id.split("--")[0] if "--" in work_id else work_id
-    all_works = await storage.works.list_by_author(author_slug)
+    if source_class == SourceClass.REFERENCE:
+        primary_rows = await storage.pg.fetch_all(
+            "SELECT work_id, title, source_class FROM works WHERE source_class = 'primary'"
+        )
+        all_works = [dict(row) for row in primary_rows]
+    else:
+        all_works = await storage.works.list_by_author(author_slug)
 
     # Load counterpart chunks based on source class
     counterpart_chunks = await _load_counterpart_chunks(
@@ -944,7 +955,7 @@ async def handle_detect_passage_links(
     if source_class == SourceClass.PRIMARY:
         primary_side = work_chunks
         contextual_side = counterpart_chunks
-    elif source_class == SourceClass.CONTEXTUAL:
+    elif source_class in (SourceClass.CONTEXTUAL, SourceClass.REFERENCE):
         primary_side = counterpart_chunks
         contextual_side = work_chunks
     else:
@@ -1010,7 +1021,10 @@ async def handle_detect_passage_links(
             errors.append(f"Thematic parallel detection failed: {exc}")
 
     # Retroactive scan: also scan existing primary works against this new work
-    if retroactive_scan and source_class == SourceClass.CONTEXTUAL:
+    if retroactive_scan and source_class in (
+        SourceClass.CONTEXTUAL,
+        SourceClass.REFERENCE,
+    ):
         retro_links = await _retroactive_link_scan(
             storage, embedding_provider, work_chunks, all_works, scan_types,
             confidence_threshold,

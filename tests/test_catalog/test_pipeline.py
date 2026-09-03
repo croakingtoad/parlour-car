@@ -17,6 +17,7 @@ from author_library.catalog.models import (
     ContextualCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     SecondaryCatalogEntry,
     SourceClass,
     TertiaryCatalogEntry,
@@ -409,6 +410,30 @@ class TestPipelineProcess:
 
         assert result.processing_route == ProcessingRoute.METADATA_ONLY
         assert isinstance(result.catalog_entry, TertiaryCatalogEntry)
+
+    async def test_reference_route(self, settings: Settings, repo: FakeWorkRepository) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        result = await pipeline.process(
+            _make_document(
+                author="Paul Fussell",
+                title="Poetic Meter and Poetic Form",
+            ),
+            user_overrides={
+                "source_class": "reference",
+                "external_author": "Paul Fussell",
+                "reference_type": "prosody-handbook",
+                "subject_domain": "prosody",
+                "genre_tags": ["prosody"],
+            },
+        )
+
+        assert result.processing_route == ProcessingRoute.REFERENCE_ENRICHMENT
+        assert isinstance(result.catalog_entry, ReferenceCatalogEntry)
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert stored["source_class"] == "reference"
+        assert stored["source_metadata"]["external_author"] == "Paul Fussell"
+        assert "voice_profile_eligible" not in stored["source_metadata"]
 
     async def test_entry_stored_in_repository(
         self, settings: Settings, repo: FakeWorkRepository
