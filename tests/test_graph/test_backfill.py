@@ -37,6 +37,8 @@ def _make_mock_storage(
     neo4j_chunk_ids: list[str] | None = None,
     pg_chunk_counts: list[dict[str, Any]] | None = None,
     neo4j_chunk_counts: list[dict[str, Any]] | None = None,
+    pg_chunk_ids_by_work: dict[str, list[str]] | None = None,
+    neo4j_chunk_ids_by_work: dict[str, list[str]] | None = None,
 ) -> MagicMock:
     """Build a mock StorageManager with async return values.
 
@@ -76,6 +78,11 @@ def _make_mock_storage(
     async def _pg_fetch_all_v2(query: str, *args: Any) -> list[Any]:
         if "FROM works" in query:
             return work_records
+        if "array_agg(id::text) AS chunk_ids" in query:
+            return [
+                {"work_id": work_id, "chunk_ids": chunk_ids}
+                for work_id, chunk_ids in (pg_chunk_ids_by_work or {}).items()
+            ]
         if "FROM chunks GROUP BY" in query:
             return chunk_count_records
         return []
@@ -87,6 +94,11 @@ def _make_mock_storage(
     async def _neo4j_read(query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if "MATCH (w:Work)" in query and "RETURN w.work_id" in query:
             return [{"work_id": wid} for wid in (neo4j_work_ids or [])]
+        if "RETURN c.work_id AS work_id, collect(c.chunk_id) AS chunk_ids" in query:
+            return [
+                {"work_id": work_id, "chunk_ids": chunk_ids}
+                for work_id, chunk_ids in (neo4j_chunk_ids_by_work or {}).items()
+            ]
         if "MATCH (c:Chunk" in query and "chunk_id" in query:
             return [{"chunk_id": cid} for cid in (neo4j_chunk_ids or [])]
         if "MATCH (c:Chunk)" in query and "COUNT" in query:
@@ -656,6 +668,75 @@ class TestCheckPgNeo4jConsistency:
         assert chunk_info["pg_chunks"] == 1174
         assert chunk_info["neo4j_chunks"] == 500
         assert chunk_info["in_sync"] is False
+
+    @pytest.mark.asyncio
+    async def test_equal_counts_with_different_chunk_ids_are_inconsistent(self) -> None:
+        """Should detect equal-and-opposite chunk identity drift."""
+        work_id = "author--drifted-work"
+        shared_pg_id = "00000000-0000-0000-0000-000000000001"
+        shared_neo4j_id = "00000000000000000000000000000001"
+        pg_only_ids = [
+            "10000000-0000-0000-0000-000000000001",
+            "10000000-0000-0000-0000-000000000002",
+        ]
+        neo4j_only_ids = [
+            "20000000000000000000000000000001",
+            "20000000000000000000000000000002",
+        ]
+        storage = _make_mock_storage(
+            pg_works=[{
+                "work_id": work_id,
+                "title": "Drifted Work",
+                "author": "Author",
+                "source_class": "primary",
+                "publication_year": 2026,
+            }],
+            neo4j_work_ids=[work_id],
+            pg_chunk_counts=[{"work_id": work_id, "chunk_count": 3}],
+            neo4j_chunk_counts=[{"work_id": work_id, "chunk_count": 3}],
+            pg_chunk_ids_by_work={work_id: [shared_pg_id, *pg_only_ids]},
+            neo4j_chunk_ids_by_work={work_id: [shared_neo4j_id, *neo4j_only_ids]},
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+
+        assert report["is_consistent"] is False
+        chunk_info = report["chunk_counts"][0]
+        assert chunk_info["pg_chunks"] == chunk_info["neo4j_chunks"] == 3
+        assert chunk_info["in_sync"] is False
+        assert chunk_info["pg_only_chunk_count"] == 2
+        assert chunk_info["neo4j_only_chunk_count"] == 2
+        assert chunk_info["pg_only_chunk_ids_sample"] == pg_only_ids
+        assert chunk_info["neo4j_only_chunk_ids_sample"] == neo4j_only_ids
+
+    @pytest.mark.asyncio
+    async def test_chunk_identity_samples_are_bounded(self) -> None:
+        """Should cap identity drift samples while reporting complete counts."""
+        work_id = "author--large-drift"
+        pg_only_ids = [f"pg-{index:02d}" for index in range(25)]
+        neo4j_only_ids = [f"neo4j-{index:02d}" for index in range(25)]
+        storage = _make_mock_storage(
+            pg_works=[{
+                "work_id": work_id,
+                "title": "Large Drift",
+                "author": "Author",
+                "source_class": "primary",
+                "publication_year": 2026,
+            }],
+            neo4j_work_ids=[work_id],
+            pg_chunk_counts=[{"work_id": work_id, "chunk_count": 25}],
+            neo4j_chunk_counts=[{"work_id": work_id, "chunk_count": 25}],
+            pg_chunk_ids_by_work={work_id: pg_only_ids},
+            neo4j_chunk_ids_by_work={work_id: neo4j_only_ids},
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+
+        chunk_info = report["chunk_counts"][0]
+        assert chunk_info["pg_only_chunk_count"] == 25
+        assert chunk_info["neo4j_only_chunk_count"] == 25
+        assert chunk_info["pg_only_chunk_ids_sample"] == pg_only_ids[:20]
+        assert chunk_info["neo4j_only_chunk_ids_sample"] == neo4j_only_ids[:20]
 
     @pytest.mark.asyncio
     async def test_empty_stores(self) -> None:
