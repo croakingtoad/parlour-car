@@ -303,6 +303,20 @@ async def _assert_scoped_chunk_identity(
             )
 
 
+async def _assert_post_commit_scoped_chunk_identity(
+    storage: Storage, old_id: str, new_id: str
+) -> None:
+    """Fail loudly when committed PG state and Neo4j identities diverge."""
+    try:
+        await _assert_scoped_chunk_identity(storage, (old_id, new_id))
+    except RenameError as exc:
+        raise RenameError(
+            "post-commit scoped PG/Neo4j chunk_id mismatch: PostgreSQL committed while "
+            "Neo4j did not match. Manual reconciliation is required for the source "
+            f"work_id set {old_id!r} and target work_id set {new_id!r}. {exc}"
+        ) from exc
+
+
 def _expected_global_report_after_rename(
     before: dict[str, Any], old_id: str, new_id: str, source: StoreCounts
 ) -> dict[str, Any]:
@@ -516,6 +530,7 @@ async def execute_rename(storage: Storage, old_id: str, new_id: str) -> StoreCou
             await _assert_local_postconditions(storage, conn, old_id, new_id, children, source)
             await _assert_scoped_chunk_identity(storage, (old_id, new_id), pg=conn)
         pg_committed = True
+        await _assert_post_commit_scoped_chunk_identity(storage, old_id, new_id)
         global_report_after = await _global_consistency_report(storage)
         _assert_global_report_changed_only_for_rename(
             global_report_before, global_report_after, old_id, new_id, source

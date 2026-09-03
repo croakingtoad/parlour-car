@@ -197,6 +197,58 @@ async def test_mid_rename_chunk_identity_drift_blocks_and_compensates(
 
 @SKIP_NO_DB
 @pytest.mark.asyncio
+async def test_post_commit_chunk_identity_drift_fails_without_compensation(
+    clean_storage: StorageManager,
+    assert_graph_is_disposable: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_id = "test--rename-source"
+    new_id = "test--rename-target"
+    drifted_chunk_id = "test--rename-post-commit-identity-drift"
+    await _insert_rename_source(clean_storage, old_id, with_children=True)
+    scoped_identity = rename._assert_scoped_chunk_identity
+    assertion_calls = 0
+
+    async def mutate_after_precommit_check(*args: object, **kwargs: object) -> None:
+        nonlocal assertion_calls
+        assertion_calls += 1
+        if assertion_calls == 3:
+            assert kwargs.get("pg") is None
+            await clean_storage.neo4j.execute_write(
+                "MATCH (c:Chunk {work_id: $work_id}) SET c.chunk_id = $chunk_id",
+                {"work_id": new_id, "chunk_id": drifted_chunk_id},
+            )
+        await scoped_identity(*args, **kwargs)
+
+    monkeypatch.setattr(rename, "_assert_scoped_chunk_identity", mutate_after_precommit_check)
+
+    with pytest.raises(
+        rename.RenameError,
+        match="PostgreSQL committed while Neo4j did not match",
+    ):
+        await rename.execute_rename(clean_storage, old_id, new_id)
+
+    assert assertion_calls == 3
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", old_id
+    ) == 0
+    assert await clean_storage.pg.fetch_val(
+        "SELECT count(*) FROM works WHERE work_id = $1", new_id
+    ) == 1
+    records = await clean_storage.neo4j.execute_read(
+        "MATCH (n) WHERE (n:Work OR n:Chunk) AND n.work_id IN [$old_id, $new_id] "
+        "RETURN labels(n) AS labels, n.chunk_id AS chunk_id, n.work_id AS work_id "
+        "ORDER BY labels(n), chunk_id",
+        {"old_id": old_id, "new_id": new_id},
+    )
+    assert records == [
+        {"labels": ["Chunk"], "chunk_id": drifted_chunk_id, "work_id": new_id},
+        {"labels": ["Work"], "chunk_id": None, "work_id": new_id},
+    ]
+
+
+@SKIP_NO_DB
+@pytest.mark.asyncio
 async def test_neo4j_count_change_after_preflight_compensates_both_stores(
     clean_storage: StorageManager,
     assert_graph_is_disposable: None,
