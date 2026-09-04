@@ -173,7 +173,7 @@ class TestHandleCatalogSourceValidation:
             format="txt",
             metadata=DocumentMetadata(
                 title="Faith, Hope and Poetry",
-                author="Malcolm Guite",
+                author="Test Author",
                 publisher="Ashgate",
                 publication_date="2012",
                 word_count=4,
@@ -202,7 +202,7 @@ class TestHandleCatalogSourceValidation:
                 "source_class": "primary",
                 "work_type": "monograph",
                 "metadata_overrides": {
-                    "subject_author_id": "malcolm-guite",
+                    "subject_author_id": "test-author",
                     "subject_headings": ["Christian Poetry"],
                 },
             },
