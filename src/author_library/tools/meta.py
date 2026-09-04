@@ -478,7 +478,12 @@ async def handle_audit_library(
                 "overall_status": "healthy",
                 "works": [],
                 "graph": {},
-                "pg_neo4j": {"is_consistent": True, "missing_works": [], "chunk_delta": []},
+                "pg_neo4j": {
+                    "is_consistent": True,
+                    "missing_works": [],
+                    "chunk_delta": [],
+                    "work_property_delta": [],
+                },
                 "chunk_noise": {
                     "sub_50_chunks": 0,
                     "total_chunks": 0,
@@ -611,6 +616,7 @@ async def handle_audit_library(
         missing = consistency.get("missing_from_neo4j", [])
         extra = consistency.get("extra_in_neo4j", [])
         chunk_delta = [c for c in consistency.get("chunk_counts", []) if not c.get("in_sync")]
+        work_property_delta = consistency.get("work_property_delta", [])
         pg_only_chunk_drift = [c for c in chunk_delta if int(c.get("pg_only_chunk_count") or 0) > 0]
         neo4j_only_chunk_drift = [
             c for c in chunk_delta if int(c.get("neo4j_only_chunk_count") or 0) > 0
@@ -622,8 +628,9 @@ async def handle_audit_library(
             "missing_from_neo4j": missing,
             "extra_in_neo4j": extra,
             "chunk_delta": chunk_delta,
+            "work_property_delta": work_property_delta,
         }
-        if missing or extra or chunk_delta:
+        if missing or extra or chunk_delta or work_property_delta:
             has_warnings = True
             if missing:
                 recommendations.append(
@@ -657,6 +664,14 @@ async def handle_audit_library(
                     f"{', '.join(neo4j_only_work_ids[:3])}"
                     + (" ..." if len(neo4j_only_work_ids) > 3 else "")
                     + "; then inspect a dry-run. Deletion requires explicit approval."
+                )
+            if work_property_delta:
+                work_ids = [work["work_id"] for work in work_property_delta]
+                recommendations.append(
+                    f"Mirrored Work metadata differs for {len(work_ids)} works "
+                    f"({', '.join(work_ids)}) — run a reviewed, targeted, idempotent "
+                    "Work-node re-sync from PostgreSQL using upsert_work_node(). "
+                    "Do not run chunk/entity backfill for metadata-only drift."
                 )
     except Exception as exc:
         log.warning("audit_consistency_failed", error=str(exc))

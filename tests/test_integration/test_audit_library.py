@@ -86,6 +86,8 @@ async def _run_targeted_audit(
     noise_count: int = 0,
     orphan_count: int = 0,
     anomalies: list[dict[str, Any]] | None = None,
+    consistency: dict[str, Any] | None = None,
+    consistency_error: Exception | None = None,
 ) -> dict[str, Any]:
     """Run an otherwise healthy audit with one targeted warning source."""
     work_id = "test--audit-targeted"
@@ -119,19 +121,26 @@ async def _run_targeted_audit(
             return []
         raise AssertionError(f"Unexpected Neo4j query: {query}")
 
-    consistency = {
-        "is_consistent": True,
-        "pg_work_count": 1,
-        "neo4j_work_count": 1,
-        "missing_from_neo4j": [],
-        "extra_in_neo4j": [],
-        "chunk_counts": [],
-    }
+    if consistency is None:
+        consistency = {
+            "is_consistent": True,
+            "pg_work_count": 1,
+            "neo4j_work_count": 1,
+            "missing_from_neo4j": [],
+            "extra_in_neo4j": [],
+            "work_property_delta": [],
+            "chunk_counts": [],
+        }
     monkeypatch.setattr(clean_storage.pg, "fetch_all", AsyncMock(side_effect=fetch_all))
     monkeypatch.setattr(clean_storage.neo4j, "execute_read", AsyncMock(side_effect=execute_read))
+    consistency_check = (
+        AsyncMock(side_effect=consistency_error)
+        if consistency_error is not None
+        else AsyncMock(return_value=consistency)
+    )
     monkeypatch.setattr(
         "author_library.graph.backfill.check_pg_neo4j_consistency",
-        AsyncMock(return_value=consistency),
+        consistency_check,
     )
 
     return json.loads(await handle_audit_library({}, storage=clean_storage))
@@ -155,6 +164,7 @@ class TestAuditLibraryEmpty:
         assert "works" in result
         assert "recommendations" in result
         assert result["works"] == []
+        assert result["pg_neo4j"]["work_property_delta"] == []
         # Empty library is healthy (nothing to break)
         assert result["overall_status"] == "healthy"
 
@@ -484,6 +494,56 @@ class TestAuditLibraryPgNeo4j:
         pg_neo4j = result.get("pg_neo4j", {})
         if "missing_from_neo4j" in pg_neo4j:
             assert isinstance(pg_neo4j["missing_from_neo4j"], list)
+
+    async def test_work_property_drift_makes_audit_warning(
+        self,
+        clean_storage: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Metadata-only drift is visible and changes the audit verdict to warnings."""
+        consistency = {
+            "is_consistent": False,
+            "pg_work_count": 1,
+            "neo4j_work_count": 1,
+            "missing_from_neo4j": [],
+            "extra_in_neo4j": [],
+            "work_property_delta": [
+                {
+                    "work_id": "test--audit-targeted",
+                    "mismatched_properties": ["publication_year"],
+                }
+            ],
+            "chunk_counts": [],
+        }
+
+        result = await _run_targeted_audit(
+            clean_storage,
+            monkeypatch,
+            consistency=consistency,
+        )
+
+        assert result["overall_status"] == "warnings"
+        assert result["pg_neo4j"]["is_consistent"] is False
+        assert result["pg_neo4j"]["work_property_delta"] == consistency["work_property_delta"]
+        assert any(
+            "upsert_work_node" in recommendation
+            and "metadata-only drift" in recommendation
+            for recommendation in result["recommendations"]
+        )
+
+    async def test_neo4j_property_read_failure_never_reports_healthy(
+        self,
+        clean_storage: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        result = await _run_targeted_audit(
+            clean_storage,
+            monkeypatch,
+            consistency_error=RuntimeError("Neo4j property read failed"),
+        )
+
+        assert result["overall_status"] == "warnings"
+        assert result["pg_neo4j"] == {"error": "Neo4j property read failed"}
 
 
 # ---------------------------------------------------------------------------

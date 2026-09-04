@@ -375,6 +375,36 @@ class TestHandleAuditLibraryRecommendations:
             "library is healthy" in recommendation.lower() for recommendation in recommendations
         )
 
+    async def test_work_property_drift_recommends_targeted_metadata_resync(
+        self,
+        monkeypatch: MonkeyPatch,
+    ) -> None:
+        consistency = {
+            "is_consistent": False,
+            "pg_work_count": 1,
+            "neo4j_work_count": 1,
+            "missing_from_neo4j": [],
+            "extra_in_neo4j": [],
+            "work_property_delta": [
+                {
+                    "work_id": "test--audit-targeted",
+                    "mismatched_properties": ["title", "publication_year"],
+                }
+            ],
+            "chunk_counts": [],
+        }
+
+        result = await _run_targeted_audit(monkeypatch, consistency=consistency)
+
+        assert result["overall_status"] == "warnings"
+        assert result["pg_neo4j"]["work_property_delta"] == consistency["work_property_delta"]
+        assert any(
+            "upsert_work_node" in recommendation
+            and "metadata-only drift" in recommendation
+            and "chunk/entity backfill" in recommendation
+            for recommendation in result["recommendations"]
+        )
+
     async def test_noise_warning_has_specific_remedy_and_never_claims_health(
         self,
         monkeypatch: MonkeyPatch,
