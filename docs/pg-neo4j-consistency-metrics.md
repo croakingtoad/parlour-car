@@ -8,8 +8,9 @@ evidence that a chunk is stale.
 
 | Metric | Population | Meaning | Correct remedy |
 |---|---|---|---|
-| `audit_library.pg_neo4j.is_consistent` | Work-ID equality plus normalized chunk-ID equality for every work | `true` only when both stores contain the same works and chunk identities | Use the directional remedies reported in `chunk_delta`; there is no count-only clean result anymore |
+| `audit_library.pg_neo4j.is_consistent` | Work-ID equality, exact mirrored Work-property equality, plus normalized chunk-ID equality for every work | `true` only when both stores contain the same works, mirrored Work properties, and chunk identities | Use the directional remedies reported in `chunk_delta` and `work_property_delta`; there is no count-only clean result anymore |
 | `audit_library.pg_neo4j.chunk_delta` | Per-work PG-only and Neo4j-only normalized chunk IDs | Actual directional store drift, with counts and samples capped at 20 IDs | PG-only: the default graph/entity backfill; Neo4j-only: reviewed dry-run and explicit approval before cleanup |
+| `audit_library.pg_neo4j.work_property_delta` | Shared Work IDs with differing `title`, `author`, `source_class`, or `publication_year` | Exact PostgreSQL-to-Neo4j metadata drift; missing Neo4j properties are mismatches | Review and run a targeted, idempotent `upsert_work_node()` re-sync from PostgreSQL; do not use chunk/entity backfill for metadata-only drift |
 | `audit_library.works[*].neo4j_chunks_without_entity_edges` | Neo4j chunks with none of five outgoing entity-edge types | Entity-extraction coverage signal, not PG/Neo4j drift and not proof of a defect | Investigate first; only confirmed incomplete extraction warrants the default non-destructive backfill |
 
 The legacy `orphaned_neo4j_chunks` key remains as an alias for
@@ -21,7 +22,15 @@ interpreted as “absent from PostgreSQL.”
 **Source:** `src/author_library/graph/backfill.py:381-460`, packaged and turned
 into recommendations by `src/author_library/tools/meta.py:537-589`.
 
-The function reads work IDs and counts, then fetches chunk identities with:
+The function reads the PostgreSQL-authoritative Work metadata and the Neo4j
+Work projection once each. For shared IDs it compares `title`, `author`,
+`source_class`, and `publication_year` exactly; it does not normalize case or
+whitespace. `work_property_delta` is ordered by `work_id` and contains only
+the differing property names, so it does not duplicate catalog values in the
+audit response. Missing or extra Work IDs remain only in their respective
+identity findings.
+
+It then reads counts and fetches chunk identities with:
 
 ```sql
 SELECT work_id, array_agg(id::text) AS chunk_ids FROM chunks GROUP BY work_id

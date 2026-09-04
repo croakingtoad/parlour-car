@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from author_library.graph.backfill import (
+    MIRRORED_WORK_FIELDS,
     BackfillResult,
     backfill_missing_graph_data,
     backfill_work_graph,
@@ -22,7 +23,6 @@ from author_library.graph.backfill import (
     get_neo4j_work_ids,
     get_pg_work_ids,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers — build mock StorageManager with configurable return values
@@ -33,6 +33,7 @@ def _make_mock_storage(
     *,
     pg_works: list[dict[str, Any]] | None = None,
     neo4j_work_ids: list[str] | None = None,
+    neo4j_work_records: list[dict[str, Any]] | None = None,
     pg_chunks: list[dict[str, Any]] | None = None,
     neo4j_chunk_ids: list[str] | None = None,
     pg_chunk_counts: list[dict[str, Any]] | None = None,
@@ -46,6 +47,22 @@ def _make_mock_storage(
     property-based repository access pattern.
     """
     storage = MagicMock()
+    pg_work_by_id = {work["work_id"]: work for work in (pg_works or [])}
+    if neo4j_work_records is None:
+        neo4j_work_records = [
+            (
+                {
+                    "work_id": work_id,
+                    **{
+                        field: pg_work_by_id[work_id][field]
+                        for field in MIRRORED_WORK_FIELDS
+                    },
+                }
+                if work_id in pg_work_by_id
+                else {"work_id": work_id}
+            )
+            for work_id in (neo4j_work_ids or [])
+        ]
 
     # Mock pg.fetch_all to return different results based on query
     async def _pg_fetch_all(query: str, *args: Any) -> list[Any]:
@@ -92,6 +109,8 @@ def _make_mock_storage(
 
     # Mock Neo4j execute_read for different queries
     async def _neo4j_read(query: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        if "w.title AS title" in query:
+            return neo4j_work_records or []
         if "MATCH (w:Work)" in query and "RETURN w.work_id" in query:
             return [{"work_id": wid} for wid in (neo4j_work_ids or [])]
         if "RETURN c.work_id AS work_id, collect(c.chunk_id) AS chunk_ids" in query:
@@ -587,6 +606,7 @@ class TestCheckPgNeo4jConsistency:
         assert report["neo4j_work_count"] == 2
         assert report["missing_from_neo4j"] == []
         assert report["extra_in_neo4j"] == []
+        assert report["work_property_delta"] == []
         assert report["is_consistent"] is True
 
     @pytest.mark.asyncio
@@ -752,7 +772,102 @@ class TestCheckPgNeo4jConsistency:
 
         assert report["pg_work_count"] == 0
         assert report["neo4j_work_count"] == 0
+        assert report["work_property_delta"] == []
         assert report["is_consistent"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", MIRRORED_WORK_FIELDS)
+    async def test_mirrored_work_property_drift_is_reported(self, field: str) -> None:
+        """Each PostgreSQL-authoritative Work property is compared exactly."""
+        work = {
+            "work_id": "author--drifted-work",
+            "title": "Correct Title",
+            "author": "Correct Author",
+            "source_class": "primary",
+            "publication_year": 2024,
+        }
+        neo4j_work = work.copy()
+        neo4j_work[field] = 2025 if field == "publication_year" else f"drifted {field}"
+        storage = _make_mock_storage(
+            pg_works=[work],
+            neo4j_work_ids=[work["work_id"]],
+            neo4j_work_records=[neo4j_work],
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+
+        assert report["is_consistent"] is False
+        assert report["work_property_delta"] == [
+            {"work_id": work["work_id"], "mismatched_properties": [field]}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_missing_neo4j_work_property_is_reported(self) -> None:
+        """A missing property is drift even though the Work ID is shared."""
+        work = {
+            "work_id": "author--missing-property",
+            "title": "Correct Title",
+            "author": "Correct Author",
+            "source_class": "primary",
+            "publication_year": 2024,
+        }
+        neo4j_work = work.copy()
+        del neo4j_work["publication_year"]
+        storage = _make_mock_storage(
+            pg_works=[work],
+            neo4j_work_ids=[work["work_id"]],
+            neo4j_work_records=[neo4j_work],
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+
+        assert report["work_property_delta"] == [
+            {
+                "work_id": work["work_id"],
+                "mismatched_properties": ["publication_year"],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_missing_and_extra_works_are_not_property_delta_rows(self) -> None:
+        """Property differences apply only to the shared Work-ID intersection."""
+        shared_work = {
+            "work_id": "author--shared",
+            "title": "Shared",
+            "author": "Author",
+            "source_class": "primary",
+            "publication_year": 2024,
+        }
+        missing_work = {**shared_work, "work_id": "author--missing"}
+        storage = _make_mock_storage(
+            pg_works=[shared_work, missing_work],
+            neo4j_work_ids=[shared_work["work_id"], "author--extra"],
+            neo4j_work_records=[
+                shared_work,
+                {
+                    "work_id": "author--extra",
+                    "title": "Extra",
+                    "author": "Other",
+                    "source_class": "primary",
+                    "publication_year": 2020,
+                },
+            ],
+        )
+
+        report = await check_pg_neo4j_consistency(storage)
+
+        assert report["missing_from_neo4j"] == ["author--missing"]
+        assert report["extra_in_neo4j"] == ["author--extra"]
+        assert report["work_property_delta"] == []
+
+    @pytest.mark.asyncio
+    async def test_neo4j_work_property_read_failure_is_propagated(self) -> None:
+        """The audit handler receives Neo4j Work projection read failures."""
+        storage = _make_mock_storage()
+        storage.neo4j.execute_read.side_effect = RuntimeError("Neo4j unavailable")
+
+        with pytest.raises(RuntimeError, match="Neo4j unavailable"):
+            await check_pg_neo4j_consistency(storage)
 
 
 # ---------------------------------------------------------------------------

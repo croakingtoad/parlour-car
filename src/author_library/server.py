@@ -349,7 +349,8 @@ TOOLS: list[Tool] = [
         name="audit_library",
         description=(
             "Run a full library health audit. Checks per-work chunk/embedding/entity "
-            "coverage, PG-Neo4j consistency, theme graph quality, and classification "
+            "coverage, PG-Neo4j work/chunk identity and mirrored Work metadata consistency, "
+            "theme graph quality, and classification "
             "anomalies. Returns overall_status ('healthy'|'warnings'|'errors'), "
             "a per-work breakdown, graph stats, and actionable recommendations."
         ),

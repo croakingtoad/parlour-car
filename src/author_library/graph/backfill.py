@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 CHUNK_ID_SAMPLE_LIMIT = 20
+MIRRORED_WORK_FIELDS = ("title", "author", "source_class", "publication_year")
 
 
 def _normalize_chunk_id(chunk_id: object) -> str:
@@ -90,6 +91,20 @@ async def get_neo4j_work_ids(storage: StorageManager) -> set[str]:
         "MATCH (w:Work) RETURN w.work_id AS work_id"
     )
     return {r["work_id"] for r in records}
+
+
+async def get_neo4j_work_records(storage: StorageManager) -> list[dict[str, Any]]:
+    """Get all Neo4j Work nodes with the properties mirrored from PostgreSQL."""
+    records = await storage.neo4j.execute_read(
+        "MATCH (w:Work) "
+        "RETURN w.work_id AS work_id, "
+        "w.title AS title, "
+        "w.author AS author, "
+        "w.source_class AS source_class, "
+        "w.publication_year AS publication_year "
+        "ORDER BY w.work_id"
+    )
+    return [dict(record) for record in records]
 
 
 async def get_neo4j_chunk_ids_for_work(
@@ -388,6 +403,7 @@ async def check_pg_neo4j_consistency(
     - neo4j_work_count: total Work nodes in Neo4j
     - missing_from_neo4j: list of work_ids in PG but not Neo4j
     - extra_in_neo4j: list of work_ids in Neo4j but not PG
+    - work_property_delta: shared work IDs whose mirrored Work properties differ
     - chunk_counts: per-work chunk count and identity comparison, with bounded
       samples of IDs present in only one store
     """
@@ -395,8 +411,26 @@ async def check_pg_neo4j_consistency(
     pg_works = await get_pg_work_ids(storage)
     pg_work_ids = {w["work_id"] for w in pg_works}
 
-    # Get Neo4j works
-    neo4j_work_ids = await get_neo4j_work_ids(storage)
+    # Fetch each Work node once. The records provide the identity set and the
+    # four PostgreSQL-authoritative properties for metadata comparison.
+    neo4j_works = await get_neo4j_work_records(storage)
+    neo4j_work_ids = {work["work_id"] for work in neo4j_works}
+    pg_works_by_id = {work["work_id"]: work for work in pg_works}
+    neo4j_works_by_id = {work["work_id"]: work for work in neo4j_works}
+
+    work_property_delta = []
+    for work_id in sorted(pg_work_ids & neo4j_work_ids):
+        pg_work = pg_works_by_id[work_id]
+        neo4j_work = neo4j_works_by_id[work_id]
+        mismatched_properties = [
+            field
+            for field in MIRRORED_WORK_FIELDS
+            if pg_work[field] != neo4j_work.get(field)
+        ]
+        if mismatched_properties:
+            work_property_delta.append(
+                {"work_id": work_id, "mismatched_properties": mismatched_properties}
+            )
 
     # Get chunk counts per work from PG
     pg_chunk_rows = await storage.pg.fetch_all(
@@ -455,7 +489,9 @@ async def check_pg_neo4j_consistency(
         "neo4j_work_count": len(neo4j_work_ids),
         "missing_from_neo4j": sorted(pg_work_ids - neo4j_work_ids),
         "extra_in_neo4j": sorted(neo4j_work_ids - pg_work_ids),
+        "work_property_delta": work_property_delta,
         "chunk_counts": chunk_comparison,
         "is_consistent": pg_work_ids == neo4j_work_ids
+        and not work_property_delta
         and all(c["in_sync"] for c in chunk_comparison),
     }
