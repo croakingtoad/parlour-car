@@ -1,4 +1,4 @@
--- Revert 015_deferrable_work_id_foreign_keys.sql.
+-- Revert 016_deferrable_work_id_foreign_keys.sql.
 -- Lock: ACCESS EXCLUSIVE briefly on each existing child table, one at a time.
 -- Duration: catalog-only constraint metadata changes; no table rewrite or validation scan.
 -- Preconditions: run only after all work_id rename transactions using deferred checks have ended.
