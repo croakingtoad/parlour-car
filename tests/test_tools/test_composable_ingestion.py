@@ -8,12 +8,21 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
 
+from author_library.catalog.models import ClassificationResult, SourceClass
+from author_library.config import Settings
 from author_library.errors import IngestionError
+from author_library.parsing.models import (
+    DocumentMetadata,
+    DocumentNode,
+    NodeType,
+    ParsedDocument,
+)
 from author_library.tools.composable_ingestion import (
     _infer_work_type,
     handle_catalog_source,
@@ -22,6 +31,22 @@ from author_library.tools.composable_ingestion import (
     handle_detect_passage_links,
     handle_flag_acquisition,
 )
+
+
+class FakeWorkRepository:
+    def __init__(self) -> None:
+        self.works: dict[str, dict[str, Any]] = {}
+
+    async def create(self, work: dict[str, Any]) -> str:
+        self.works[work["work_id"]] = work
+        return work["work_id"]
+
+    async def get(self, work_id: str) -> dict[str, Any] | None:
+        return self.works.get(work_id)
+
+    async def update(self, work_id: str, fields: dict[str, Any]) -> bool:
+        self.works[work_id].update(fields)
+        return True
 
 
 class TestHandleClassifySourceValidation:
@@ -132,6 +157,64 @@ class TestHandleCatalogSourceValidation:
                     storage=None,  # type: ignore[arg-type]
                     embedding_provider=None,  # type: ignore[arg-type]
                 )
+
+    @patch("author_library.tools.composable_ingestion.get_parser")
+    @patch("author_library.catalog.pipeline.SourceClassifier.classify")
+    async def test_subject_headings_round_trip_through_catalog_source(
+        self,
+        mock_classify: AsyncMock,
+        mock_get_parser: MagicMock,
+        tmp_path,
+    ) -> None:
+        test_file = tmp_path / "test.txt"
+        test_file.write_text("Text about poetic imagination.")
+        document = ParsedDocument(
+            source_path=str(test_file),
+            format="txt",
+            metadata=DocumentMetadata(
+                title="Faith, Hope and Poetry",
+                author="Malcolm Guite",
+                publisher="Ashgate",
+                publication_date="2012",
+                word_count=4,
+            ),
+            tree=DocumentNode(node_type=NodeType.BOOK, text="Text about poetic imagination."),
+            raw_text="Text about poetic imagination.",
+        )
+        parser = AsyncMock()
+        parser.parse.return_value = document
+        mock_get_parser.return_value = parser
+        mock_classify.return_value = ClassificationResult(
+            source_class=SourceClass.PRIMARY,
+            confidence=0.95,
+            reasoning="Authorship matches the configured subject author.",
+            signals_detected=["authorship_match"],
+        )
+        works = FakeWorkRepository()
+        storage = MagicMock()
+        storage.works = works
+        storage.pg = None
+        storage.graph = AsyncMock()
+
+        result_json = await handle_catalog_source(
+            {
+                "file_path": str(test_file),
+                "source_class": "primary",
+                "work_type": "monograph",
+                "metadata_overrides": {
+                    "subject_author_id": "malcolm-guite",
+                    "subject_headings": ["Christian Poetry"],
+                },
+            },
+            settings=Settings(),
+            storage=storage,
+            embedding_provider=None,  # type: ignore[arg-type]
+        )
+
+        result = json.loads(result_json)
+        work_id = result["work_id"]
+        assert result["catalog_record"]["subject_headings"] == ["Christian Poetry"]
+        assert works.works[work_id]["subject_headings"] == ["Christian Poetry"]
 
 
 class TestHandleChunkSourceValidation:

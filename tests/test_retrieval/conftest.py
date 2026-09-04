@@ -156,6 +156,8 @@ class InMemoryEmbeddingRepository:
         model: str,
         limit: int = 20,
         source_class_filter: str | None = None,
+        subject_headings_filter: list[str] | None = None,
+        genre_tags_filter: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Cosine distance search over in-memory embeddings."""
         candidates: list[tuple[float, dict[str, Any]]] = []

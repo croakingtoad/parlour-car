@@ -230,6 +230,7 @@ async def handle_list_works(
     Arguments:
         author_id (str): The author's slug identifier.
         source_class (str, optional): Filter by source class.
+        subject_headings (list[str], optional): Match any requested subject heading.
 
     Returns:
         JSON with works catalog for the author.
@@ -239,11 +240,20 @@ async def handle_list_works(
         raise RetrievalError("author_id is required", context={"arguments": arguments})
 
     source_class_filter = arguments.get("source_class")
+    subject_headings_filter = arguments.get("subject_headings")
 
     works = await storage.works.list_by_author(author_id)
 
     if source_class_filter:
         works = [w for w in works if w.get("source_class") == source_class_filter]
+
+    if subject_headings_filter:
+        requested_headings = set(subject_headings_filter)
+        works = [
+            w
+            for w in works
+            if requested_headings.intersection(w.get("subject_headings", []))
+        ]
 
     catalog: list[dict[str, Any]] = []
     for w in works:
@@ -256,6 +266,7 @@ async def handle_list_works(
             "format_ingested": w.get("format_ingested", ""),
             "word_count": w.get("word_count", 0),
             "genre_tags": w.get("genre_tags", []),
+            "subject_headings": w.get("subject_headings", []),
         }
 
         # Add source-class-specific metadata
@@ -279,6 +290,7 @@ async def handle_list_works(
             "author_id": author_id,
             "total_works": len(catalog),
             "filter": source_class_filter,
+            "subject_headings_filter": subject_headings_filter,
             "works": catalog,
         },
         indent=2,
@@ -485,7 +497,12 @@ async def handle_audit_library(
                 "overall_status": "healthy",
                 "works": [],
                 "graph": {},
-                "pg_neo4j": {"is_consistent": True, "missing_works": [], "chunk_delta": []},
+                "pg_neo4j": {
+                    "is_consistent": True,
+                    "missing_works": [],
+                    "chunk_delta": [],
+                    "work_property_delta": [],
+                },
                 "chunk_noise": {
                     "sub_50_chunks": 0,
                     "total_chunks": 0,
@@ -618,6 +635,7 @@ async def handle_audit_library(
         missing = consistency.get("missing_from_neo4j", [])
         extra = consistency.get("extra_in_neo4j", [])
         chunk_delta = [c for c in consistency.get("chunk_counts", []) if not c.get("in_sync")]
+        work_property_delta = consistency.get("work_property_delta", [])
         pg_only_chunk_drift = [c for c in chunk_delta if int(c.get("pg_only_chunk_count") or 0) > 0]
         neo4j_only_chunk_drift = [
             c for c in chunk_delta if int(c.get("neo4j_only_chunk_count") or 0) > 0
@@ -629,8 +647,9 @@ async def handle_audit_library(
             "missing_from_neo4j": missing,
             "extra_in_neo4j": extra,
             "chunk_delta": chunk_delta,
+            "work_property_delta": work_property_delta,
         }
-        if missing or extra or chunk_delta:
+        if missing or extra or chunk_delta or work_property_delta:
             has_warnings = True
             if missing:
                 recommendations.append(
@@ -664,6 +683,14 @@ async def handle_audit_library(
                     f"{', '.join(neo4j_only_work_ids[:3])}"
                     + (" ..." if len(neo4j_only_work_ids) > 3 else "")
                     + "; then inspect a dry-run. Deletion requires explicit approval."
+                )
+            if work_property_delta:
+                work_ids = [work["work_id"] for work in work_property_delta]
+                recommendations.append(
+                    f"Mirrored Work metadata differs for {len(work_ids)} works "
+                    f"({', '.join(work_ids)}) — run a reviewed, targeted, idempotent "
+                    "Work-node re-sync from PostgreSQL using upsert_work_node(). "
+                    "Do not run chunk/entity backfill for metadata-only drift."
                 )
     except Exception as exc:
         log.warning("audit_consistency_failed", error=str(exc))

@@ -91,6 +91,7 @@ async def author_storage(clean_storage: SM) -> SM:
         },
         publication_year=2005,
         word_count=3000,
+        subject_headings=["Theology"],
     ))
 
     # Author 2: "other-author" with 1 primary work
@@ -193,6 +194,41 @@ class TestListWorks:
         assert result["filter"] == "primary"
         assert result["works"][0]["source_class"] == "primary"
         assert result["works"][0]["work_id"] == "test--author-work-one"
+
+    async def test_list_works_filter_by_subject_heading(
+        self, author_storage: SM
+    ) -> None:
+        """list_works includes works matching any requested heading."""
+        result_str = await handle_list_works(
+            {
+                "author_id": "test-author",
+                "subject_headings": ["missing", "Theology"],
+            },
+            storage=author_storage,
+        )
+        result = json.loads(result_str)
+
+        assert result["total_works"] == 1
+        assert result["subject_headings_filter"] == ["missing", "Theology"]
+        assert result["works"][0]["work_id"] == "test--author-work-two"
+        assert result["works"][0]["subject_headings"] == ["Theology"]
+
+    async def test_list_works_combines_filter_types_with_and(
+        self, author_storage: SM
+    ) -> None:
+        """A heading match cannot override a mismatching source class."""
+        result_str = await handle_list_works(
+            {
+                "author_id": "test-author",
+                "source_class": "personal",
+                "subject_headings": ["English poetry"],
+            },
+            storage=author_storage,
+        )
+
+        result = json.loads(result_str)
+        assert result["works"] == []
+        assert result["total_works"] == 0
 
     async def test_list_works_no_match_returns_empty(
         self, author_storage: SM

@@ -104,6 +104,47 @@ class TestHandleIngestBookAutoConfirm:
                 embedding_provider=None,  # type: ignore[arg-type]
             )
 
+    @patch("author_library.tools.ingest._run_post_ingest_backup", new_callable=AsyncMock)
+    @patch("author_library.tools.ingest.IngestionPipeline")
+    async def test_subject_headings_metadata_hint_reaches_ingestion_pipeline(
+        self,
+        mock_pipeline_cls: AsyncMock,
+        mock_backup: AsyncMock,
+        tmp_path,
+    ) -> None:
+        test_file = tmp_path / "test.epub"
+        test_file.write_text("dummy content")
+        mock_pipeline = AsyncMock()
+        mock_pipeline.ingest.return_value = IngestionResult(
+            work_id="malcolm-guite--test",
+            source_class="secondary",
+            processing_route="embeddings_and_graph",
+            chunks_by_granularity={},
+            embeddings_stored=0,
+            entity_count=0,
+            edge_count=0,
+            errors=[],
+        )
+        mock_pipeline_cls.return_value = mock_pipeline
+
+        await handle_ingest_book(
+            {
+                "file_path": str(test_file),
+                "subject_author_id": "malcolm-guite",
+                "metadata_hints": {"subject_headings": ["Christian Poetry"]},
+            },
+            settings=AsyncMock(),
+            storage=AsyncMock(),
+            embedding_provider=AsyncMock(),
+        )
+
+        mock_pipeline.ingest.assert_awaited_once_with(
+            test_file,
+            subject_author_id="malcolm-guite",
+            metadata_hints={"subject_headings": ["Christian Poetry"]},
+        )
+        mock_backup.assert_awaited_once_with("malcolm-guite--test")
+
 
 class TestHandleIngestCorpusValidation:
     """Validate required argument checks for ingest_corpus."""

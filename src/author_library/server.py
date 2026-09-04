@@ -107,8 +107,8 @@ TOOLS: list[Tool] = [
                     "type": "object",
                     "description": (
                         "Optional overrides for classification and catalog fields. "
-                        "Keys may include: source_class, genre_tags, work_type, "
-                        "publication_year, publisher, etc."
+                        "Keys may include: source_class, genre_tags, subject_headings, "
+                        "work_type, publication_year, publisher, etc."
                     ),
                 },
                 "auto_confirm": {
@@ -298,7 +298,9 @@ TOOLS: list[Tool] = [
         name="list_works",
         description=(
             "List the works catalog for an author, optionally filtered by "
-            "source class. Includes metadata, genre tags, and source-class-specific fields."
+            "source class or subject heading. Includes metadata, genre tags, "
+            "subject headings, and source-class-specific fields. When both "
+            "filters are provided, they combine with AND semantics."
         ),
         inputSchema={
             "type": "object",
@@ -318,6 +320,14 @@ TOOLS: list[Tool] = [
                         "reference",
                     ],
                     "description": "Optional filter by source class.",
+                },
+                "subject_headings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Filter by subject heading. Multiple values use OR semantics: "
+                        "a work matching any requested heading is included."
+                    ),
                 },
             },
             "required": ["author_id"],
@@ -349,7 +359,8 @@ TOOLS: list[Tool] = [
         name="audit_library",
         description=(
             "Run a full library health audit. Checks per-work chunk/embedding/entity "
-            "coverage, PG-Neo4j consistency, theme graph quality, and classification "
+            "coverage, PG-Neo4j work/chunk identity and mirrored Work metadata consistency, "
+            "theme graph quality, and classification "
             "anomalies. Returns overall_status ('healthy'|'warnings'|'errors'), "
             "a per-work breakdown, graph stats, and actionable recommendations."
         ),
@@ -467,7 +478,10 @@ TOOLS: list[Tool] = [
                 },
                 "metadata_overrides": {
                     "type": "object",
-                    "description": "User corrections to auto-detected metadata.",
+                    "description": (
+                        "User corrections to auto-detected metadata, including "
+                        "subject_headings."
+                    ),
                 },
             },
             "required": ["file_path", "source_class"],
@@ -617,6 +631,22 @@ TOOLS: list[Tool] = [
                             "items": {"type": "string"},
                             "description": "Limit to specific works.",
                         },
+                        "subject_headings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Filter by work subject heading. Multiple values use OR "
+                                "semantics: a work matching any requested heading is included."
+                            ),
+                        },
+                        "genre_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Filter by work genre tag. Multiple values use OR semantics: "
+                                "a work matching any requested tag is included."
+                            ),
+                        },
                         "speaker": {
                             "type": "string",
                             "description": "Filter by speaker.",
@@ -639,7 +669,9 @@ TOOLS: list[Tool] = [
                             "description": "Filter by engagement pass.",
                         },
                     },
-                    "description": "Search filters.",
+                    "description": (
+                        "Search filters. Different filter types combine with AND semantics."
+                    ),
                 },
                 "include_personal": {
                     "type": "boolean",

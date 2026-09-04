@@ -32,6 +32,8 @@ async def vector_search(
     source_class_filter: str | None = None,
     work_id_filter: str | None = None,
     granularity_filter: str | None = None,
+    subject_headings_filter: list[str] | None = None,
+    genre_tags_filter: list[str] | None = None,
 ) -> list[RetrievalResult]:
     """Search chunk embeddings by cosine similarity.
 
@@ -49,6 +51,8 @@ async def vector_search(
         source_class_filter: Optional filter on source_class.
         work_id_filter: Optional filter on work_id (post-filter).
         granularity_filter: Optional filter on granularity (post-filter).
+        subject_headings_filter: Match works with any requested subject heading.
+        genre_tags_filter: Match works with any requested genre tag.
 
     Returns:
         Ranked list of RetrievalResult objects, highest score first.
@@ -81,6 +85,8 @@ async def vector_search(
             model=query_result.model,
             limit=fetch_limit,
             source_class_filter=source_class_filter,
+            subject_headings_filter=subject_headings_filter,
+            genre_tags_filter=genre_tags_filter,
         )
     except Exception as exc:
         raise RetrievalError(

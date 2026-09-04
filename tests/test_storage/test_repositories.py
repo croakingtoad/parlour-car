@@ -56,6 +56,19 @@ SAMPLE_CHUNK: dict[str, Any] = {
     "position": 1,
 }
 
+UNCLASSIFIED_WORK: dict[str, Any] = {
+    **SAMPLE_WORK,
+    "work_id": "test--unclassified-imagination",
+    "title": "Unclassified Imagination",
+    "subject_headings": ["Unclassified"],
+    "genre_tags": ["unclassified"],
+}
+
+UNCLASSIFIED_CHUNK: dict[str, Any] = {
+    **SAMPLE_CHUNK,
+    "work_id": UNCLASSIFIED_WORK["work_id"],
+}
+
 
 async def _insert_author(pool: PostgresPool) -> None:
     """Insert the sample author for FK references."""
@@ -150,9 +163,11 @@ async def test_embedding_store_and_search(pg_pool: PostgresPool) -> None:
     await _insert_author(pg_pool)
     work_repo = PgWorkRepository(pg_pool)
     await work_repo.create(SAMPLE_WORK)
+    await work_repo.create(UNCLASSIFIED_WORK)
 
     chunk_repo = PgChunkRepository(pg_pool)
     chunk_id = await chunk_repo.create(SAMPLE_CHUNK)
+    unclassified_chunk_id = await chunk_repo.create(UNCLASSIFIED_CHUNK)
 
     emb_repo = PgEmbeddingRepository(pg_pool)
 
@@ -160,6 +175,13 @@ async def test_embedding_store_and_search(pg_pool: PostgresPool) -> None:
     test_embedding = [0.01 * i for i in range(1024)]
     emb_id = await emb_repo.store(
         chunk_id, test_embedding, "voyage", "voyage-3-large", 1024
+    )
+    await emb_repo.store(
+        unclassified_chunk_id,
+        test_embedding,
+        "voyage",
+        "voyage-3-large",
+        1024,
     )
     assert isinstance(emb_id, uuid.UUID)
 
@@ -173,8 +195,53 @@ async def test_embedding_store_and_search(pg_pool: PostgresPool) -> None:
     results = await emb_repo.similarity_search(
         query_emb, provider="voyage", model="voyage-3-large", limit=5
     )
+    assert {result["chunk_id"] for result in results} == {
+        chunk_id,
+        unclassified_chunk_id,
+    }
+
+    empty_filter_results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=[],
+        genre_tags_filter=[],
+        limit=5,
+    )
+    assert {result["chunk_id"] for result in empty_filter_results} == {
+        result["chunk_id"] for result in results
+    }
+
+    # Work metadata stays normalized on works; multiple values use OR semantics.
+    results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=["missing", "poetry"],
+        genre_tags_filter=["missing", "theology"],
+        limit=5,
+    )
     assert len(results) == 1
     assert results[0]["chunk_id"] == chunk_id
+
+    results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=["poetry"],
+        genre_tags_filter=["sermon"],
+        limit=5,
+    )
+    assert results == []
+
+    results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=["quantum mechanics"],
+        limit=5,
+    )
+    assert results == []
 
 
 # -- Annotation Roundtrip Tests -----------------------------------------------

@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from author_library.catalog.models import (
     ClassificationResult,
@@ -31,6 +32,7 @@ from author_library.parsing.models import (
     NodeType,
     ParsedDocument,
 )
+from author_library.storage.repositories import WorkRepository
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -73,7 +75,7 @@ def _make_classification_result(
     )
 
 
-class FakeWorkRepository:
+class FakeWorkRepository(WorkRepository):
     """In-memory work repository for testing pipeline storage."""
 
     def __init__(self) -> None:
@@ -573,6 +575,37 @@ class TestPipelineProcess:
         assert stored["title"] == "Faith, Hope and Poetry"
         assert stored["source_class"] == "primary"
 
+    async def test_subject_headings_override_lands_in_repository(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(
+                _make_document(),
+                user_overrides={"subject_headings": ["Christian Poetry"]},
+            )
+
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert result.catalog_entry.subject_headings == ["Christian Poetry"]
+        assert stored["subject_headings"] == ["Christian Poetry"]
+
+    async def test_subject_headings_omitted_uses_explicit_unclassified_sentinel(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(_make_document())
+
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert result.catalog_entry.subject_headings == ["Unclassified"]
+        assert stored["subject_headings"] == ["Unclassified"]
+
     async def test_user_overrides_applied(
         self, settings: Settings, repo: FakeWorkRepository
     ) -> None:
@@ -614,6 +647,78 @@ class TestPipelineProcess:
                     "subject_headings": ["Imagination"],
                 },
             )
+
+
+class TestSubjectHeadingVocabularyWarning:
+    async def test_warns_only_when_vocabulary_table_exists(self) -> None:
+        pg_pool = AsyncMock()
+        pg_pool.fetch_val.return_value = True
+        pg_pool.fetch_all.return_value = [{"term": "prosody"}]
+        pipeline = ClassificationPipeline(
+            settings=Settings(),
+            work_repository=FakeWorkRepository(),
+            subject_author="Malcolm Guite",
+            pg_pool=pg_pool,
+        )
+
+        with capture_logs() as logs:
+            await pipeline._warn_for_uncontrolled_subject_headings(
+                ["Prosody", "Poetic Form"]
+            )
+
+        pg_pool.fetch_val.assert_awaited_once()
+        pg_pool.fetch_all.assert_awaited_once()
+        assert any(
+            entry["event"] == "catalog_subject_headings_not_canonical"
+            and entry["subject_headings"] == ["poetic form"]
+            for entry in logs
+        )
+
+    async def test_skips_lookup_when_vocabulary_table_is_absent(self) -> None:
+        pg_pool = AsyncMock()
+        pg_pool.fetch_val.return_value = False
+        pipeline = ClassificationPipeline(
+            settings=Settings(),
+            work_repository=FakeWorkRepository(),
+            subject_author="Malcolm Guite",
+            pg_pool=pg_pool,
+        )
+
+        await pipeline._warn_for_uncontrolled_subject_headings(["Prosody"])
+
+        pg_pool.fetch_all.assert_not_awaited()
+
+    async def test_validation_error_warns_and_catalog_persistence_continues(self) -> None:
+        pg_pool = AsyncMock()
+        pg_pool.fetch_val.side_effect = RuntimeError("vocabulary database unavailable")
+        repo = FakeWorkRepository()
+        pipeline = ClassificationPipeline(
+            settings=Settings(),
+            work_repository=repo,
+            subject_author="Malcolm Guite",
+            pg_pool=pg_pool,
+        )
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with capture_logs() as logs, patch.object(
+            pipeline._classifier, "classify", return_value=classification
+        ):
+            result = await pipeline.process(
+                _make_document(),
+                user_overrides={
+                    "subject_author_id": "malcolm-guite",
+                    "work_type": "monograph",
+                    "genre_tags": ["monograph"],
+                    "subject_headings": ["Imagination"],
+                },
+            )
+
+        assert result.catalog_entry.work_id in repo.works
+        assert any(
+            entry["event"] == "catalog_subject_heading_validation_unavailable"
+            and entry["error"] == "vocabulary database unavailable"
+            for entry in logs
+        )
 
 
 # ---------------------------------------------------------------------------
