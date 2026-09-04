@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+from author_library.config import Settings
 from author_library.errors import RetrievalError
 from author_library.retrieval.models import RetrievalResult
 from author_library.tools.composable_query import (
@@ -17,7 +18,6 @@ from author_library.tools.composable_query import (
     handle_manage_vocabulary,
     handle_search_chunks,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers for search_chunks filter tests
@@ -156,7 +156,7 @@ class TestSearchChunksWorkMetadataFilters:
                     },
                     "include_passage_links": False,
                 },
-                settings=None,  # type: ignore[arg-type]
+                settings=Settings(),
                 storage=storage,
                 embedding_provider=MagicMock(),
             )

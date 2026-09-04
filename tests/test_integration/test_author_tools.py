@@ -213,6 +213,23 @@ class TestListWorks:
         assert result["works"][0]["work_id"] == "test--author-work-two"
         assert result["works"][0]["subject_headings"] == ["Theology"]
 
+    async def test_list_works_combines_filter_types_with_and(
+        self, author_storage: SM
+    ) -> None:
+        """A heading match cannot override a mismatching source class."""
+        result_str = await handle_list_works(
+            {
+                "author_id": "test-author",
+                "source_class": "personal",
+                "subject_headings": ["English poetry"],
+            },
+            storage=author_storage,
+        )
+
+        result = json.loads(result_str)
+        assert result["works"] == []
+        assert result["total_works"] == 0
+
     async def test_list_works_no_match_returns_empty(
         self, author_storage: SM
     ) -> None:
