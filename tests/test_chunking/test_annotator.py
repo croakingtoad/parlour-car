@@ -6,7 +6,11 @@ import os
 
 import pytest
 
-from author_library.chunking.annotator import AnnotationContext, ChunkAnnotator
+from author_library.chunking.annotator import (
+    AnnotationContext,
+    ChunkAnnotator,
+    _publication_year_label,
+)
 from author_library.chunking.models import Chunk, ChunkGranularity
 
 
@@ -151,6 +155,27 @@ class TestAnnotationTemplates:
         assert "subject author" not in annotation.lower()
         assert "referenced by" not in annotation.lower()
 
+    async def test_reference_annotation_labels_missing_publication_year_undated(self) -> None:
+        context = AnnotationContext(
+            work_title="Undated Reference Work",
+            publication_year=None,
+            author="Reference Author",
+            subject_author="Reference Author",
+        )
+        chunk = Chunk(
+            text="A reference passage.",
+            granularity=ChunkGranularity.MESO,
+            work_id="reference-author--undated-reference-work",
+            source_class="reference",
+            position=0,
+        )
+
+        result = await ChunkAnnotator().annotate_chunks([chunk], context)
+
+        assert result[0].annotation is not None
+        assert 'From "Undated Reference Work" (undated).' in result[0].annotation
+        assert "None" not in result[0].annotation
+
     async def test_source_class_markers_present(
         self, sample_chunks: list[Chunk], primary_context: AnnotationContext
     ) -> None:
@@ -165,6 +190,9 @@ class TestAnnotationTemplates:
         annotator = ChunkAnnotator()
         result = await annotator.annotate_chunks([], primary_context)
         assert result == []
+
+    def test_unknown_publication_year_is_labeled_undated(self) -> None:
+        assert _publication_year_label(None) == "undated"
 
     async def test_annotation_includes_chapter_info(
         self, sample_chunks: list[Chunk], primary_context: AnnotationContext

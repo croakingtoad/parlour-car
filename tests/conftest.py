@@ -6,15 +6,15 @@ uses DatabaseSettings() will automatically receive the test DB URL.
 
 Override defaults with environment variables:
     TEST_POSTGRES_URL  (default: author_library_test on localhost)
-    TEST_NEO4J_URL     (default: bolt://localhost:7687)
+    TEST_NEO4J_URL     (default: bolt://localhost:7688)
 
-PostgreSQL gets a genuinely separate database (author_library_test), but
-Neo4j Community Edition serves a single database, so TEST_NEO4J_URL points
-at the same graph the production corpus lives in. Prefix-scoped cleanup is
-the only thing keeping test teardown off real data — and that has failed
-twice (2026-07-02 theme wipe, 2026-08-13 Guite work wipe). The guard fixture
-below refuses to run graph tests against a graph holding production data
-unless the operator opts in explicitly.
+PostgreSQL gets a genuinely separate database (author_library_test), and
+Neo4j defaults to a separate, disposable instance. Three layers protect
+production data: that disposable-by-default endpoint, the guard fixture below
+that refuses graph tests against a graph holding production data unless the
+operator opts in explicitly, and prefix-scoped cleanup. Prefix-scoped cleanup
+is still necessary because explicit production access can be enabled, and it
+has failed twice (2026-07-02 theme wipe, 2026-08-13 Guite work wipe).
 """
 
 from __future__ import annotations

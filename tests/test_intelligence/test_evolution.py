@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 from author_library.intelligence.evolution import (
     EvolutionStep,
     ThematicEvolution,
     ThematicEvolutionAnalyzer,
+    _dated_primary_work_years,
 )
 from author_library.intelligence.thematic_index import (
     ThematicAppearance,
@@ -101,6 +103,79 @@ class TestEvolutionModels:
         )
         assert evolution.steps == []
         assert evolution.develops_from_edges == []
+
+    def test_undated_works_are_excluded_from_chronology(self) -> None:
+        years = _dated_primary_work_years(
+            [
+                {
+                    "work_id": "author--dated",
+                    "source_class": "primary",
+                    "publication_year": 2001,
+                },
+                {
+                    "work_id": "author--undated",
+                    "source_class": "primary",
+                    "publication_year": None,
+                },
+                {
+                    "work_id": "critic--dated",
+                    "source_class": "secondary",
+                    "publication_year": 1999,
+                },
+            ]
+        )
+        assert years == {"author--dated": 2001}
+
+    async def test_undated_appearance_is_not_sent_for_evolution_analysis(self) -> None:
+        analyzer = object.__new__(ThematicEvolutionAnalyzer)
+        chunk_repo = AsyncMock()
+        chunk_repo.list_by_work.return_value = [
+            {"id": "chunk-1", "text": "Dated passage", "source_class": "primary"}
+        ]
+        theme = ThematicEntry(
+            theme="Attention",
+            author_stance="Attention develops over time.",
+            appearances=[
+                ThematicAppearance(
+                    work_id="author--dated",
+                    chapters=["One"],
+                    treatment_summary="Dated treatment",
+                ),
+                ThematicAppearance(
+                    work_id="author--undated",
+                    chapters=["Two"],
+                    treatment_summary="Undated treatment",
+                ),
+            ],
+        )
+        llm_result = {
+            "narrative": "A dated narrative.",
+            "steps": [
+                {
+                    "work_id": "author--dated",
+                    "publication_year": 2001,
+                    "summary": "Dated treatment",
+                },
+                {
+                    "work_id": "author--undated",
+                    "publication_year": 0,
+                    "summary": "Must be excluded",
+                },
+            ],
+        }
+
+        with patch.object(analyzer, "_call_anthropic", return_value=llm_result) as call:
+            evolution = await analyzer._analyze_theme_evolution(
+                theme=theme,
+                work_years={"author--dated": 2001},
+                chunk_repo=chunk_repo,
+            )
+
+        chunk_repo.list_by_work.assert_awaited_once_with(
+            "author--dated", granularity="meso"
+        )
+        assert "author--undated" not in call.await_args.args[0]
+        assert [step.work_id for step in evolution.steps] == ["author--dated"]
 
 
 # ---------------------------------------------------------------------------

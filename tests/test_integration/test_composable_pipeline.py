@@ -293,6 +293,7 @@ class TestReferenceCatalogSource:
 
         temp_path = _write_temp_text("Standalone reference text without a byline.")
         try:
+            works_before = await clean_storage.pg.fetch_val("SELECT count(*) FROM works")
             with pytest.raises(
                 ClassificationError,
                 match=rf'source_class="reference" requires metadata field "{missing_field}"',
@@ -307,6 +308,7 @@ class TestReferenceCatalogSource:
                     storage=clean_storage,
                     embedding_provider=None,
                 )
+            assert await clean_storage.pg.fetch_val("SELECT count(*) FROM works") == works_before
         finally:
             temp_path.unlink(missing_ok=True)
 
