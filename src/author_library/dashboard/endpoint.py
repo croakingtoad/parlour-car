@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 from starlette.requests import Request
@@ -20,10 +20,11 @@ from author_library.dashboard.health import run_all_checks
 from author_library.dashboard.queries import (
     get_all_themes,
     get_author_health,
-    get_pipeline_status,
     get_graph_stats,
     get_library_overview,
     get_per_work_details,
+    get_per_work_theme_counts,
+    get_pipeline_status,
     get_theme_detail,
     get_voice_profiles,
     get_work_detail,
@@ -50,11 +51,21 @@ async def handle_stats(request: Request) -> JSONResponse:
     """Return all library stats as JSON."""
     storage = _storage(request)
     try:
-        library, works, graph = await asyncio.gather(
+        library, works, graph, theme_counts = await asyncio.gather(
             get_library_overview(storage.pg),
             get_per_work_details(storage.pg),
             get_graph_stats(storage.neo4j),
+            get_per_work_theme_counts(storage.neo4j),
         )
+        for work in works:
+            counts = theme_counts.get(work["work_id"], {})
+            themed_chunks = counts.get("themed_chunk_count", 0)
+            chunk_count = work["chunk_count"] or 0
+            work["themed_chunk_count"] = themed_chunks
+            work["distinct_theme_count"] = counts.get("distinct_theme_count", 0)
+            work["theme_coverage_pct"] = (
+                round(100.0 * themed_chunks / chunk_count, 1) if chunk_count else 0.0
+            )
         library["by_source_class"] = {
             "primary":    library.get("primary_works", 0),
             "secondary":  library.get("secondary_works", 0),

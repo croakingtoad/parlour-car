@@ -56,6 +56,9 @@
     .pbar-bg { background: #334155; border-radius: 3px; height: 5px;
                width: 72px; display: inline-block; vertical-align: middle; }
     .pbar    { background: #38bdf8; border-radius: 3px; height: 5px; }
+    .pbar-theme-good { background: #22c55e; }
+    .pbar-theme-watch { background: #f59e0b; }
+    .pbar-theme-none { background: #64748b; }
     .conf-warn { color: #f59e0b; }
     .muted { color: #64748b; }
     /* Tabs */
@@ -186,7 +189,7 @@
     <thead>
       <tr>
         <th>Title</th><th>Author</th><th>Class</th>
-        <th>Chunks</th><th>Embedded</th><th class="has-tip">Confidence<span class="tip">LLM self-reported confidence in the source classification, based on how many signals it detected.<br>≥ 0.90 = strong (30+ signals)<br>0.70–0.89 = good (15–30)<br>0.50–0.69 = weak (5–15)<br>&lt; 0.50 = very uncertain (&lt;5)</span></th><th>Ingested</th>
+        <th>Chunks</th><th>Embedded</th><th class="has-tip">Themes<span class="tip">Share of chunks with at least one EXPLORES_THEME edge, followed by the number of distinct themes. About 91% corpus-wide coverage is expected; it is not a 100% completion target.</span></th><th class="has-tip">Confidence<span class="tip">LLM self-reported confidence in the source classification, based on how many signals it detected.<br>≥ 0.90 = strong (30+ signals)<br>0.70–0.89 = good (15–30)<br>0.50–0.69 = weak (5–15)<br>&lt; 0.50 = very uncertain (&lt;5)</span></th><th>Ingested</th>
       </tr>
     </thead>
     <tbody id="works-tbody"></tbody>
@@ -364,6 +367,12 @@ function renderWorks(works) {
     const confStr  = conf != null ? (conf * 100).toFixed(0) + '%' : '&mdash;';
     const confCls  = conf != null && conf < 0.90 ? ' conf-warn' : '';
     const embPct   = w.embedding_pct ?? 0;
+    const themePct = w.theme_coverage_pct ?? 0;
+    const themeClass = themePct >= 85 ? 'pbar-theme-good'
+      : themePct > 0 ? 'pbar-theme-watch' : 'pbar-theme-none';
+    const themeText = w.chunk_count > 0
+      ? pct(themePct) + ' · ' + fmt(w.distinct_theme_count ?? 0)
+      : '&mdash;';
     const rawCls = String(w.source_class || '');
     const cls = VALID_CLASSES.has(rawCls) ? rawCls : 'tertiary';
     const tr = document.createElement('tr');
@@ -377,6 +386,10 @@ function renderWorks(works) {
       '<td>' +
         '<span class="pbar-bg"><span class="pbar" style="width:' + embPct + '%"></span></span> ' +
         pct(embPct) +
+      '</td>' +
+      '<td>' +
+        '<span class="pbar-bg"><span class="pbar ' + themeClass + '" style="width:' + themePct + '%"></span></span> ' +
+        themeText +
       '</td>' +
       '<td class="' + confCls + '">' + confStr + '</td>' +
       '<td class="muted">' + esc(w.ingestion_date) + '</td>';
@@ -398,7 +411,7 @@ async function toggleWorkDetail(tr, workId) {
   const detailRow = document.createElement('tr');
   detailRow.className = 'work-detail-row';
   const cell = document.createElement('td');
-  cell.colSpan = 7;
+  cell.colSpan = 8;
   detailRow.appendChild(cell);
   tr.insertAdjacentElement('afterend', detailRow);
 
