@@ -113,9 +113,7 @@ class TestCanonicalChunkIds:
                 ),
             ),
         ):
-            classification_cls.return_value.process = AsyncMock(
-                return_value=pipeline_result
-            )
+            classification_cls.return_value.process = AsyncMock(return_value=pipeline_result)
             pipeline = IngestionPipeline(
                 settings=settings,
                 storage=storage,
@@ -128,8 +126,7 @@ class TestCanonicalChunkIds:
             await pipeline.ingest_document(document, subject_author_id="author")
 
         graph_chunks = [
-            call.args[0]["chunk_id"]
-            for call in storage.graph.upsert_chunk_node.await_args_list
+            call.args[0]["chunk_id"] for call in storage.graph.upsert_chunk_node.await_args_list
         ]
         extraction_chunks = extractor.extract_and_persist.await_args.args[0]
         linking_chunks = pipeline._create_passage_links.await_args.args[0]
