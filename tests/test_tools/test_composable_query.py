@@ -261,6 +261,12 @@ class TestBuildProvenanceRules:
         assert rules["voice_eligible"] is False
         assert "reference" in rules["presentation_guidance"]
 
+    def test_reference_rules(self) -> None:
+        rules = _build_provenance_rules("reference")
+        assert rules["voice_eligible"] is False
+        assert "standalone" in rules["presentation_guidance"]
+        assert "subject author" not in rules["attribution"]
+
     def test_personal_rules(self) -> None:
         rules = _build_provenance_rules("personal")
         assert rules["voice_eligible"] is False

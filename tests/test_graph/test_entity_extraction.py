@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from author_library.chunking.models import Chunk, ChunkGranularity
-from author_library.config import LLMSettings
+from author_library.config import APIKeySettings, LLMSettings
 from author_library.graph.entity_extraction import (
     ChunkExtraction,
     EntityExtractor,
@@ -20,7 +20,6 @@ from author_library.graph.entity_extraction import (
 from .conftest import requires_anthropic, requires_neo4j
 
 if TYPE_CHECKING:
-    from author_library.config import APIKeySettings
     from author_library.storage.neo4j import Neo4jConnection
 
 
@@ -202,6 +201,59 @@ class TestEntityExtractionModels:
         assert result.nodes_created == 5
         assert result.edges_created == 3
         assert len(result.errors) == 1
+
+
+@requires_neo4j
+class TestReferenceEntityPersistence:
+    async def test_reference_creates_theme_edge_but_no_argument_node(
+        self,
+        neo4j_conn: Neo4jConnection,
+        llm_settings: LLMSettings,
+    ) -> None:
+        extractor = EntityExtractor(
+            neo4j_conn,
+            APIKeySettings(anthropic_api_key="test-only-not-used"),
+            llm_settings,
+        )
+        chunk = Chunk(
+            id="test--reference-chunk",
+            text="Prosody organizes patterned stresses into metrical feet.",
+            granularity=ChunkGranularity.MESO,
+            work_id="test--reference-work",
+            source_class="reference",
+            position=0,
+        )
+        extraction = ChunkExtraction(
+            chunk_id=chunk.id,
+            themes=[ExtractedEntity("theme", "Test Prosody", "test--prosody")],
+            arguments=[
+                ExtractedEntity(
+                    "argument",
+                    "Test prosody claim",
+                    "test--prosody-claim",
+                    {"evidence_summary": "Test passage"},
+                )
+            ],
+            concepts=[],
+            persons=[],
+        )
+
+        await extractor._persist_extraction(extraction, chunk)
+
+        theme_edges = await neo4j_conn.execute_read(
+            """MATCH (:Chunk {chunk_id: $chunk_id})-[r:EXPLORES_THEME]->
+                     (:Theme {canonical_name: $theme})
+               RETURN count(r) AS count""",
+            {"chunk_id": chunk.id, "theme": "test--prosody"},
+        )
+        arguments = await neo4j_conn.execute_read(
+            """MATCH (a:Argument {canonical_name: $argument})
+               RETURN count(a) AS count""",
+            {"argument": "test--prosody-claim"},
+        )
+
+        assert theme_edges[0]["count"] == 1
+        assert arguments[0]["count"] == 0
 
 
 @requires_neo4j

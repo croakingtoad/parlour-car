@@ -30,6 +30,7 @@ class SourceClass(StrEnum):
     CONTEXTUAL = "contextual"
     TERTIARY = "tertiary"
     PERSONAL = "personal"
+    REFERENCE = "reference"
 
 
 class FormatIngested(StrEnum):
@@ -344,6 +345,29 @@ class TertiaryCatalogEntry(CatalogEntry):
         return self
 
 
+class ReferenceCatalogEntry(CatalogEntry):
+    """Catalog entry for standalone third-party reference works.
+
+    Reference works are ingested for their content without implying any
+    relationship to a subject author. They are never voice-profile eligible.
+    """
+
+    source_class: SourceClass = SourceClass.REFERENCE
+    external_author: NonEmptyStr
+    reference_type: NonEmptyStr
+    subject_domain: NonEmptyStr
+
+    @model_validator(mode="after")
+    def enforce_source_class(self) -> ReferenceCatalogEntry:
+        if self.source_class != SourceClass.REFERENCE:
+            msg = (
+                f"ReferenceCatalogEntry must have source_class='reference', "
+                f"got {self.source_class!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class PersonalCatalogEntry(CatalogEntry):
     """Catalog entry for personal sources (user reflections/notes).
 
@@ -414,6 +438,7 @@ class ProcessingRoute(StrEnum):
     EMBEDDINGS_AND_LINKS = "embeddings_and_links"
     METADATA_ONLY = "metadata_only"
     PERSONAL_ENRICHMENT = "personal_enrichment"
+    REFERENCE_ENRICHMENT = "reference_enrichment"
 
 
 def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
@@ -424,6 +449,7 @@ def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
     - Contextual → embeddings + cross-resource link targets
     - Tertiary → metadata only, no content ingestion
     - Personal → embeddings + USER_REFLECTS_ON graph edges, NO voice profile
+    - Reference → entities + passage links + connection surfacing, NO voice profile
     """
     return {
         SourceClass.PRIMARY: ProcessingRoute.FULL_ENRICHMENT,
@@ -431,4 +457,5 @@ def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
         SourceClass.CONTEXTUAL: ProcessingRoute.EMBEDDINGS_AND_LINKS,
         SourceClass.TERTIARY: ProcessingRoute.METADATA_ONLY,
         SourceClass.PERSONAL: ProcessingRoute.PERSONAL_ENRICHMENT,
+        SourceClass.REFERENCE: ProcessingRoute.REFERENCE_ENRICHMENT,
     }[source_class]

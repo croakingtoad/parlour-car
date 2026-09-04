@@ -61,6 +61,7 @@ async def handle_stats(request: Request) -> JSONResponse:
             "contextual": library.get("contextual_works", 0),
             "tertiary":   library.get("tertiary_works", 0),
             "personal":   library.get("personal_works", 0),
+            "reference":  library.get("reference_works", 0),
         }
         return JSONResponse({"library": library, "works": works, "graph": graph})
     except Exception as exc:

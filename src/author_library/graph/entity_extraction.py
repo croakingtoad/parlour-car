@@ -669,7 +669,7 @@ class EntityExtractor:
 
         # Arguments — only create nodes when an edge will also be created.
         # PRIMARY → MAKES_ARGUMENT, SECONDARY → ATTRIBUTED_BY_CRITIC.
-        # CONTEXTUAL/TERTIARY get no argument edges, so skip node creation too.
+        # CONTEXTUAL/TERTIARY/REFERENCE get no argument edges, so skip node creation too.
         if source_class in (SourceClass.PRIMARY, SourceClass.SECONDARY):
             for argument in extraction.arguments:
                 await self._neo4j.execute_write(

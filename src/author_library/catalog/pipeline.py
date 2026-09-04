@@ -24,6 +24,7 @@ from author_library.catalog.models import (
     PersonalCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     SecondaryCatalogEntry,
     SourceClass,
     TertiaryCatalogEntry,
@@ -122,12 +123,32 @@ class ClassificationPipeline:
         """
         overrides = user_overrides or {}
 
-        # Step 1: Run the classification engine
-        classification = await self._classifier.classify(
-            document,
-            subject_author=self._subject_author,
-            metadata_hints=metadata_hints,
-        )
+        # A caller may provide a corrected document author without duplicating it
+        # as external_author. Capture that explicit attribution before the generic
+        # subject-author fallback below can populate ``author``.
+        if (
+            overrides.get("source_class") == SourceClass.REFERENCE.value
+            and "external_author" not in overrides
+            and "author" in overrides
+        ):
+            overrides = {**overrides, "external_author": overrides["author"]}
+
+        # Step 1: Run the classification engine. Reference is a new user-confirmed
+        # class whose filing author may match the document author; honoring that
+        # confirmation prevents it from being reinterpreted as primary.
+        if overrides.get("source_class") == SourceClass.REFERENCE.value:
+            classification = ClassificationResult(
+                source_class=SourceClass.REFERENCE,
+                confidence=1.0,
+                reasoning="User-confirmed standalone reference work.",
+                signals_detected=["user_confirmed_reference"],
+            )
+        else:
+            classification = await self._classifier.classify(
+                document,
+                subject_author=self._subject_author,
+                metadata_hints=metadata_hints,
+            )
 
         log.info(
             "pipeline_classification_complete",
@@ -262,6 +283,22 @@ class ClassificationPipeline:
                     reference_type=overrides.get("reference_type", "bibliography"),
                     coverage_note=overrides.get("coverage_note"),
                 )
+            elif source_class == SourceClass.REFERENCE:
+                return ReferenceCatalogEntry(
+                    **core,
+                    external_author=self._required_reference_metadata(
+                        "external_author",
+                        overrides.get("external_author", document.metadata.author),
+                    ),
+                    reference_type=self._required_reference_metadata(
+                        "reference_type",
+                        overrides.get("reference_type"),
+                    ),
+                    subject_domain=self._required_reference_metadata(
+                        "subject_domain",
+                        overrides.get("subject_domain"),
+                    ),
+                )
             else:
                 # Personal
                 return PersonalCatalogEntry(
@@ -277,6 +314,15 @@ class ClassificationPipeline:
                 },
                 cause=exc,
             ) from exc
+
+    @staticmethod
+    def _required_reference_metadata(field: str, value: Any) -> str:
+        """Return required reference metadata or fail before catalog persistence."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f'source_class="reference" requires metadata field "{field}"'
+            )
+        return value
 
     def _extract_core_fields(
         self,

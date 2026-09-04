@@ -26,6 +26,8 @@ MIGRATIONS_DIR = Path(__file__).parent
 # is updated in-place so the renamed file is not re-applied.
 _RENAMES: dict[str, str] = {
     "004_transcript_cache.sql": "009_transcript_cache.sql",
+    "014_nullable_publication_metadata.sql": "015_nullable_publication_metadata.sql",
+    "015_deferrable_work_id_foreign_keys.sql": "016_deferrable_work_id_foreign_keys.sql",
 }
 
 
@@ -37,7 +39,9 @@ async def _apply_renames(pool: PostgresPool) -> None:
     2. Both names present     -> DELETE old row (new row is canonical).
     3. Only new name / neither -> no-op.
     """
-    for old_name, new_name in _RENAMES.items():
+    # Process in reverse so a migration that takes another migration's old
+    # number does not collide with its still-unrenamed tracking row.
+    for old_name, new_name in reversed(tuple(_RENAMES.items())):
         # If both rows exist, just drop the stale old-name row.
         await pool.execute(
             "DELETE FROM _migrations WHERE filename = $1 "

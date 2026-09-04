@@ -15,12 +15,14 @@ if TYPE_CHECKING:
 
 async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     """Running migrations ensures all migration files are tracked."""
-    applied = await run_migrations(pg_pool)
-    # May be 0 (all applied) up to 15 (first run). Test DB state varies.
-    assert len(applied) <= 15
-    # Verify all 15 are recorded in the _migrations table
+    await run_migrations(pg_pool)
+    # Verify all discovered migrations are recorded in the _migrations table
     rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
     filenames = [r["filename"] for r in rows]
+    discovered = {migration.name for migration in _discover_migrations()}
+    assert discovered.issubset(filenames), (
+        f"Not recorded: {discovered - set(filenames)}"
+    )
     assert "001_initial.sql" in filenames
     assert "002_indexes.sql" in filenames
     assert "003_fulltext.sql" in filenames
@@ -34,8 +36,9 @@ async def test_migrations_apply(pg_pool: PostgresPool) -> None:
     assert "011_backfill_section_type.sql" in filenames
     assert "012_delete_noise_chunks.sql" in filenames
     assert "013_ingestion_lessons.sql" in filenames
-    assert "014_nullable_publication_metadata.sql" in filenames
-    assert "015_deferrable_work_id_foreign_keys.sql" in filenames
+    assert "014_reference_source_class.sql" in filenames
+    assert "015_nullable_publication_metadata.sql" in filenames
+    assert "016_deferrable_work_id_foreign_keys.sql" in filenames
 
 
 async def test_publication_metadata_is_nullable(pg_pool: PostgresPool) -> None:
@@ -53,7 +56,7 @@ async def test_publication_metadata_is_nullable(pg_pool: PostgresPool) -> None:
 
 async def test_migrations_idempotent(pg_pool: PostgresPool) -> None:
     """Running migrations twice does not re-apply."""
-    # First run may apply 0 or 9 depending on test ordering
+    # First-run results depend on test ordering.
     await run_migrations(pg_pool)
     # Second run should always apply 0 — the idempotency guarantee
     second = await run_migrations(pg_pool)
@@ -127,3 +130,39 @@ async def test_rename_from_004_is_not_reapplied(pg_pool: PostgresPool) -> None:
     filenames = [r["filename"] for r in rows]
     assert "009_transcript_cache.sql" in filenames
     assert "004_transcript_cache.sql" not in filenames
+
+
+async def test_renames_from_014_and_015_are_not_reapplied(
+    pg_pool: PostgresPool,
+) -> None:
+    """Renumbered migrations are tracked without replaying their SQL."""
+    await run_migrations(pg_pool)
+
+    # Simulate the pre-main database, where the two branch migrations were
+    # applied as 014 and 015 before main introduced its own 014.
+    for filename in (
+        "014_nullable_publication_metadata.sql",
+        "015_nullable_publication_metadata.sql",
+        "015_deferrable_work_id_foreign_keys.sql",
+        "016_deferrable_work_id_foreign_keys.sql",
+    ):
+        await pg_pool.execute("DELETE FROM _migrations WHERE filename = $1", filename)
+    await pg_pool.execute(
+        "INSERT INTO _migrations (filename) VALUES ($1)",
+        "014_nullable_publication_metadata.sql",
+    )
+    await pg_pool.execute(
+        "INSERT INTO _migrations (filename) VALUES ($1)",
+        "015_deferrable_work_id_foreign_keys.sql",
+    )
+
+    newly_applied = await run_migrations(pg_pool)
+    assert "015_nullable_publication_metadata.sql" not in newly_applied
+    assert "016_deferrable_work_id_foreign_keys.sql" not in newly_applied
+
+    rows = await pg_pool.fetch_all("SELECT filename FROM _migrations ORDER BY id")
+    filenames = [row["filename"] for row in rows]
+    assert "015_nullable_publication_metadata.sql" in filenames
+    assert "016_deferrable_work_id_foreign_keys.sql" in filenames
+    assert "014_nullable_publication_metadata.sql" not in filenames
+    assert "015_deferrable_work_id_foreign_keys.sql" not in filenames

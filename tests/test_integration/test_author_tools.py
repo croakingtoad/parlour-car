@@ -353,3 +353,24 @@ class TestLibraryStats:
 
         assert result["works"]["total_works"] == 0
         assert result["chunks"]["total_chunks"] == 0
+
+    async def test_reference_work_is_counted_per_source_class(
+        self, clean_storage: SM
+    ) -> None:
+        await clean_storage.works.create(_make_work(
+            "test--prosody-reference",
+            title="Prosody Reference",
+            author="Test Reference Author",
+            source_class="reference",
+            source_metadata={
+                "external_author": "Test Reference Author",
+                "reference_type": "craft-handbook",
+                "subject_domain": "prosody",
+            },
+        ))
+
+        stats = json.loads(await handle_library_stats({}, storage=clean_storage))
+        authors = json.loads(await handle_list_authors({}, storage=clean_storage))
+
+        assert stats["works"]["reference_works"] == 1
+        assert authors["authors"][0]["reference_works"] == 1

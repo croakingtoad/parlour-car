@@ -21,6 +21,7 @@ from author_library.catalog.models import (
     OcrQuality,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     ReferenceType,
     SecondaryCatalogEntry,
     SecondaryRelationship,
@@ -336,6 +337,40 @@ class TestTertiaryCatalogEntry:
 
 
 # ---------------------------------------------------------------------------
+# ReferenceCatalogEntry tests
+# ---------------------------------------------------------------------------
+
+
+class TestReferenceCatalogEntry:
+    def _reference_fields(self, **overrides: object) -> dict:
+        fields = _core_fields(
+            source_class=SourceClass.REFERENCE,
+            work_id="paul-fussell--poetic-meter-and-poetic-form",
+            author="Paul Fussell",
+            external_author="Paul Fussell",
+            reference_type="prosody-handbook",
+            subject_domain="prosody",
+        )
+        fields.update(overrides)
+        return fields
+
+    def test_valid_reference_has_no_voice_profile_eligibility_field(self) -> None:
+        entry = ReferenceCatalogEntry(**self._reference_fields())
+
+        assert entry.source_class == SourceClass.REFERENCE
+        assert entry.external_author == "Paul Fussell"
+        assert entry.reference_type == "prosody-handbook"
+        assert entry.subject_domain == "prosody"
+        assert "voice_profile_eligible" not in entry.model_dump()
+
+    def test_wrong_source_class_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="source_class='reference'"):
+            ReferenceCatalogEntry(
+                **self._reference_fields(source_class=SourceClass.PRIMARY)
+            )
+
+
+# ---------------------------------------------------------------------------
 # ClassificationResult tests
 # ---------------------------------------------------------------------------
 
@@ -376,6 +411,15 @@ class TestClassificationResult:
             reasoning="Might be contextual.",
         )
         assert result.source_class == SourceClass.SECONDARY
+
+    def test_reference_downgraded_below_threshold(self) -> None:
+        result = ClassificationResult(
+            source_class=SourceClass.REFERENCE,
+            confidence=0.65,
+            reasoning="Might be a standalone reference work.",
+        )
+        assert result.source_class == SourceClass.SECONDARY
+        assert "AUTO-DOWNGRADED TO SECONDARY" in result.reasoning
 
     def test_at_threshold_not_downgraded(self) -> None:
         result = ClassificationResult(
@@ -419,3 +463,9 @@ class TestProcessingRoute:
 
     def test_tertiary_metadata_only(self) -> None:
         assert route_for_source_class(SourceClass.TERTIARY) == ProcessingRoute.METADATA_ONLY
+
+    def test_reference_enrichment(self) -> None:
+        assert (
+            route_for_source_class(SourceClass.REFERENCE)
+            == ProcessingRoute.REFERENCE_ENRICHMENT
+        )

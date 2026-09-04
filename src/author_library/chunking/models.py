@@ -42,7 +42,7 @@ class Chunk(BaseModel):
     annotation: str | None = None
     granularity: ChunkGranularity
     work_id: str
-    source_class: str  # primary, secondary, contextual, tertiary, personal
+    source_class: str  # primary, secondary, contextual, tertiary, personal, reference
     chapter: str | None = None
     section: str | None = None
     position: int  # ordering within the work at this granularity

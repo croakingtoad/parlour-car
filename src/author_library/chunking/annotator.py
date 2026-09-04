@@ -4,10 +4,11 @@ Implements chunking-guide Section 9: prepends source-class-aware annotations
 to each chunk BEFORE embedding.  Uses the Anthropic API for LLM-generated
 fields (topic summary, positioning).
 
-Three templates:
+Four templates:
 - PRIMARY: author's own work
 - SECONDARY: work by others about the author
 - CONTEXTUAL: works the author engages with
+- REFERENCE: standalone third-party work with no author relationship
 """
 
 from __future__ import annotations
@@ -87,10 +88,11 @@ class ChunkAnnotator:
         primary_chunks = [c for c in chunks if c.source_class in ("primary",)]
         secondary_chunks = [c for c in chunks if c.source_class in ("secondary",)]
         contextual_chunks = [c for c in chunks if c.source_class in ("contextual",)]
+        reference_chunks = [c for c in chunks if c.source_class in ("reference",)]
         other_chunks = [
             c
             for c in chunks
-            if c.source_class not in ("primary", "secondary", "contextual")
+            if c.source_class not in ("primary", "secondary", "contextual", "reference")
         ]
 
         # Generate LLM-enriched annotations in batches
@@ -117,6 +119,12 @@ class ChunkAnnotator:
             tasks.append(
                 asyncio.create_task(
                     self._annotate_batch(contextual_chunks, context, "contextual", use_llm)
+                )
+            )
+        if reference_chunks:
+            tasks.append(
+                asyncio.create_task(
+                    self._annotate_batch(reference_chunks, context, "reference", use_llm)
                 )
             )
         if other_chunks:
@@ -329,6 +337,8 @@ def _format_annotation(
         return _secondary_annotation(chunk, context, llm_data)
     elif source_class == "contextual":
         return _contextual_annotation(chunk, context, llm_data)
+    elif source_class == "reference":
+        return _reference_annotation(chunk, context, llm_data)
     else:
         # Tertiary or unknown — use secondary template
         return _secondary_annotation(chunk, context, llm_data)
@@ -421,6 +431,27 @@ def _contextual_annotation(
     return "\n".join(lines)
 
 
+def _reference_annotation(
+    chunk: Chunk,
+    ctx: AnnotationContext,
+    llm: dict[str, str],
+) -> str:
+    """Format a neutral REFERENCE annotation without an author relationship claim."""
+    topic = llm.get("topic", f"{chunk.granularity.value} chunk")
+
+    lines = [
+        f"[REFERENCE: Standalone work by {ctx.author}]",
+        f'From "{ctx.work_title}" ({ctx.publication_year}).',
+    ]
+    if ctx.chapter_number and ctx.chapter_title:
+        lines.append(f'Chapter {ctx.chapter_number}: "{ctx.chapter_title}".')
+    elif chunk.chapter:
+        lines.append(f'Chapter: "{chunk.chapter}".')
+    lines.append(f"Topic: {topic}.")
+
+    return "\n".join(lines)
+
+
 _SOURCE_CLASS_PROMPTS: dict[str, str] = {
     "primary": (
         "These chunks are from a PRIMARY source \u2014 the subject author's own words. "
@@ -434,6 +465,11 @@ _SOURCE_CLASS_PROMPTS: dict[str, str] = {
         "These chunks are from a CONTEXTUAL source \u2014 a work the subject author "
         "engages with. Focus on what concepts or arguments the subject author "
         "draws from this work."
+    ),
+    "reference": (
+        "These chunks are from a REFERENCE source — a standalone third-party work "
+        "with no relationship to the subject author. Analyze its concepts and themes "
+        "without attributing its voice or claims to the subject author."
     ),
 }
 
