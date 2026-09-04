@@ -1,14 +1,16 @@
 """Vocabulary management for The Author Library.
 
 Manages canonical vocabulary terms used for thematic tagging.
-Terms have a lifecycle: proposed → canonical → deprecated.
-Supports merging synonymous terms with chunk retagging.
+Terms have a lifecycle: proposed → canonical → deprecated. Merging a
+synonymous term persists an alias and reports matching thematic entries; it
+does not retag those entries automatically.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
 import structlog
 
 if TYPE_CHECKING:
@@ -256,7 +258,7 @@ class VocabularyManager:
             )
             if row:
                 return int(row["cnt"])
-        except Exception:
-            # Table may not exist yet, that's fine
+        except asyncpg.UndefinedTableError:
+            # The optional thematic-entry table may not have been created yet.
             pass
         return 0

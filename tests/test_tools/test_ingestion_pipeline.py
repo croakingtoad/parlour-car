@@ -6,6 +6,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from author_library.tools.ingestion_pipeline import IngestionPipeline, IngestionResult
 
@@ -644,22 +645,19 @@ class TestRouteStructuralSections:
         mock_a.assert_not_called()
 
     async def test_already_known_term_counted_correctly(self) -> None:
-        """Terms already in vocabulary are counted as already_known, not proposed."""
+        """Index routing emits a curation warning without proposing terms."""
         pipeline, mock_storage = self._pipeline_with_mocks()
 
         index_chunk = _make_chunk("index", text="grace\nforgiveness")
         structural = {"index": [index_chunk]}
 
-        with patch(
-            "author_library.vocabulary.VocabularyManager"
-        ) as mock_vocab_cls:
-            mock_vocab = AsyncMock()
-            # grace already exists, forgiveness is new
-            mock_vocab.propose.side_effect = [
-                {"term": "grace", "already_exists": True},
-                {"term": "forgiveness", "already_exists": False},
-            ]
-            mock_vocab_cls.return_value = mock_vocab
-
-            # Should not raise — completes without error
+        with capture_logs() as logs:
             await pipeline._route_structural_sections(structural, "guite--test")
+
+        assert any(
+            entry["event"] == "ingestion_index_vocab_routing_disabled"
+            and entry["work_id"] == "guite--test"
+            and entry["index_chunks"] == 1
+            and entry["raw_index_lines"] == 2
+            for entry in logs
+        )

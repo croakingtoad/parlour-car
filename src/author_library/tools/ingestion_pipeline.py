@@ -397,8 +397,9 @@ class IngestionPipeline:
                 gran = str(chunk.granularity)
                 chunks_by_gran[gran] = chunks_by_gran.get(gran, 0) + 1
 
-        # Route structural sections: index → vocabulary proposals,
-        # bibliography → acquisition candidates.
+        # Route structural sections: index vocabulary routing is deliberately
+        # disabled because raw index entries need curation; bibliography →
+        # acquisition candidates.
         if structural_chunks:
             await self._route_structural_sections(structural_chunks, work_id)
 
