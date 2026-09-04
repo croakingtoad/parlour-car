@@ -34,6 +34,8 @@ async def search_fulltext(
     *,
     source_class_filter: str | None = None,
     work_filter: str | None = None,
+    subject_headings_filter: list[str] | None = None,
+    genre_tags_filter: list[str] | None = None,
     limit: int = 20,
 ) -> list[SearchResult]:
     """Run a full-text search over chunks using websearch_to_tsquery.
@@ -43,6 +45,8 @@ async def search_fulltext(
         query: Natural-language search query.
         source_class_filter: Optional filter on source_class.
         work_filter: Optional filter on work_id.
+        subject_headings_filter: Match works with any requested subject heading.
+        genre_tags_filter: Match works with any requested genre tag.
         limit: Maximum number of results.
 
     Returns:
@@ -62,6 +66,16 @@ async def search_fulltext(
         params.append(work_filter)
         idx += 1
 
+    if subject_headings_filter:
+        conditions.append(f"w.subject_headings && ${idx}::text[]")
+        params.append(subject_headings_filter)
+        idx += 1
+
+    if genre_tags_filter:
+        conditions.append(f"w.genre_tags && ${idx}::text[]")
+        params.append(genre_tags_filter)
+        idx += 1
+
     where_clause = " AND ".join(conditions)
     params.append(limit)
 
@@ -77,6 +91,9 @@ async def search_fulltext(
             c.pass_number,
             c.metadata->>'speaker' AS speaker
         FROM chunks c
+        -- Work metadata is editable; keep one source of truth instead of
+        -- denormalizing it onto every chunk.
+        JOIN works w ON w.work_id = c.work_id
         WHERE {where_clause}
         ORDER BY rank DESC
         LIMIT ${idx}

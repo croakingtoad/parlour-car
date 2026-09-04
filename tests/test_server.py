@@ -205,6 +205,18 @@ class TestToolDefinitions:
         assert "source_class" in filters["properties"]
         assert "work_ids" in filters["properties"]
         assert "granularity" in filters["properties"]
+        assert "subject_headings" in filters["properties"]
+        assert "genre_tags" in filters["properties"]
+        assert "OR" in filters["properties"]["subject_headings"]["description"]
+        assert "AND" in filters["description"]
+
+    def test_list_works_filters_schema(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "list_works")
+        properties = tool.inputSchema["properties"]
+        assert "personal" in properties["source_class"]["enum"]
+        assert "subject_headings" in properties
+        assert "OR" in properties["subject_headings"]["description"]
+        assert "AND" in tool.description
 
     def test_get_passage_links_required_fields(self) -> None:
         tool = next(t for t in TOOLS if t.name == "get_passage_links")
