@@ -573,8 +573,8 @@ class TestRouteStructuralSections:
         )
         return pipeline, mock_storage
 
-    async def test_index_routes_to_vocabulary(self) -> None:
-        """Index chunks have their lines proposed as vocabulary terms."""
+    async def test_index_chunks_do_not_auto_propose_vocabulary(self) -> None:
+        """Raw index entries must not refill controlled vocabulary."""
         pipeline, mock_storage = self._pipeline_with_mocks()
 
         index_chunk = _make_chunk("index", text="grace\nforgiveness\nlove")
@@ -589,8 +589,7 @@ class TestRouteStructuralSections:
 
             await pipeline._route_structural_sections(structural, "guite--test")
 
-        # Should have called propose for each non-trivial line
-        assert mock_vocab.propose.call_count == 3
+        mock_vocab_cls.assert_not_called()
 
     async def test_bibliography_routes_to_acquisition(self) -> None:
         """Bibliography chunks have their lines flagged as acquisition candidates."""
@@ -613,8 +612,8 @@ class TestRouteStructuralSections:
 
         assert mock_acq.flag.call_count == 2
 
-    async def test_index_skips_blank_lines_and_page_numbers(self) -> None:
-        """Blank lines and pure page numbers are filtered out."""
+    async def test_index_locators_do_not_reach_vocabulary(self) -> None:
+        """Index locators and cross-references stay out of vocabulary."""
         pipeline, mock_storage = self._pipeline_with_mocks()
 
         index_chunk = _make_chunk("index", text="\ngrace\n123, 456\n  \nforgiveness")
@@ -629,8 +628,7 @@ class TestRouteStructuralSections:
 
             await pipeline._route_structural_sections(structural, "guite--test")
 
-        # Only "grace" and "forgiveness" pass — blank lines and page numbers filtered
-        assert mock_vocab.propose.call_count == 2
+        mock_vocab_cls.assert_not_called()
 
     async def test_empty_structural_dict_is_noop(self) -> None:
         """Empty structural_chunks dict calls neither manager."""

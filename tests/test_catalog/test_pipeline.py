@@ -538,6 +538,40 @@ class TestPipelineProcess:
             )
 
 
+class TestSubjectHeadingVocabularyWarning:
+    async def test_warns_only_when_vocabulary_table_exists(self) -> None:
+        pg_pool = AsyncMock()
+        pg_pool.fetch_val.return_value = True
+        pg_pool.fetch_all.return_value = [{"term": "prosody"}]
+        pipeline = ClassificationPipeline(
+            settings=Settings(),
+            work_repository=FakeWorkRepository(),  # type: ignore[arg-type]
+            subject_author="Malcolm Guite",
+            pg_pool=pg_pool,
+        )
+
+        await pipeline._warn_for_uncontrolled_subject_headings(
+            ["Prosody", "Poetic Form"]
+        )
+
+        pg_pool.fetch_val.assert_awaited_once()
+        pg_pool.fetch_all.assert_awaited_once()
+
+    async def test_skips_lookup_when_vocabulary_table_is_absent(self) -> None:
+        pg_pool = AsyncMock()
+        pg_pool.fetch_val.return_value = False
+        pipeline = ClassificationPipeline(
+            settings=Settings(),
+            work_repository=FakeWorkRepository(),  # type: ignore[arg-type]
+            subject_author="Malcolm Guite",
+            pg_pool=pg_pool,
+        )
+
+        await pipeline._warn_for_uncontrolled_subject_headings(["Prosody"])
+
+        pg_pool.fetch_all.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # Pipeline result tests
 # ---------------------------------------------------------------------------

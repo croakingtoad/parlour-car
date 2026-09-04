@@ -1370,8 +1370,8 @@ class IngestionPipeline:
 
         Section types that get FULL pipeline processing:
         - chapter, back_matter: full pipeline
-        Section types that are EXCLUDED from main pipeline but routed elsewhere:
-        - index: route to vocabulary proposals (propose terms via VocabularyManager)
+        Section types that are EXCLUDED from main pipeline but handled separately:
+        - index: retained for an explicit warning; raw entries are never proposed
         - bibliography: route to acquisition candidates (flag via AcquisitionManager)
         - toc: structural metadata only (no additional routing)
         - front_matter: structural metadata only (no additional routing)
@@ -1379,8 +1379,8 @@ class IngestionPipeline:
 
         Returns:
             Tuple of (content_chunks, skipped_counts_by_type, structural_chunks_by_type).
-            structural_chunks_by_type only contains section types with routing logic
-            (currently: index, bibliography).
+            structural_chunks_by_type only contains section types with separate
+            handling (currently: index, bibliography).
         """
         # Section types that receive full pipeline processing
         _CONTENT_SECTION_TYPES = {
@@ -1389,7 +1389,7 @@ class IngestionPipeline:
             SectionType.BACK_MATTER.value,
         }
 
-        # Section types that have downstream routing (index → vocab, bibliography → acquisition)
+        # Structural sections requiring handling outside the main content flow.
         _ROUTABLE_SECTION_TYPES = {
             SectionType.INDEX.value,
             SectionType.BIBLIOGRAPHY.value,
@@ -1428,8 +1428,9 @@ class IngestionPipeline:
     ) -> None:
         """Route structural section chunks to appropriate downstream managers.
 
-        - Index sections → VocabularyManager.propose() for each term extracted
-          from chunk text (one term per line, stripped).
+        - Index sections are not auto-proposed. Raw index entries contain page
+          locators and cross-references, so they require curation before they
+          can enter the controlled vocabulary.
         - Bibliography sections → AcquisitionManager.flag() for each entry
           extracted from chunk text (one citation per line, stripped).
 
@@ -1438,57 +1439,22 @@ class IngestionPipeline:
         can complete successfully.
         """
         from author_library.catalog.acquisition import AcquisitionManager
-        from author_library.vocabulary import VocabularyManager
-
         index_chunks = structural_chunks.get(SectionType.INDEX.value, [])
         bibliography_chunks = structural_chunks.get(SectionType.BIBLIOGRAPHY.value, [])
 
         if index_chunks:
-            vocab = VocabularyManager(self._storage.pg)
-            proposed = 0
-            already_known = 0
-            vocab_errors = 0
-            for chunk in index_chunks:
-                for line in chunk.text.splitlines():
-                    term = line.strip()
-                    # Skip blank lines, section headings (all-caps short), page refs
-                    if not term or len(term) < 3 or len(term) > 120:
-                        continue
-                    # Skip pure numeric strings (page numbers)
-                    if term.replace(",", "").replace(" ", "").isdigit():
-                        continue
-                    try:
-                        record = await vocab.propose(
-                            term,
-                            note=f"Auto-proposed from index section of {work_id}",
-                        )
-                        if record.get("already_exists"):
-                            already_known += 1
-                        else:
-                            proposed += 1
-                    except Exception as exc:
-                        vocab_errors += 1
-                        if vocab_errors <= 3:
-                            log.error(
-                                "vocab_propose_failed",
-                                work_id=work_id,
-                                term=term,
-                                error=str(exc),
-                            )
-                        elif vocab_errors == 4:
-                            log.error(
-                                "vocab_propose_failed_suppressed",
-                                work_id=work_id,
-                                message="Further vocab propose errors will be suppressed",
-                            )
-
-            log.info(
-                "ingestion_index_vocab_routing",
+            raw_lines = sum(
+                1 for chunk in index_chunks for line in chunk.text.splitlines() if line.strip()
+            )
+            log.warning(
+                "ingestion_index_vocab_routing_disabled",
                 work_id=work_id,
                 index_chunks=len(index_chunks),
-                terms_proposed=proposed,
-                terms_already_known=already_known,
-                errors=vocab_errors,
+                raw_index_lines=raw_lines,
+                message=(
+                    "Raw index entries are not controlled-vocabulary candidates; "
+                    "curate terms with manage_vocabulary instead."
+                ),
             )
 
         if bibliography_chunks:
