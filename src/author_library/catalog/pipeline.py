@@ -179,6 +179,7 @@ class ClassificationPipeline:
             classification=classification,
             overrides=overrides,
         )
+        await self._warn_for_uncontrolled_subject_headings(catalog_entry.subject_headings)
 
         # Step 3: Store in the works table (upsert for idempotent re-ingestion)
         try:
@@ -217,6 +218,49 @@ class ClassificationPipeline:
             classification=classification,
             processing_route=route,
         )
+
+    async def _warn_for_uncontrolled_subject_headings(
+        self, subject_headings: list[str]
+    ) -> None:
+        """Log, but do not reject, headings absent from canonical vocabulary.
+
+        Cataloging must continue to accept legitimate new subjects. The warning
+        gives curators a review signal without creating proposals or imposing a
+        hard vocabulary constraint on ingestion.
+        """
+        if self._pg_pool is None:
+            return
+
+        normalized = {heading.strip().casefold() for heading in subject_headings if heading.strip()}
+        if not normalized:
+            return
+
+        try:
+            table_exists = await self._pg_pool.fetch_val(
+                "SELECT to_regclass('public.vocabulary_terms') IS NOT NULL"
+            )
+            if not table_exists:
+                return
+
+            rows = await self._pg_pool.fetch_all(
+                """
+                SELECT term
+                FROM vocabulary_terms
+                WHERE status = 'canonical' AND lower(term) = ANY($1::text[])
+                """,
+                list(normalized),
+            )
+            canonical = {str(row["term"]).casefold() for row in rows}
+            unknown = sorted(normalized - canonical)
+            if unknown:
+                log.warning(
+                    "catalog_subject_headings_not_canonical",
+                    subject_headings=unknown,
+                    message="Cataloging continues; review these headings in controlled vocabulary.",
+                )
+        except Exception as exc:
+            # Vocabulary review must never make catalog ingestion unavailable.
+            log.warning("catalog_subject_heading_validation_unavailable", error=str(exc))
 
     def _build_catalog_entry(
         self,

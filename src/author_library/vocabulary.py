@@ -1,14 +1,16 @@
 """Vocabulary management for The Author Library.
 
 Manages canonical vocabulary terms used for thematic tagging.
-Terms have a lifecycle: proposed → canonical → deprecated.
-Supports merging synonymous terms with chunk retagging.
+Terms have a lifecycle: proposed → canonical → deprecated. Merging a
+synonymous term persists an alias and reports matching thematic entries; it
+does not retag those entries automatically.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
 import structlog
 
 if TYPE_CHECKING:
@@ -20,11 +22,13 @@ _CREATE_TABLE_SQL = """\
 CREATE TABLE IF NOT EXISTS vocabulary_terms (
     id          SERIAL PRIMARY KEY,
     term        TEXT NOT NULL UNIQUE,
-    status      TEXT NOT NULL DEFAULT 'proposed',
+    status      TEXT NOT NULL DEFAULT 'proposed'
+                CHECK (status IN ('proposed', 'canonical', 'deprecated', 'merged')),
     merged_into TEXT,
     note        TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK ((status = 'merged') = (merged_into IS NOT NULL))
 );
 """
 
@@ -39,7 +43,8 @@ class VocabularyManager:
     async def _ensure_table(self) -> None:
         if self._table_ensured:
             return
-        await self._pg.execute(_CREATE_TABLE_SQL)
+        async with self._pg.transaction() as conn:
+            await conn.execute(_CREATE_TABLE_SQL)
         self._table_ensured = True
 
     async def list_terms(
@@ -88,30 +93,33 @@ class VocabularyManager:
         """Propose a new vocabulary term. Returns the term record."""
         await self._ensure_table()
 
-        # Check if term already exists
-        existing = await self._pg.fetch_one(
-            "SELECT term, status FROM vocabulary_terms WHERE term = $1",
-            term.lower().strip(),
-        )
-        if existing:
-            return {
-                "term": existing["term"],
-                "status": existing["status"],
-                "already_exists": True,
-            }
-
-        await self._pg.execute(
-            """
-            INSERT INTO vocabulary_terms (term, status, note)
-            VALUES ($1, 'proposed', $2)
-            """,
-            term.lower().strip(),
-            note,
-        )
+        normalized = term.lower().strip()
+        async with self._pg.transaction() as conn:
+            inserted = await conn.fetchrow(
+                """
+                INSERT INTO vocabulary_terms (term, status, note)
+                VALUES ($1, 'proposed', $2)
+                ON CONFLICT (term) DO NOTHING
+                RETURNING term, status
+                """,
+                normalized,
+                note,
+            )
+            if not inserted:
+                existing = await conn.fetchrow(
+                    "SELECT term, status FROM vocabulary_terms WHERE term = $1",
+                    normalized,
+                )
+                if existing:
+                    return {
+                        "term": existing["term"],
+                        "status": existing["status"],
+                        "already_exists": True,
+                    }
 
         log.info("vocabulary_proposed", term=term)
         return {
-            "term": term.lower().strip(),
+            "term": normalized,
             "status": "proposed",
             "already_exists": False,
         }
@@ -123,14 +131,15 @@ class VocabularyManager:
         """
         await self._ensure_table()
 
-        await self._pg.execute(
-            """
-            UPDATE vocabulary_terms
-            SET status = 'canonical', updated_at = NOW()
-            WHERE term = $1
-            """,
-            term.lower().strip(),
-        )
+        async with self._pg.transaction() as conn:
+            await conn.execute(
+                """
+                UPDATE vocabulary_terms
+                SET status = 'canonical', merged_into = NULL, updated_at = NOW()
+                WHERE term = $1
+                """,
+                term.lower().strip(),
+            )
 
         affected = await self._count_chunks_with_theme(term)
         log.info("vocabulary_promoted", term=term, affected_chunks=affected)
@@ -145,8 +154,9 @@ class VocabularyManager:
     ) -> int:
         """Merge source_term into target_term.
 
-        Updates the source term's record and retags chunks in the
-        thematic_entries table.
+        Updates the source term's record. Thematic entries are deliberately
+        not retagged as a side effect; their matching count is reported for
+        an explicit follow-up decision.
 
         Returns the number of affected chunks.
         """
@@ -154,32 +164,45 @@ class VocabularyManager:
 
         source = source_term.lower().strip()
         target = target_term.lower().strip()
+        if source == target:
+            raise ValueError("A vocabulary term cannot be merged into itself")
 
-        # Mark source as merged
-        await self._pg.execute(
-            """
-            UPDATE vocabulary_terms
-            SET status = 'merged', merged_into = $2, note = $3, updated_at = NOW()
-            WHERE term = $1
-            """,
-            source,
-            target,
-            note or f"Merged into '{target}'",
-        )
+        async with self._pg.transaction() as conn:
+            # Ensure target exists as canonical before creating the alias.
+            existing_target = await conn.fetchrow(
+                "SELECT term FROM vocabulary_terms WHERE term = $1", target
+            )
+            if existing_target:
+                await conn.execute(
+                    """
+                    UPDATE vocabulary_terms
+                    SET status = 'canonical', merged_into = NULL, updated_at = NOW()
+                    WHERE term = $1
+                    """,
+                    target,
+                )
+            else:
+                await conn.execute(
+                    """
+                    INSERT INTO vocabulary_terms (term, status, note)
+                    VALUES ($1, 'canonical', $2)
+                    """,
+                    target,
+                    f"Created via merge from '{source}'",
+                )
 
-        # Ensure target exists as canonical
-        existing_target = await self._pg.fetch_one(
-            "SELECT term FROM vocabulary_terms WHERE term = $1",
-            target,
-        )
-        if not existing_target:
-            await self._pg.execute(
+            # Persist a synonym even when it was not previously proposed.
+            await conn.execute(
                 """
-                INSERT INTO vocabulary_terms (term, status, note)
-                VALUES ($1, 'canonical', $2)
+                INSERT INTO vocabulary_terms (term, status, merged_into, note)
+                VALUES ($1, 'merged', $2, $3)
+                ON CONFLICT (term) DO UPDATE
+                SET status = 'merged', merged_into = EXCLUDED.merged_into,
+                    note = EXCLUDED.note, updated_at = NOW()
                 """,
+                source,
                 target,
-                f"Created via merge from '{source}'",
+                note or f"Merged into '{target}'",
             )
 
         # Count affected chunks (chunks that reference the source theme)
@@ -204,15 +227,16 @@ class VocabularyManager:
         """
         await self._ensure_table()
 
-        await self._pg.execute(
-            """
-            UPDATE vocabulary_terms
-            SET status = 'deprecated', note = $2, updated_at = NOW()
-            WHERE term = $1
-            """,
-            term.lower().strip(),
-            note or "Deprecated",
-        )
+        async with self._pg.transaction() as conn:
+            await conn.execute(
+                """
+                UPDATE vocabulary_terms
+                SET status = 'deprecated', merged_into = NULL, note = $2, updated_at = NOW()
+                WHERE term = $1
+                """,
+                term.lower().strip(),
+                note or "Deprecated",
+            )
 
         affected = await self._count_chunks_with_theme(term)
         log.info("vocabulary_deprecated", term=term, affected_chunks=affected)
@@ -234,7 +258,7 @@ class VocabularyManager:
             )
             if row:
                 return int(row["cnt"])
-        except Exception:
-            # Table may not exist yet, that's fine
+        except asyncpg.UndefinedTableError:
+            # The optional thematic-entry table may not have been created yet.
             pass
         return 0
