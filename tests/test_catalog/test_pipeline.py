@@ -573,6 +573,37 @@ class TestPipelineProcess:
         assert stored["title"] == "Faith, Hope and Poetry"
         assert stored["source_class"] == "primary"
 
+    async def test_subject_headings_override_lands_in_repository(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(
+                _make_document(),
+                user_overrides={"subject_headings": ["Christian Poetry"]},
+            )
+
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert result.catalog_entry.subject_headings == ["Christian Poetry"]
+        assert stored["subject_headings"] == ["Christian Poetry"]
+
+    async def test_subject_headings_omitted_uses_explicit_unclassified_sentinel(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(_make_document())
+
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert result.catalog_entry.subject_headings == ["Unclassified"]
+        assert stored["subject_headings"] == ["Unclassified"]
+
     async def test_user_overrides_applied(
         self, settings: Settings, repo: FakeWorkRepository
     ) -> None:
