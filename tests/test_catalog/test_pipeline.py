@@ -17,6 +17,7 @@ from author_library.catalog.models import (
     ContextualCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     SecondaryCatalogEntry,
     SourceClass,
     TertiaryCatalogEntry,
@@ -42,6 +43,8 @@ def _make_document(
     author: str = "Malcolm Guite",
     raw_text: str = "Text about poetic imagination.",
     format: str = "epub",
+    publisher: str | None = "Ashgate",
+    publication_date: str | None = "2012",
 ) -> ParsedDocument:
     return ParsedDocument(
         source_path="/tmp/test.epub",
@@ -49,8 +52,8 @@ def _make_document(
         metadata=DocumentMetadata(
             title=title,
             author=author,
-            publisher="Ashgate",
-            publication_date="2012",
+            publisher=publisher,
+            publication_date=publication_date,
             word_count=85000,
         ),
         tree=DocumentNode(node_type=NodeType.BOOK, text=raw_text),
@@ -129,6 +132,18 @@ class TestWorkIdGeneration:
         pattern = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+)*$")
         assert pattern.match(work_id), f"work_id {work_id!r} does not match pattern"
 
+    @pytest.mark.parametrize(
+        ("author", "title"),
+        [
+            ("", ""),
+            ("Unknown", "A Real Title"),
+            ("A Real Author", "Untitled"),
+        ],
+    )
+    def test_missing_or_sentinel_identity_raises(self, author: str, title: str) -> None:
+        with pytest.raises(ValueError, match="Cannot generate work_id"):
+            ClassificationPipeline._generate_work_id(author, title)
+
     def test_comma_format_author_normalized(self) -> None:
         """'Guite, Malcolm' and 'Malcolm Guite' must produce the same slug."""
         natural = ClassificationPipeline._generate_work_id(
@@ -194,7 +209,10 @@ class TestNormalizeAuthorName:
         assert ClassificationPipeline._normalize_author_name("Guite, Malcolm") == "Malcolm Guite"
 
     def test_whitespace_stripped(self) -> None:
-        assert ClassificationPipeline._normalize_author_name("  Guite , Malcolm  ") == "Malcolm Guite"
+        assert (
+            ClassificationPipeline._normalize_author_name("  Guite , Malcolm  ")
+            == "Malcolm Guite"
+        )
 
     def test_no_comma_no_change(self) -> None:
         assert ClassificationPipeline._normalize_author_name("Malcolm Guite") == "Malcolm Guite"
@@ -218,6 +236,62 @@ class TestNormalizeAuthorName:
         ]:
             assert ClassificationPipeline._normalize_author_name(raw) == expected, raw
 
+    def test_trailing_comma_still_reorders(self) -> None:
+        """A MARC 100 field carries a trailing comma when $d follows.
+
+        Regression: the life-date fix made the empty tail segment fail the
+        all(parts[1:]) check, skipping the reorder entirely and slugifying the
+        raw string — forking a SECOND work_id for an author that already had
+        one, i.e. reintroducing the very bug it fixed.
+        """
+        assert (
+            ClassificationPipeline._normalize_author_name("Coleridge, Samuel Taylor,")
+            == "Samuel Taylor Coleridge"
+        )
+        assert ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor,", "Some Title"
+        ) == ClassificationPipeline._generate_work_id(
+            "Coleridge, Samuel Taylor", "Some Title"
+        )
+
+    def test_other_marc_date_forms_stripped(self) -> None:
+        """Bracketed RDA dates, approximations and centuries also fork."""
+        for raw, expected in [
+            ("Author, Name, [1900-1980]", "Name Author"),
+            ("Author, Name, approximately 1200", "Name Author"),
+            ("Author, Name, 19th cent.", "Name Author"),
+            ("Author, Name, fl. 1550-1600", "Name Author"),
+            ("Author, Name, d. 1674?", "Name Author"),
+        ]:
+            assert ClassificationPipeline._normalize_author_name(raw) == expected, raw
+
+    def test_date_stripped_when_not_the_last_segment(self) -> None:
+        """'Smith, John, 1900-1980, Jr.' — date is interior, suffix is last."""
+        assert (
+            ClassificationPipeline._normalize_author_name("Smith, John, 1900-1980, Jr.")
+            == "John, Jr. Smith"
+        )
+
+    def test_diacritics_folded_not_deleted(self) -> None:
+        """Deleting diacritics forks 'Böll' from the same author as 'Boll'."""
+        assert ClassificationPipeline._generate_work_id(
+            "Böll, Heinrich, 1917-1985", "Some Title"
+        ) == ClassificationPipeline._generate_work_id("Boll, Heinrich", "Some Title")
+        assert ClassificationPipeline._generate_work_id(
+            "Böll, Heinrich", "Some Title"
+        ).startswith("heinrich-boll--")
+
+    def test_non_latin_author_does_not_collapse_to_empty(self) -> None:
+        """A non-Latin author must not yield a malformed '--title' work_id.
+
+        Every such author would otherwise collide into one id per title.
+        """
+        a = ClassificationPipeline._generate_work_id("Достоевский, Фёдор", "Some Title")
+        b = ClassificationPipeline._generate_work_id("村上, 春樹", "Some Title")
+        assert not a.startswith("--"), a
+        assert not b.startswith("--"), b
+        assert a != b, "distinct non-Latin authors must not collide"
+
     def test_surname_with_dates_only(self) -> None:
         """No given name — return the surname, not a date fragment."""
         assert (
@@ -233,10 +307,47 @@ class TestNormalizeAuthorName:
         )
 
     def test_empty_parts_not_swapped(self) -> None:
-        """A trailing comma with no given name should not corrupt the output."""
-        # "Guite," has an empty second part — should not swap
+        """A trailing comma with no given name must not corrupt the output.
+
+        Empty segments are now dropped, so the stray comma is removed rather
+        than echoed: "Guite," normalizes to "Guite". What matters is that it
+        cannot fork a second identity — assert on the work_id, which is the
+        thing a difference here would actually break.
+        """
         result = ClassificationPipeline._normalize_author_name("Guite,")
-        assert result.strip() == "Guite,"
+        assert result == "Guite"
+        assert ClassificationPipeline._generate_work_id(
+            "Guite,", "Mariner"
+        ) == ClassificationPipeline._generate_work_id("Guite", "Mariner")
+
+
+class TestMetadataFallbacks:
+    def test_parseable_year_is_preserved(self) -> None:
+        assert ClassificationPipeline._extract_year("2007-05-01") == 2007
+
+    @pytest.mark.parametrize("publication_date", [None, "", "not-a-date", "????-01-01"])
+    def test_unparseable_year_is_undated(self, publication_date: str | None) -> None:
+        # The old current-year fallback stamped seven works with their ingestion year
+        # and corrupted trace_theme chronology; an unknown year must remain unknown.
+        assert ClassificationPipeline._extract_year(publication_date) is None
+
+    @pytest.mark.parametrize(
+        "publisher",
+        [
+            "Adobe Acrobat 9.0 Paper Capture Plug-in",
+            "Internet Archive PDF 1.4.16; including mupdf and pymupdf/skimage",
+            "Recoded by LuraDocument PDF v2.68",
+        ],
+    )
+    def test_pdf_producer_is_not_a_publisher(self, publisher: str) -> None:
+        assert ClassificationPipeline._clean_publisher(publisher) is None
+
+    @pytest.mark.parametrize("publisher", [None, "", "Unknown", " unknown "])
+    def test_missing_publisher_remains_unknown(self, publisher: str | None) -> None:
+        assert ClassificationPipeline._clean_publisher(publisher) is None
+
+    def test_real_publisher_is_preserved(self) -> None:
+        assert ClassificationPipeline._clean_publisher(" Ashgate ") == "Ashgate"
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +392,38 @@ class TestPipelineProcess:
         assert isinstance(result.catalog_entry, PrimaryCatalogEntry)
         assert result.catalog_entry.source_class == SourceClass.PRIMARY
         assert result.catalog_entry.work_id in repo.works
+
+    async def test_empty_document_identity_cannot_create_work_id(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with (
+            patch.object(pipeline._classifier, "classify", return_value=classification),
+            patch.object(pipeline, "_resolve_author_name", return_value=None),
+            pytest.raises(ValueError, match="Cannot generate work_id"),
+        ):
+            await pipeline.process(_make_document(title="", author=""))
+
+        assert repo.works == {}
+
+    async def test_unknown_publication_metadata_stays_null(
+        self, settings: Settings, repo: FakeWorkRepository
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        classification = _make_classification_result(SourceClass.PRIMARY, 0.95)
+
+        with patch.object(pipeline._classifier, "classify", return_value=classification):
+            result = await pipeline.process(
+                _make_document(
+                    publisher="Adobe Acrobat 9.0 Paper Capture Plug-in",
+                    publication_date="not-a-date",
+                )
+            )
+
+        assert result.catalog_entry.publication_year is None
+        assert result.catalog_entry.publisher is None
 
     async def test_secondary_route(self, settings: Settings, repo: FakeWorkRepository) -> None:
         pipeline = self._make_pipeline(settings, repo)
@@ -345,6 +488,69 @@ class TestPipelineProcess:
 
         assert result.processing_route == ProcessingRoute.METADATA_ONLY
         assert isinstance(result.catalog_entry, TertiaryCatalogEntry)
+
+    async def test_reference_route(self, settings: Settings, repo: FakeWorkRepository) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        result = await pipeline.process(
+            _make_document(
+                author="Paul Fussell",
+                title="Poetic Meter and Poetic Form",
+            ),
+            user_overrides={
+                "source_class": "reference",
+                "external_author": "Paul Fussell",
+                "reference_type": "prosody-handbook",
+                "subject_domain": "prosody",
+                "genre_tags": ["prosody"],
+            },
+        )
+
+        assert result.processing_route == ProcessingRoute.REFERENCE_ENRICHMENT
+        assert isinstance(result.catalog_entry, ReferenceCatalogEntry)
+        stored = await repo.get(result.catalog_entry.work_id)
+        assert stored is not None
+        assert stored["source_class"] == "reference"
+        assert stored["source_metadata"]["external_author"] == "Paul Fussell"
+        assert "voice_profile_eligible" not in stored["source_metadata"]
+
+    @pytest.mark.parametrize(
+        ("missing_field", "document_author"),
+        [
+            ("external_author", ""),
+            ("reference_type", "Paul Fussell"),
+            ("subject_domain", "Paul Fussell"),
+        ],
+    )
+    async def test_reference_route_rejects_missing_required_metadata(
+        self,
+        settings: Settings,
+        repo: FakeWorkRepository,
+        missing_field: str,
+        document_author: str,
+    ) -> None:
+        pipeline = self._make_pipeline(settings, repo)
+        overrides = {
+            "source_class": "reference",
+            "external_author": "Paul Fussell",
+            "reference_type": "prosody-handbook",
+            "subject_domain": "prosody",
+            "genre_tags": ["prosody"],
+        }
+        overrides.pop(missing_field)
+
+        with pytest.raises(
+            ClassificationError,
+            match=rf'source_class="reference" requires metadata field "{missing_field}"',
+        ):
+            await pipeline.process(
+                _make_document(
+                    author=document_author,
+                    title="Poetic Meter and Poetic Form",
+                ),
+                user_overrides=overrides,
+            )
+
+        assert repo.works == {}
 
     async def test_entry_stored_in_repository(
         self, settings: Settings, repo: FakeWorkRepository

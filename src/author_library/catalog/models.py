@@ -22,6 +22,21 @@ WORK_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+
 WORK_ID_MAX_LENGTH = 128
 
 
+def validate_work_id(value: str) -> str:
+    """Validate a catalog work identifier against the production schema rules."""
+    if len(value) > WORK_ID_MAX_LENGTH:
+        msg = f"work_id must be at most {WORK_ID_MAX_LENGTH} characters, got {len(value)}"
+        raise ValueError(msg)
+    if not WORK_ID_PATTERN.match(value):
+        msg = (
+            "work_id must be lowercase alphanumeric with hyphens, "
+            "author-slug and title-slug separated by double-hyphen (--). "
+            f"Got: {value!r}"
+        )
+        raise ValueError(msg)
+    return value
+
+
 class SourceClass(StrEnum):
     """Source classification hierarchy."""
 
@@ -30,6 +45,7 @@ class SourceClass(StrEnum):
     CONTEXTUAL = "contextual"
     TERTIARY = "tertiary"
     PERSONAL = "personal"
+    REFERENCE = "reference"
 
 
 class FormatIngested(StrEnum):
@@ -189,10 +205,10 @@ class CatalogEntry(BaseModel):
     author: NonEmptyStr
     source_class: SourceClass
     source_class_note: ClassificationNote
-    publication_year: int
+    publication_year: int | None
     original_publication_year: int | None = None
     edition: str | None = None
-    publisher: NonEmptyStr
+    publisher: NonEmptyStr | None
     isbn: str | None = None
     format_ingested: FormatIngested
     language: str = "en"
@@ -214,17 +230,7 @@ class CatalogEntry(BaseModel):
     @field_validator("work_id")
     @classmethod
     def validate_work_id(cls, v: str) -> str:
-        if len(v) > WORK_ID_MAX_LENGTH:
-            msg = f"work_id must be at most {WORK_ID_MAX_LENGTH} characters, got {len(v)}"
-            raise ValueError(msg)
-        if not WORK_ID_PATTERN.match(v):
-            msg = (
-                "work_id must be lowercase alphanumeric with hyphens, "
-                "author-slug and title-slug separated by double-hyphen (--). "
-                f"Got: {v!r}"
-            )
-            raise ValueError(msg)
-        return v
+        return validate_work_id(v)
 
     @field_validator("genre_tags")
     @classmethod
@@ -344,6 +350,29 @@ class TertiaryCatalogEntry(CatalogEntry):
         return self
 
 
+class ReferenceCatalogEntry(CatalogEntry):
+    """Catalog entry for standalone third-party reference works.
+
+    Reference works are ingested for their content without implying any
+    relationship to a subject author. They are never voice-profile eligible.
+    """
+
+    source_class: SourceClass = SourceClass.REFERENCE
+    external_author: NonEmptyStr
+    reference_type: NonEmptyStr
+    subject_domain: NonEmptyStr
+
+    @model_validator(mode="after")
+    def enforce_source_class(self) -> ReferenceCatalogEntry:
+        if self.source_class != SourceClass.REFERENCE:
+            msg = (
+                f"ReferenceCatalogEntry must have source_class='reference', "
+                f"got {self.source_class!r}"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class PersonalCatalogEntry(CatalogEntry):
     """Catalog entry for personal sources (user reflections/notes).
 
@@ -414,6 +443,7 @@ class ProcessingRoute(StrEnum):
     EMBEDDINGS_AND_LINKS = "embeddings_and_links"
     METADATA_ONLY = "metadata_only"
     PERSONAL_ENRICHMENT = "personal_enrichment"
+    REFERENCE_ENRICHMENT = "reference_enrichment"
 
 
 def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
@@ -424,6 +454,7 @@ def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
     - Contextual → embeddings + cross-resource link targets
     - Tertiary → metadata only, no content ingestion
     - Personal → embeddings + USER_REFLECTS_ON graph edges, NO voice profile
+    - Reference → entities + passage links + connection surfacing, NO voice profile
     """
     return {
         SourceClass.PRIMARY: ProcessingRoute.FULL_ENRICHMENT,
@@ -431,4 +462,5 @@ def route_for_source_class(source_class: SourceClass) -> ProcessingRoute:
         SourceClass.CONTEXTUAL: ProcessingRoute.EMBEDDINGS_AND_LINKS,
         SourceClass.TERTIARY: ProcessingRoute.METADATA_ONLY,
         SourceClass.PERSONAL: ProcessingRoute.PERSONAL_ENRICHMENT,
+        SourceClass.REFERENCE: ProcessingRoute.REFERENCE_ENRICHMENT,
     }[source_class]

@@ -31,7 +31,8 @@ class ChunkingStrategy(ABC):
         Args:
             document: The parsed document tree from the parsing layer.
             work_id: Catalog identifier for the work (e.g. ``guite--faith-hope-poetry``).
-            source_class: Source classification (primary, secondary, contextual, tertiary).
+            source_class: Source classification
+                (primary, secondary, contextual, tertiary, personal, reference).
 
         Returns:
             A flat list of Chunk objects at macro, meso, and micro granularity.

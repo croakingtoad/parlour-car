@@ -18,10 +18,86 @@ from author_library.errors import RetrievalError
 from author_library.intelligence.voice_crud import VoiceProfileManager
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from author_library.config import Settings
     from author_library.storage.manager import StorageManager
 
 log = structlog.get_logger(__name__)
+
+# Flag either a sizable absolute gap or a systemic share of a smaller work.
+ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS = 10
+ENTITY_EDGE_GAP_WARNING_MIN_SHARE = 0.1
+
+
+def _entity_edge_gap_is_warning(total_chunks: int, uncovered_chunks: int) -> bool:
+    """Return whether missing entity edges are material for one work."""
+    if total_chunks <= 0 or uncovered_chunks <= 0:
+        return False
+    return (
+        uncovered_chunks >= ENTITY_EDGE_GAP_WARNING_MIN_CHUNKS
+        or uncovered_chunks / total_chunks >= ENTITY_EDGE_GAP_WARNING_MIN_SHARE
+    )
+
+
+def _graph_entity_backfill_commands(work_ids: list[str]) -> str:
+    """Format bounded, non-destructive-by-default backfill invocations."""
+    return ", ".join(
+        f"`uv run python scripts/backfill_graph_and_entities.py {work_id}`"
+        for work_id in work_ids[:3]
+    ) + (" ..." if len(work_ids) > 3 else "")
+
+
+_SHORT_LINE_GENRES = frozenset(
+    {
+        "address",
+        "audio-transcript",
+        "blessings",
+        "homily",
+        "interview-transcript",
+        "lecture",
+        "mixed_poetry_prose",
+        "podcast-transcript",
+        "poems",
+        "poetry",
+        "poetry_collection",
+        "sermon",
+        "sonnet_sequence",
+        "transcript",
+        "verse",
+        "video-transcript",
+        "youtube-captions",
+    }
+)
+
+
+def _classify_chunk_noise(
+    noise: int,
+    total: int,
+    genre_tags: Sequence[str] | None,
+) -> tuple[str, str] | None:
+    """Classify sub-50-character chunks as informational or a warning."""
+    if noise == 0 or total == 0:
+        return None
+
+    percentage = noise / total
+    message = f"noise_chunks ({noise} chunks < 50 chars, {percentage:.0%})"
+    if any(tag.casefold() in _SHORT_LINE_GENRES for tag in genre_tags or ()):
+        return (
+            "info",
+            f"{message} — informational: short lines are the literary form by design "
+            "for this genre; already excluded from retrieval by the 50-char minimum",
+        )
+    if percentage > 0.1:
+        return "warning", message
+    return None
+
+
+def _format_year_range(earliest_year: int | None, latest_year: int | None) -> str:
+    """Format an author's dated range, explicitly labeling an undated catalog."""
+    if earliest_year is None or latest_year is None:
+        return "undated"
+    return f"{earliest_year}-{latest_year}"
 
 
 async def handle_list_authors(
@@ -42,6 +118,7 @@ async def handle_list_authors(
                   count(*) FILTER (WHERE source_class = 'secondary') AS secondary_count,
                   count(*) FILTER (WHERE source_class = 'contextual') AS contextual_count,
                   count(*) FILTER (WHERE source_class = 'tertiary') AS tertiary_count,
+                  count(*) FILTER (WHERE source_class = 'reference') AS reference_count,
                   sum(word_count) AS total_words,
                   min(publication_year) AS earliest_year,
                   max(publication_year) AS latest_year
@@ -53,16 +130,19 @@ async def handle_list_authors(
     authors = []
     for row in rows:
         r = dict(row)
-        authors.append({
-            "author": r["author"],
-            "work_count": r["work_count"],
-            "primary_works": r["primary_count"],
-            "secondary_works": r["secondary_count"],
-            "contextual_works": r["contextual_count"],
-            "tertiary_works": r["tertiary_count"],
-            "total_words": r["total_words"] or 0,
-            "year_range": f"{r['earliest_year']}-{r['latest_year']}",
-        })
+        authors.append(
+            {
+                "author": r["author"],
+                "work_count": r["work_count"],
+                "primary_works": r["primary_count"],
+                "secondary_works": r["secondary_count"],
+                "contextual_works": r["contextual_count"],
+                "tertiary_works": r["tertiary_count"],
+                "reference_works": r["reference_count"],
+                "total_words": r["total_words"] or 0,
+                "year_range": _format_year_range(r["earliest_year"], r["latest_year"]),
+            }
+        )
 
     return json.dumps({"authors": authors, "total_authors": len(authors)}, indent=2)
 
@@ -205,13 +285,16 @@ async def handle_list_works(
 
         catalog.append(entry)
 
-    return json.dumps({
-        "author_id": author_id,
-        "total_works": len(catalog),
-        "filter": source_class_filter,
-        "subject_headings_filter": subject_headings_filter,
-        "works": catalog,
-    }, indent=2)
+    return json.dumps(
+        {
+            "author_id": author_id,
+            "total_works": len(catalog),
+            "filter": source_class_filter,
+            "subject_headings_filter": subject_headings_filter,
+            "works": catalog,
+        },
+        indent=2,
+    )
 
 
 async def handle_library_stats(
@@ -232,6 +315,7 @@ async def handle_library_stats(
              count(*) FILTER (WHERE source_class = 'secondary') AS secondary_works,
              count(*) FILTER (WHERE source_class = 'contextual') AS contextual_works,
              count(*) FILTER (WHERE source_class = 'tertiary') AS tertiary_works,
+             count(*) FILTER (WHERE source_class = 'reference') AS reference_works,
              coalesce(sum(word_count), 0) AS total_words,
              count(DISTINCT author) AS unique_authors
            FROM works"""
@@ -276,10 +360,7 @@ async def handle_library_stats(
             """MATCH ()-[r]->()
             RETURN type(r) AS rel_type, count(r) AS count"""
         )
-        rel_counts: dict[str, int] = {
-            record["rel_type"]: record["count"]
-            for record in edge_counts
-        }
+        rel_counts: dict[str, int] = {record["rel_type"]: record["count"] for record in edge_counts}
 
         graph_stats = {
             "node_counts": label_counts,
@@ -308,9 +389,7 @@ async def handle_library_stats(
     # Embedding coverage
     chunks_with_embeds = embedding_stats.get("chunks_with_embeddings", 0)
     total_chunks = chunk_stats.get("total_chunks", 0)
-    coverage = (
-        round(chunks_with_embeds / total_chunks * 100, 1) if total_chunks > 0 else 0.0
-    )
+    coverage = round(chunks_with_embeds / total_chunks * 100, 1) if total_chunks > 0 else 0.0
 
     stats = {
         "works": work_stats,
@@ -374,9 +453,7 @@ async def handle_health_check(
         health["embedding"] = {"status": "not_configured"}
 
     all_healthy = all(
-        v.get("status") == "healthy"
-        for v in health.values()
-        if v.get("status") != "not_configured"
+        v.get("status") == "healthy" for v in health.values() if v.get("status") != "not_configured"
     )
     health["overall"] = "healthy" if all_healthy else "degraded"
 
@@ -411,17 +488,31 @@ async def handle_audit_library(
     # 1. Per-work stats: chunks, embeddings, entity edges, orphaned chunks
     # ------------------------------------------------------------------
     works_rows = await storage.pg.fetch_all(
-        "SELECT work_id, title, source_class, author FROM works ORDER BY work_id"
+        "SELECT work_id, title, source_class, author, genre_tags FROM works ORDER BY work_id"
     )
 
     if not works_rows:
-        return json.dumps({
-            "overall_status": "healthy",
-            "works": [],
-            "graph": {},
-            "pg_neo4j": {"is_consistent": True, "missing_works": [], "chunk_delta": []},
-            "recommendations": ["Library is empty — no works have been ingested."],
-        }, indent=2)
+        return json.dumps(
+            {
+                "overall_status": "healthy",
+                "works": [],
+                "graph": {},
+                "pg_neo4j": {
+                    "is_consistent": True,
+                    "missing_works": [],
+                    "chunk_delta": [],
+                    "work_property_delta": [],
+                },
+                "chunk_noise": {
+                    "sub_50_chunks": 0,
+                    "total_chunks": 0,
+                    "warning_work_ids": [],
+                    "informational_work_ids": [],
+                },
+                "recommendations": ["Library is empty — no works have been ingested."],
+            },
+            indent=2,
+        )
 
     # Chunk counts per work
     chunk_rows = await storage.pg.fetch_all(
@@ -446,23 +537,27 @@ async def handle_audit_library(
            GROUP BY work_id"""
     )
     noise_counts = {r["work_id"]: int(r["noise_count"]) for r in noise_rows}
+    chunk_noise_warning_work_ids: list[str] = []
+    chunk_noise_informational_work_ids: list[str] = []
 
     # Entity edge counts per work in Neo4j
     entity_counts: dict[str, int] = {}
     orphan_counts: dict[str, int] = {}
     try:
         entity_rows = await storage.neo4j.execute_read(
-            """MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
-               RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"""
+            "MATCH (c:Chunk)-[r:EXPLORES_THEME|MAKES_ARGUMENT|"
+            "ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->() "
+            "RETURN c.work_id AS work_id, COUNT(r) AS entity_edges"
         )
         for r in entity_rows:
             entity_counts[r["work_id"]] = int(r["entity_edges"])
 
         # Orphaned chunks: in Neo4j but no entity relationships
         orphan_rows = await storage.neo4j.execute_read(
-            """MATCH (c:Chunk)
-               WHERE NOT (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|CONCEPT_USED_IN|REFERENCES_PERSON]->()
-               RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"""
+            "MATCH (c:Chunk) "
+            "WHERE NOT (c)-[:EXPLORES_THEME|MAKES_ARGUMENT|ATTRIBUTED_BY_CRITIC|"
+            "CONCEPT_USED_IN|REFERENCES_PERSON]->() "
+            "RETURN c.work_id AS work_id, COUNT(c) AS orphan_count"
         )
         for r in orphan_rows:
             orphan_counts[r["work_id"]] = int(r["orphan_count"])
@@ -478,6 +573,7 @@ async def handle_audit_library(
         noise = noise_counts.get(work_id, 0)
 
         work_warnings: list[str] = []
+        work_info: list[str] = []
 
         if total == 0:
             work_warnings.append("no_chunks")
@@ -493,22 +589,42 @@ async def handle_audit_library(
             work_warnings.append("no_entity_extraction")
             has_warnings = True
 
-        if noise > 0:
-            work_warnings.append(f"noise_chunks ({noise} chunks < 50 chars)")
-            if noise > total * 0.1:
+        noise_classification = _classify_chunk_noise(
+            noise,
+            total,
+            w.get("genre_tags"),
+        )
+        if noise_classification is not None:
+            severity, message = noise_classification
+            if severity == "warning":
+                work_warnings.append(message)
+                chunk_noise_warning_work_ids.append(work_id)
                 has_warnings = True
+            else:
+                work_info.append(message)
+                chunk_noise_informational_work_ids.append(work_id)
 
-        work_audit.append({
-            "work_id": work_id,
-            "title": w.get("title", ""),
-            "source_class": w.get("source_class", ""),
-            "chunks": total,
-            "embeddings": embedded,
-            "entities": entities,
-            "orphaned_neo4j_chunks": orphans,
-            "noise_chunks": noise,
-            "warnings": work_warnings,
-        })
+        if _entity_edge_gap_is_warning(total, orphans):
+            work_warnings.append(
+                f"entity_edge_coverage_gap ({orphans}/{total} Neo4j chunks without entity edges)"
+            )
+            has_warnings = True
+
+        work_audit.append(
+            {
+                "work_id": work_id,
+                "title": w.get("title", ""),
+                "source_class": w.get("source_class", ""),
+                "chunks": total,
+                "embeddings": embedded,
+                "entities": entities,
+                "neo4j_chunks_without_entity_edges": orphans,
+                "orphaned_neo4j_chunks": orphans,
+                "noise_chunks": noise,
+                "warnings": work_warnings,
+                "info": work_info,
+            }
+        )
 
     # ------------------------------------------------------------------
     # 2. PG / Neo4j consistency
@@ -518,9 +634,11 @@ async def handle_audit_library(
         consistency = await check_pg_neo4j_consistency(storage)
         missing = consistency.get("missing_from_neo4j", [])
         extra = consistency.get("extra_in_neo4j", [])
-        chunk_delta = [
-            c for c in consistency.get("chunk_counts", [])
-            if not c.get("in_sync")
+        chunk_delta = [c for c in consistency.get("chunk_counts", []) if not c.get("in_sync")]
+        work_property_delta = consistency.get("work_property_delta", [])
+        pg_only_chunk_drift = [c for c in chunk_delta if int(c.get("pg_only_chunk_count") or 0) > 0]
+        neo4j_only_chunk_drift = [
+            c for c in chunk_delta if int(c.get("neo4j_only_chunk_count") or 0) > 0
         ]
         pg_neo4j = {
             "is_consistent": consistency.get("is_consistent", False),
@@ -529,8 +647,9 @@ async def handle_audit_library(
             "missing_from_neo4j": missing,
             "extra_in_neo4j": extra,
             "chunk_delta": chunk_delta,
+            "work_property_delta": work_property_delta,
         }
-        if missing or extra or chunk_delta:
+        if missing or extra or chunk_delta or work_property_delta:
             has_warnings = True
             if missing:
                 recommendations.append(
@@ -540,10 +659,47 @@ async def handle_audit_library(
                 recommendations.append(
                     f"{len(extra)} Neo4j works have no PG record — check for orphaned graph data."
                 )
+            if pg_only_chunk_drift:
+                pg_only_count = sum(
+                    int(work.get("pg_only_chunk_count") or 0) for work in pg_only_chunk_drift
+                )
+                pg_only_work_ids = [work["work_id"] for work in pg_only_chunk_drift]
+                recommendations.append(
+                    f"{pg_only_count} PostgreSQL chunks across "
+                    f"{len(pg_only_work_ids)} works are missing from Neo4j — run the "
+                    "non-destructive default graph/entity backfill for each affected work: "
+                    f"{_graph_entity_backfill_commands(pg_only_work_ids)}. "
+                    "Do not pass --deduplicate-themes."
+                )
+            if neo4j_only_chunk_drift:
+                neo4j_only_count = sum(
+                    int(work.get("neo4j_only_chunk_count") or 0) for work in neo4j_only_chunk_drift
+                )
+                neo4j_only_work_ids = [work["work_id"] for work in neo4j_only_chunk_drift]
+                recommendations.append(
+                    f"{neo4j_only_count} Neo4j chunks across "
+                    f"{len(neo4j_only_work_ids)} works have no PostgreSQL row — correct the "
+                    "scope of scripts/cleanup_neo4j_orphans.py to: "
+                    f"{', '.join(neo4j_only_work_ids[:3])}"
+                    + (" ..." if len(neo4j_only_work_ids) > 3 else "")
+                    + "; then inspect a dry-run. Deletion requires explicit approval."
+                )
+            if work_property_delta:
+                work_ids = [work["work_id"] for work in work_property_delta]
+                recommendations.append(
+                    f"Mirrored Work metadata differs for {len(work_ids)} works "
+                    f"({', '.join(work_ids)}) — run a reviewed, targeted, idempotent "
+                    "Work-node re-sync from PostgreSQL using upsert_work_node(). "
+                    "Do not run chunk/entity backfill for metadata-only drift."
+                )
     except Exception as exc:
         log.warning("audit_consistency_failed", error=str(exc))
         pg_neo4j = {"error": str(exc)}
         has_warnings = True
+        recommendations.append(
+            "PG/Neo4j consistency could not be checked — resolve the reported error "
+            "and rerun the audit."
+        )
 
     # ------------------------------------------------------------------
     # 3. Theme graph quality
@@ -561,7 +717,8 @@ async def handle_audit_library(
         singletons = [r["theme"] for r in theme_rows if int(r["chunk_count"]) <= 1]
         avg_connectivity = (
             sum(int(r["chunk_count"]) for r in theme_rows) / total_themes
-            if total_themes > 0 else 0.0
+            if total_themes > 0
+            else 0.0
         )
 
         # Person and Concept nodes
@@ -570,9 +727,7 @@ async def handle_audit_library(
                WHERE n:Person OR n:Concept OR n:Argument
                RETURN labels(n)[0] AS type, COUNT(n) AS count"""
         )
-        entity_type_counts: dict[str, int] = {
-            r["type"]: int(r["count"]) for r in entity_type_rows
-        }
+        entity_type_counts: dict[str, int] = {r["type"]: int(r["count"]) for r in entity_type_rows}
 
         graph_audit = {
             "total_themes": total_themes,
@@ -606,7 +761,8 @@ async def handle_audit_library(
             for row in anomaly_rows:
                 recommendations.append(
                     f"Classification anomaly: '{row['work_id']}' — author matches "
-                    f"subject_author_id but source_class='{row['source_class']}'."
+                    f"subject_author_id but source_class='{row['source_class']}'. "
+                    "Review the catalog record and reclassify it if needed."
                 )
     except Exception as exc:
         log.warning("audit_classification_anomaly_check_failed", error=str(exc))
@@ -614,6 +770,14 @@ async def handle_audit_library(
     # ------------------------------------------------------------------
     # 5. Global recommendations
     # ------------------------------------------------------------------
+    works_without_chunks = [w["work_id"] for w in work_audit if "no_chunks" in w["warnings"]]
+    if works_without_chunks:
+        recommendations.append(
+            f"{len(works_without_chunks)} works have no chunks — re-run ingestion: "
+            f"{', '.join(works_without_chunks[:3])}"
+            + (" ..." if len(works_without_chunks) > 3 else "")
+        )
+
     works_missing_embeddings = [
         w["work_id"] for w in work_audit if "no_embeddings" in w["warnings"]
     ]
@@ -622,6 +786,18 @@ async def handle_audit_library(
             f"{len(works_missing_embeddings)} works have no embeddings — "
             f"re-run embed step: {', '.join(works_missing_embeddings[:3])}"
             + (" ..." if len(works_missing_embeddings) > 3 else "")
+        )
+
+    works_with_partial_embeddings = [
+        w["work_id"]
+        for w in work_audit
+        if any(warning.startswith("partial_embeddings") for warning in w["warnings"])
+    ]
+    if works_with_partial_embeddings:
+        recommendations.append(
+            f"{len(works_with_partial_embeddings)} works have partial embedding coverage — "
+            f"re-run embed step: {', '.join(works_with_partial_embeddings[:3])}"
+            + (" ..." if len(works_with_partial_embeddings) > 3 else "")
         )
 
     works_no_entities = [
@@ -634,8 +810,31 @@ async def handle_audit_library(
             + (" ..." if len(works_no_entities) > 3 else "")
         )
 
-    if not recommendations:
-        recommendations.append("Library is healthy — no issues detected.")
+    works_with_excessive_noise = chunk_noise_warning_work_ids
+    if works_with_excessive_noise:
+        recommendations.append(
+            f"{len(works_with_excessive_noise)} works have excessive noise chunks "
+            "(< 50 chars) — review chunk boundaries and re-chunk genuine noise: "
+            f"{', '.join(works_with_excessive_noise[:3])}"
+            + (" ..." if len(works_with_excessive_noise) > 3 else "")
+        )
+
+    works_with_entity_edge_gaps = [
+        w["work_id"]
+        for w in work_audit
+        if _entity_edge_gap_is_warning(
+            int(w["chunks"]),
+            int(w["neo4j_chunks_without_entity_edges"]),
+        )
+    ]
+    if works_with_entity_edge_gaps:
+        recommendations.append(
+            f"{len(works_with_entity_edge_gaps)} works have material Neo4j entity-edge "
+            "coverage gaps — review extraction coverage; only if extraction is confirmed "
+            "incomplete, run the non-destructive default graph/entity backfill: "
+            f"{_graph_entity_backfill_commands(works_with_entity_edge_gaps)}. "
+            "Do not pass --deduplicate-themes."
+        )
 
     # ------------------------------------------------------------------
     # Overall status
@@ -647,11 +846,25 @@ async def handle_audit_library(
     else:
         overall_status = "healthy"
 
+    if overall_status == "healthy" and not recommendations:
+        recommendations.append("Library is healthy — no issues detected.")
+    elif overall_status != "healthy" and not recommendations:
+        recommendations.append(
+            "The audit found unresolved issues — inspect the warning and error fields, "
+            "correct them, and rerun the audit."
+        )
+
     report = {
         "overall_status": overall_status,
         "works": work_audit,
         "graph": graph_audit,
         "pg_neo4j": pg_neo4j,
+        "chunk_noise": {
+            "sub_50_chunks": sum(noise_counts.values()),
+            "total_chunks": sum(chunk_counts.values()),
+            "warning_work_ids": chunk_noise_warning_work_ids,
+            "informational_work_ids": chunk_noise_informational_work_ids,
+        },
         "recommendations": recommendations,
     }
 

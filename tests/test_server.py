@@ -112,6 +112,7 @@ class TestToolDefinitions:
             "secondary",
             "contextual",
             "tertiary",
+            "reference",
         }
 
     def test_list_works_source_class_enum(self) -> None:
@@ -123,6 +124,7 @@ class TestToolDefinitions:
             "contextual",
             "tertiary",
             "personal",
+            "reference",
         }
 
     def test_library_stats_has_no_required_fields(self) -> None:
@@ -155,8 +157,15 @@ class TestToolDefinitions:
         tool = next(t for t in TOOLS if t.name == "catalog_source")
         sc = tool.inputSchema["properties"]["source_class"]
         assert set(sc["enum"]) == {
-            "primary", "secondary", "contextual", "tertiary", "personal",
+            "primary", "secondary", "contextual", "tertiary", "personal", "reference",
         }
+
+    def test_search_chunks_source_class_enum(self) -> None:
+        tool = next(t for t in TOOLS if t.name == "search_chunks")
+        source_classes = tool.inputSchema["properties"]["filters"]["properties"][
+            "source_class"
+        ]
+        assert "reference" in source_classes["items"]["enum"]
 
     def test_chunk_source_required_fields(self) -> None:
         tool = next(t for t in TOOLS if t.name == "chunk_source")

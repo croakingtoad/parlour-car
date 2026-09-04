@@ -24,6 +24,7 @@ from author_library.catalog.models import (
     PersonalCatalogEntry,
     PrimaryCatalogEntry,
     ProcessingRoute,
+    ReferenceCatalogEntry,
     SecondaryCatalogEntry,
     SourceClass,
     TertiaryCatalogEntry,
@@ -127,12 +128,32 @@ class ClassificationPipeline:
         """
         overrides = user_overrides or {}
 
-        # Step 1: Run the classification engine
-        classification = await self._classifier.classify(
-            document,
-            subject_author=self._subject_author,
-            metadata_hints=metadata_hints,
-        )
+        # A caller may provide a corrected document author without duplicating it
+        # as external_author. Capture that explicit attribution before the generic
+        # subject-author fallback below can populate ``author``.
+        if (
+            overrides.get("source_class") == SourceClass.REFERENCE.value
+            and "external_author" not in overrides
+            and "author" in overrides
+        ):
+            overrides = {**overrides, "external_author": overrides["author"]}
+
+        # Step 1: Run the classification engine. Reference is a new user-confirmed
+        # class whose filing author may match the document author; honoring that
+        # confirmation prevents it from being reinterpreted as primary.
+        if overrides.get("source_class") == SourceClass.REFERENCE.value:
+            classification = ClassificationResult(
+                source_class=SourceClass.REFERENCE,
+                confidence=1.0,
+                reasoning="User-confirmed standalone reference work.",
+                signals_detected=["user_confirmed_reference"],
+            )
+        else:
+            classification = await self._classifier.classify(
+                document,
+                subject_author=self._subject_author,
+                metadata_hints=metadata_hints,
+            )
 
         log.info(
             "pipeline_classification_complete",
@@ -205,10 +226,40 @@ class ClassificationPipeline:
         overrides: dict[str, Any],
     ) -> CatalogEntry:
         """Build the appropriate CatalogEntry subclass based on classification."""
-        # Core fields shared across all classes
-        core = self._extract_core_fields(document, classification, overrides)
-
         source_class = classification.source_class
+        reference_metadata: dict[str, str] = {}
+
+        if source_class == SourceClass.REFERENCE:
+            # Reference fields are mandatory source identity. Validate them before
+            # generating a work_id so missing metadata consistently raises the
+            # public ClassificationError contract rather than a raw ID error.
+            try:
+                reference_metadata = {
+                    "external_author": self._required_reference_metadata(
+                        "external_author",
+                        overrides.get("external_author", document.metadata.author),
+                    ),
+                    "reference_type": self._required_reference_metadata(
+                        "reference_type", overrides.get("reference_type")
+                    ),
+                    "subject_domain": self._required_reference_metadata(
+                        "subject_domain", overrides.get("subject_domain")
+                    ),
+                }
+            except Exception as exc:
+                raise ClassificationError(
+                    f"Failed to build catalog entry: {exc}",
+                    context={
+                        "source_class": source_class,
+                        "title": document.metadata.title,
+                    },
+                    cause=exc,
+                ) from exc
+
+        # Keep core-field error behavior unchanged for every class. Reference
+        # metadata was checked above solely because it is required before ID
+        # generation can safely begin.
+        core = self._extract_core_fields(document, classification, overrides)
 
         try:
             if source_class == SourceClass.PRIMARY:
@@ -267,6 +318,11 @@ class ClassificationPipeline:
                     reference_type=overrides.get("reference_type", "bibliography"),
                     coverage_note=overrides.get("coverage_note"),
                 )
+            elif source_class == SourceClass.REFERENCE:
+                return ReferenceCatalogEntry(
+                    **core,
+                    **reference_metadata,
+                )
             else:
                 # Personal
                 return PersonalCatalogEntry(
@@ -283,6 +339,15 @@ class ClassificationPipeline:
                 cause=exc,
             ) from exc
 
+    @staticmethod
+    def _required_reference_metadata(field: str, value: Any) -> str:
+        """Return required reference metadata or fail before catalog persistence."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f'source_class="reference" requires metadata field "{field}"'
+            )
+        return value
+
     def _extract_core_fields(
         self,
         document: ParsedDocument,
@@ -290,11 +355,16 @@ class ClassificationPipeline:
         overrides: dict[str, Any],
     ) -> dict[str, Any]:
         """Extract core catalog fields from the document and overrides."""
-        title = overrides.get("title", document.metadata.title or "Untitled")
-        author = overrides.get("author", document.metadata.author or "Unknown")
+        title = overrides.get("title", document.metadata.title)
+        author = overrides.get("author", document.metadata.author)
 
         # Build work_id from author and title slugs
-        work_id = overrides.get("work_id", self._generate_work_id(author, title))
+        if "work_id" in overrides:
+            work_id = overrides["work_id"]
+        else:
+            work_id = self._generate_work_id(author, title)
+
+        publisher = overrides.get("publisher", document.metadata.publisher)
 
         # Determine format from document
         format_ingested = overrides.get("format_ingested", document.format)
@@ -313,7 +383,7 @@ class ClassificationPipeline:
             ),
             "original_publication_year": overrides.get("original_publication_year"),
             "edition": overrides.get("edition"),
-            "publisher": overrides.get("publisher", document.metadata.publisher or "Unknown"),
+            "publisher": self._clean_publisher(publisher),
             "isbn": overrides.get("isbn", document.metadata.isbn),
             "format_ingested": format_ingested,
             "language": overrides.get("language", document.metadata.language),
@@ -356,39 +426,72 @@ class ClassificationPipeline:
         if "," not in author:
             return author
 
-        parts = [p.strip() for p in author.split(",")]
+        # Drop empty segments immediately. A MARC 100 field carries a trailing
+        # comma when $d follows ("Coleridge, Samuel Taylor,"), and an empty tail
+        # segment used to abort the reorder entirely, slugifying the raw string
+        # into a SECOND work_id for an author that already had one.
+        parts = [p.strip() for p in author.split(",") if p.strip()]
+        if not parts:
+            return author
 
-        # A trailing segment that is only a life date / bibliographic
-        # qualifier: "1772-1834", "1637?-1674", "1950-", "b. 1900",
-        # "ca. 1200", "fl. 1550", "d. 1674".
+        # A segment that is only a life date / bibliographic qualifier:
+        # "1772-1834", "1637?-1674", "1950-", "b. 1900", "ca. 1200",
+        # "fl. 1550-1600", "d. 1674?", "[1900-1980]" (RDA), "approximately
+        # 1200", "19th cent.".
         date_qualifier = re.compile(
-            r"^(?:b|d|ca|fl|active)?\.?\s*\d{1,4}\??"
-            r"(?:\s*[-\u2013\u2014]\s*\d{0,4}\??)?\.?$",
+            r"^\[?\s*(?:b|d|ca|fl|active|approximately|circa)?\.?\s*"
+            r"\d{1,4}(?:st|nd|rd|th)?\??"
+            r"(?:\s*[-\u2013\u2014]\s*\d{0,4}\??)?"
+            r"\s*(?:cent\.?|century)?\s*\]?\.?$",
             re.IGNORECASE,
         )
 
-        while len(parts) > 2 and date_qualifier.match(parts[-1]):
-            parts.pop()
+        # Strip date segments anywhere in the tail, not only the last one:
+        # "Smith, John, 1900-1980, Jr." carries the date interior to a suffix.
+        head = parts[0]
+        tail = [p for p in parts[1:] if not date_qualifier.match(p)]
 
         # "Coleridge, 1772-1834" — surname plus dates, no given name.
-        if len(parts) == 2 and date_qualifier.match(parts[-1]) and parts[0]:
-            return parts[0]
+        if not tail:
+            return head
 
-        # Reorder to natural order. Segments beyond the first stay joined
-        # so non-date suffixes keep their prior behaviour ("Smith, John, Jr."
-        # -> "John, Jr. Smith").
-        if len(parts) >= 2 and parts[0] and all(parts[1:]):
-            return f"{', '.join(parts[1:])} {parts[0]}"
+        # Reorder to natural order. Remaining segments stay joined so non-date
+        # suffixes keep their prior behaviour ("Smith, John, Jr." -> "John, Jr.
+        # Smith").
+        return f"{', '.join(tail)} {head}"
 
-        return author
 
     @staticmethod
-    def _generate_work_id(author: str, title: str) -> str:
+    def _generate_work_id(author: str | None, title: str | None) -> str:
         """Generate a work_id from author and title per catalog-schema.md §6."""
+        import hashlib
         import re
+        import unicodedata
+
+        sentinels = {"unknown", "untitled"}
+
+        def require_identity_field(name: str, value: str | None) -> str:
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value.strip().casefold() in sentinels
+            ):
+                raise ValueError(
+                    "Cannot generate work_id without real author and title metadata; "
+                    f"invalid: {name}"
+                )
+            return value
+
+        author = require_identity_field("author", author)
+        title = require_identity_field("title", title)
 
         def slugify(text: str) -> str:
-            slug = text.lower().strip()
+            # Fold diacritics to ASCII rather than deleting them: stripping the
+            # umlaut turned "Böll" into "bll", forking it from the same author
+            # recorded as "Boll" — realistic MARC-vs-EPUB metadata variance.
+            slug = unicodedata.normalize("NFKD", text)
+            slug = "".join(c for c in slug if not unicodedata.combining(c))
+            slug = slug.lower().strip()
             slug = re.sub(r"[^a-z0-9\s-]", "", slug)
             slug = re.sub(r"[\s]+", "-", slug)
             slug = re.sub(r"-+", "-", slug)
@@ -400,6 +503,14 @@ class ClassificationPipeline:
         author_slug = slugify(author)
         title_slug = slugify(title)
 
+        if not author_slug:
+            # A fully non-Latin name slugifies to nothing, which produced a
+            # malformed "--title" work_id and collapsed EVERY such author into
+            # one id per title. Fall back to a deterministic digest of the
+            # original name so distinct authors stay distinct.
+            digest = hashlib.sha256(author.encode("utf-8")).hexdigest()[:12]
+            author_slug = f"author-{digest}"
+
         work_id = f"{author_slug}--{title_slug}"
 
         # Truncate to max length
@@ -409,14 +520,35 @@ class ClassificationPipeline:
         return work_id
 
     @staticmethod
-    def _extract_year(publication_date: str | None) -> int:
-        """Extract year from a date string, defaulting to current year."""
+    def _extract_year(publication_date: str | None) -> int | None:
+        """Extract a year from a date string, returning None when it is unknown."""
         if publication_date and len(publication_date) >= 4:
             try:
                 return int(publication_date[:4])
             except ValueError:
                 pass
-        return date.today().year
+        return None
+
+    @staticmethod
+    def _clean_publisher(publisher: str | None) -> str | None:
+        """Return real publisher metadata, excluding PDF Producer values."""
+        import re
+
+        if not publisher or not publisher.strip():
+            return None
+
+        publisher = publisher.strip()
+        if publisher.casefold() == "unknown":
+            return None
+
+        producer_pattern = re.compile(
+            r"acrobat|paper\s+capture|mupdf|pymupdf|luradocument|"
+            r"internet\s+archive\s+pdf|recoded\s+by|skimage",
+            re.IGNORECASE,
+        )
+        if producer_pattern.search(publisher):
+            return None
+        return publisher
 
     def _subject_author_slug(self) -> str:
         """Generate a slug from the subject author name."""

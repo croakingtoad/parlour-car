@@ -63,8 +63,8 @@ class TestGraphQueryServiceWithNeo4j:
         """Create a test graph with known structure."""
         # Works
         for work in [
-            ("guite--faith-hope-poetry", "Faith Hope and Poetry", "Malcolm Guite", "primary"),
-            ("coleridge--biographia", "Biographia Literaria", "Coleridge", "contextual"),
+            ("test--guite-faith-hope-poetry", "Faith Hope and Poetry", "Test Guite", "primary"),
+            ("test--coleridge-biographia", "Biographia Literaria", "Coleridge", "contextual"),
         ]:
             await neo4j.execute_write(
                 """MERGE (w:Work {work_id: $wid})
@@ -74,9 +74,27 @@ class TestGraphQueryServiceWithNeo4j:
 
         # Chunks
         chunks = [
-            ("chunk-p1", "guite--faith-hope-poetry", "primary", "Imagination and faith...", "meso"),
-            ("chunk-p2", "guite--faith-hope-poetry", "primary", "Symbol as sacrament...", "meso"),
-            ("chunk-c1", "coleridge--biographia", "contextual", "Primary Imagination...", "meso"),
+            (
+                "chunk-p1",
+                "test--guite-faith-hope-poetry",
+                "primary",
+                "Imagination and faith...",
+                "meso",
+            ),
+            (
+                "chunk-p2",
+                "test--guite-faith-hope-poetry",
+                "primary",
+                "Symbol as sacrament...",
+                "meso",
+            ),
+            (
+                "chunk-c1",
+                "test--coleridge-biographia",
+                "contextual",
+                "Primary Imagination...",
+                "meso",
+            ),
         ]
         for cid, wid, sc, text, gran in chunks:
             await neo4j.execute_write(
@@ -89,7 +107,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Themes
         themes = [
             ("test--primary-imagination", "Primary Imagination"),
-            ("sacramental-vision", "Sacramental Vision"),
+            ("test--sacramental-vision", "Sacramental Vision"),
         ]
         for cn, name in themes:
             await neo4j.execute_write(
@@ -100,7 +118,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Persons
         await neo4j.execute_write(
             "MERGE (p:Person {canonical_name: $cn}) SET p.name = $name",
-            {"cn": "test--stc", "name": "Samuel Taylor Coleridge"},
+            {"cn": "test--stc", "name": "Test Coleridge"},
         )
 
         # Arguments
@@ -108,7 +126,7 @@ class TestGraphQueryServiceWithNeo4j:
             """MERGE (a:Argument {canonical_name: $cn})
             SET a.claim = $claim, a.evidence_summary = $ev""",
             {
-                "cn": "imagination-is-sacramental",
+                "cn": "test--imagination-is-sacramental",
                 "claim": "Imagination is fundamentally sacramental",
                 "ev": "Coleridge's definition echoes sacramental theology",
             },
@@ -122,7 +140,7 @@ class TestGraphQueryServiceWithNeo4j:
         )
         await neo4j.execute_write(
             """MATCH (c:Chunk {chunk_id: 'chunk-p2'}),
-                   (t:Theme {canonical_name: 'sacramental-vision'})
+                   (t:Theme {canonical_name: 'test--sacramental-vision'})
             MERGE (c)-[:EXPLORES_THEME]->(t)"""
         )
         await neo4j.execute_write(
@@ -134,7 +152,7 @@ class TestGraphQueryServiceWithNeo4j:
         # Edges: MAKES_ARGUMENT (PRIMARY only)
         await neo4j.execute_write(
             """MATCH (c:Chunk {chunk_id: 'chunk-p1'}),
-                   (a:Argument {canonical_name: 'imagination-is-sacramental'})
+                   (a:Argument {canonical_name: 'test--imagination-is-sacramental'})
             MERGE (c)-[:MAKES_ARGUMENT]->(a)"""
         )
 
@@ -205,7 +223,7 @@ class TestGraphQueryServiceWithNeo4j:
         assert evolution.theme_name == "test--primary-imagination"
         assert len(evolution.arguments) >= 1
         arg_names = {a.canonical_name for a in evolution.arguments}
-        assert "imagination-is-sacramental" in arg_names
+        assert "test--imagination-is-sacramental" in arg_names
 
     async def test_get_author_network(self, neo4j_conn: Neo4jConnection) -> None:
         """Get an author's network of persons and themes."""
@@ -227,12 +245,12 @@ class TestGraphQueryServiceWithNeo4j:
         await self._setup_graph(neo4j_conn)
 
         service = GraphQueryService(neo4j_conn)
-        links = await service.get_cross_work_links("guite--faith-hope-poetry")
+        links = await service.get_cross_work_links("test--guite-faith-hope-poetry")
 
         # Should have outgoing ENGAGES_WITH to Coleridge work
         assert len(links.outgoing) >= 1
         assert links.outgoing[0].rel_type == "ENGAGES_WITH"
-        assert links.outgoing[0].target_work_id == "coleridge--biographia"
+        assert links.outgoing[0].target_work_id == "test--coleridge-biographia"
 
     async def test_get_cross_work_links_empty(self, neo4j_conn: Neo4jConnection) -> None:
         """Work with no links returns empty lists."""

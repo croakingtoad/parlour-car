@@ -282,6 +282,14 @@ def _build_provenance_rules(source_class: str) -> dict[str, Any]:
             "voice_eligible": False,
             "presentation_guidance": "Present as bibliographic or reference information",
         },
+        "reference": {
+            "attribution": "Attribute to the original author of the reference work",
+            "voice_eligible": False,
+            "presentation_guidance": (
+                "Present as a standalone third-party source; do not imply the subject "
+                "author read, cited, or engaged with it"
+            ),
+        },
         "personal": {
             "attribution": "Present as the user's own reflection",
             "voice_eligible": False,

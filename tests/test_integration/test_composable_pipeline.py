@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from author_library.errors import ClassificationError
 from author_library.tools.composable_ingestion import (
     handle_catalog_source,
     handle_chunk_source,
@@ -263,6 +264,153 @@ class TestCatalogSource:
             assert isinstance(result["table_of_contents"], list)
         finally:
             temp_path.unlink(missing_ok=True)
+
+
+@SKIP_NO_DB
+class TestReferenceCatalogSource:
+    """A confirmed reference source catalogs without an LLM reclassification."""
+
+    @pytest.mark.parametrize(
+        "missing_field",
+        ["external_author", "reference_type", "subject_domain"],
+    )
+    async def test_catalog_reference_rejects_missing_required_metadata(
+        self,
+        clean_storage: StorageManager,
+        integration_settings: Settings,
+        missing_field: str,
+    ) -> None:
+        metadata_overrides = {
+            "author": "Test Reference Author",
+            "title": "Incomplete Reference Catalog",
+            "external_author": "Test Reference Author",
+            "reference_type": "craft-handbook",
+            "subject_domain": "dramatic-verse",
+        }
+        metadata_overrides.pop(missing_field)
+        if missing_field == "external_author":
+            metadata_overrides.pop("author")
+
+        temp_path = _write_temp_text("Standalone reference text without a byline.")
+        try:
+            works_before = await clean_storage.pg.fetch_val("SELECT count(*) FROM works")
+            with pytest.raises(
+                ClassificationError,
+                match=rf'source_class="reference" requires metadata field "{missing_field}"',
+            ):
+                await handle_catalog_source(
+                    {
+                        "file_path": str(temp_path),
+                        "source_class": "reference",
+                        "metadata_overrides": metadata_overrides,
+                    },
+                    settings=integration_settings,
+                    storage=clean_storage,
+                    embedding_provider=None,
+                )
+            assert await clean_storage.pg.fetch_val("SELECT count(*) FROM works") == works_before
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    async def test_catalog_reference_creates_reference_record(
+        self,
+        clean_storage: StorageManager,
+        integration_settings: Settings,
+    ) -> None:
+        temp_path = _write_temp_text(HAMLET_EXCERPT)
+        try:
+            result = json.loads(await handle_catalog_source(
+                {
+                    "file_path": str(temp_path),
+                    "source_class": "reference",
+                    "metadata_overrides": {
+                        "author": "Test",
+                        "title": "Reference Catalog",
+                        "external_author": "Test",
+                        "reference_type": "craft-handbook",
+                        "subject_domain": "dramatic-verse",
+                        "publication_year": 1603,
+                        "publisher": "Test Publisher",
+                    },
+                },
+                settings=integration_settings,
+                storage=clean_storage,
+                embedding_provider=None,
+            ))
+
+            work = await clean_storage.works.get(result["work_id"])
+            assert work is not None
+            assert work["source_class"] == "reference"
+            source_metadata = work["source_metadata"]
+            if isinstance(source_metadata, str):
+                source_metadata = json.loads(source_metadata)
+            assert source_metadata["reference_type"] == "craft-handbook"
+            assert "voice_profile_eligible" not in source_metadata
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    async def test_reference_passage_links_load_corpus_primary_counterparts(
+        self,
+        clean_storage: StorageManager,
+        integration_settings: Settings,
+    ) -> None:
+        common_work = {
+            "source_class_note": "Reference linking integration test",
+            "publication_year": 2026,
+            "publisher": "Test Publisher",
+            "format_ingested": "txt",
+            "word_count": 100,
+            "genre_tags": ["craft"],
+            "subject_headings": ["General"],
+        }
+        await clean_storage.works.create({
+            **common_work,
+            "work_id": "test--link-primary",
+            "title": "Primary Counterpart",
+            "author": "Test Subject",
+            "source_class": "primary",
+            "source_metadata": {"subject_author_id": "test-subject"},
+        })
+        await clean_storage.works.create({
+            **common_work,
+            "work_id": "test--link-reference",
+            "title": "Reference Work",
+            "author": "Test Reference Author",
+            "source_class": "reference",
+            "source_metadata": {
+                "external_author": "Test Reference Author",
+                "reference_type": "craft-handbook",
+                "subject_domain": "prosody",
+            },
+        })
+        for work_id, source_class in (
+            ("test--link-primary", "primary"),
+            ("test--link-reference", "reference"),
+        ):
+            await clean_storage.chunks.create({
+                "work_id": work_id,
+                "text": f"Meso passage from {work_id}",
+                "annotation": None,
+                "granularity": "meso",
+                "source_class": source_class,
+                "position": 0,
+                "metadata": {},
+            })
+
+        result = json.loads(await handle_detect_passage_links(
+            {
+                "work_id": "test--link-reference",
+                "scan_types": ["none"],
+            },
+            settings=integration_settings,
+            storage=clean_storage,
+            # scan_types=["none"] exercises routing without an embedding scan.
+            embedding_provider=None,  # type: ignore[arg-type]
+        ))
+
+        assert [
+            source["work_id"] for source in result["contextual_sources_referenced"]
+        ] == ["test--link-primary"]
 
 
 # ---------------------------------------------------------------------------

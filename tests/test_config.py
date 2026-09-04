@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from author_library.config import (
     APIKeySettings,
     DatabaseSettings,
@@ -12,9 +14,22 @@ from author_library.config import (
     get_settings,
 )
 
+if TYPE_CHECKING:
+    import pytest
+
 
 class TestDatabaseSettings:
-    def test_defaults(self) -> None:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # tests/conftest.py sets database overrides so the suite never touches
+        # production. Clear all of them so this tests the application's defaults,
+        # including the production graph port (7687), rather than the harness.
+        for name in (
+            "DB_POSTGRES_URL",
+            "DB_NEO4J_URL",
+            "DB_NEO4J_USER",
+            "DB_NEO4J_PASSWORD",
+        ):
+            monkeypatch.delenv(name, raising=False)
         s = DatabaseSettings()
         assert "5432" in s.postgres_url
         assert "7687" in s.neo4j_url
@@ -25,7 +40,12 @@ class TestDatabaseSettings:
 
 
 class TestAPIKeySettings:
-    def test_defaults(self) -> None:
+    def test_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Same reasoning as TestDatabaseSettings.test_defaults: anyone who has
+        # sourced .env (i.e. anyone running the suite normally) has these set,
+        # so reading the ambient environment tested the shell, not the defaults.
+        for var in ("ANTHROPIC_API_KEY", "VOYAGE_API_KEY", "OPENAI_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
         s = APIKeySettings()
         assert s.anthropic_api_key.get_secret_value() == ""
         assert s.voyage_api_key is None

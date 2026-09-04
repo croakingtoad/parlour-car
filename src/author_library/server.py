@@ -231,7 +231,7 @@ TOOLS: list[Tool] = [
                 },
                 "source_class_filter": {
                     "type": "string",
-                    "enum": ["primary", "secondary", "contextual", "tertiary"],
+                    "enum": ["primary", "secondary", "contextual", "tertiary", "reference"],
                     "description": "Optional filter by source class.",
                 },
                 "limit": {
@@ -317,6 +317,7 @@ TOOLS: list[Tool] = [
                         "contextual",
                         "tertiary",
                         "personal",
+                        "reference",
                     ],
                     "description": "Optional filter by source class.",
                 },
@@ -358,7 +359,8 @@ TOOLS: list[Tool] = [
         name="audit_library",
         description=(
             "Run a full library health audit. Checks per-work chunk/embedding/entity "
-            "coverage, PG-Neo4j consistency, theme graph quality, and classification "
+            "coverage, PG-Neo4j work/chunk identity and mirrored Work metadata consistency, "
+            "theme graph quality, and classification "
             "anomalies. Returns overall_status ('healthy'|'warnings'|'errors'), "
             "a per-work breakdown, graph stats, and actionable recommendations."
         ),
@@ -460,7 +462,14 @@ TOOLS: list[Tool] = [
                 },
                 "source_class": {
                     "type": "string",
-                    "enum": ["primary", "secondary", "contextual", "tertiary", "personal"],
+                    "enum": [
+                        "primary",
+                        "secondary",
+                        "contextual",
+                        "tertiary",
+                        "personal",
+                        "reference",
+                    ],
                     "description": "Confirmed source classification.",
                 },
                 "work_type": {
@@ -612,6 +621,7 @@ TOOLS: list[Tool] = [
                                     "contextual",
                                     "tertiary",
                                     "personal",
+                                    "reference",
                                 ],
                             },
                             "description": "Filter by source classification.",

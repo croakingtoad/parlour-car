@@ -12,6 +12,7 @@ import os
 import pytest
 
 from author_library.catalog.classifier import (
+    CLASSIFICATION_SYSTEM_PROMPT,
     SourceClassifier,
     _build_classification_prompt,
     _extract_text_from_tree,
@@ -65,6 +66,13 @@ def _make_document(
 
 
 class TestBuildClassificationPrompt:
+    def test_taxonomy_distinguishes_reference_contextual_and_tertiary(self) -> None:
+        assert "REFERENCE" in CLASSIFICATION_SYSTEM_PROMPT
+        assert '"reference"' in CLASSIFICATION_SYSTEM_PROMPT
+        assert "evidence" in CLASSIFICATION_SYSTEM_PROMPT.lower()
+        assert "no relationship" in CLASSIFICATION_SYSTEM_PROMPT.lower()
+        assert "catalogue-only" in CLASSIFICATION_SYSTEM_PROMPT.lower()
+
     def test_includes_subject_author(self) -> None:
         prompt = _build_classification_prompt(
             subject_author="Malcolm Guite",
@@ -172,6 +180,29 @@ class TestResponseParsing:
         })
         result = classifier._parse_classification_response(response)
         # The ClassificationResult model applies the default-to-secondary rule
+        assert result.source_class == SourceClass.SECONDARY
+        assert "AUTO-DOWNGRADED" in result.reasoning
+
+    def test_parse_reference_classification(self) -> None:
+        classifier = self._get_classifier()
+        response = json.dumps({
+            "source_class": "reference",
+            "confidence": 0.93,
+            "reasoning": "Standalone prosody handbook with no subject-author relationship.",
+            "signals_detected": ["third_party_authorship", "no_author_relationship"],
+        })
+        result = classifier._parse_classification_response(response)
+        assert result.source_class == SourceClass.REFERENCE
+
+    def test_low_confidence_reference_triggers_secondary_default(self) -> None:
+        classifier = self._get_classifier()
+        response = json.dumps({
+            "source_class": "reference",
+            "confidence": 0.6,
+            "reasoning": "Relationship is uncertain.",
+            "signals_detected": [],
+        })
+        result = classifier._parse_classification_response(response)
         assert result.source_class == SourceClass.SECONDARY
         assert "AUTO-DOWNGRADED" in result.reasoning
 
