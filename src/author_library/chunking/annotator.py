@@ -438,10 +438,11 @@ def _reference_annotation(
 ) -> str:
     """Format a neutral REFERENCE annotation without an author relationship claim."""
     topic = llm.get("topic", f"{chunk.granularity.value} chunk")
+    publication_year = _publication_year_label(ctx.publication_year)
 
     lines = [
         f"[REFERENCE: Standalone work by {ctx.author}]",
-        f'From "{ctx.work_title}" ({ctx.publication_year}).',
+        f'From "{ctx.work_title}" ({publication_year}).',
     ]
     if ctx.chapter_number and ctx.chapter_title:
         lines.append(f'Chapter {ctx.chapter_number}: "{ctx.chapter_title}".')

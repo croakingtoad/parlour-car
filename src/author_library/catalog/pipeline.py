@@ -221,10 +221,40 @@ class ClassificationPipeline:
         overrides: dict[str, Any],
     ) -> CatalogEntry:
         """Build the appropriate CatalogEntry subclass based on classification."""
-        # Core fields shared across all classes
-        core = self._extract_core_fields(document, classification, overrides)
-
         source_class = classification.source_class
+        reference_metadata: dict[str, str] = {}
+
+        if source_class == SourceClass.REFERENCE:
+            # Reference fields are mandatory source identity. Validate them before
+            # generating a work_id so missing metadata consistently raises the
+            # public ClassificationError contract rather than a raw ID error.
+            try:
+                reference_metadata = {
+                    "external_author": self._required_reference_metadata(
+                        "external_author",
+                        overrides.get("external_author", document.metadata.author),
+                    ),
+                    "reference_type": self._required_reference_metadata(
+                        "reference_type", overrides.get("reference_type")
+                    ),
+                    "subject_domain": self._required_reference_metadata(
+                        "subject_domain", overrides.get("subject_domain")
+                    ),
+                }
+            except Exception as exc:
+                raise ClassificationError(
+                    f"Failed to build catalog entry: {exc}",
+                    context={
+                        "source_class": source_class,
+                        "title": document.metadata.title,
+                    },
+                    cause=exc,
+                ) from exc
+
+        # Keep core-field error behavior unchanged for every class. Reference
+        # metadata was checked above solely because it is required before ID
+        # generation can safely begin.
+        core = self._extract_core_fields(document, classification, overrides)
 
         try:
             if source_class == SourceClass.PRIMARY:
@@ -286,18 +316,7 @@ class ClassificationPipeline:
             elif source_class == SourceClass.REFERENCE:
                 return ReferenceCatalogEntry(
                     **core,
-                    external_author=self._required_reference_metadata(
-                        "external_author",
-                        overrides.get("external_author", document.metadata.author),
-                    ),
-                    reference_type=self._required_reference_metadata(
-                        "reference_type",
-                        overrides.get("reference_type"),
-                    ),
-                    subject_domain=self._required_reference_metadata(
-                        "subject_domain",
-                        overrides.get("subject_domain"),
-                    ),
+                    **reference_metadata,
                 )
             else:
                 # Personal

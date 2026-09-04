@@ -22,6 +22,21 @@ WORK_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+
 WORK_ID_MAX_LENGTH = 128
 
 
+def validate_work_id(value: str) -> str:
+    """Validate a catalog work identifier against the production schema rules."""
+    if len(value) > WORK_ID_MAX_LENGTH:
+        msg = f"work_id must be at most {WORK_ID_MAX_LENGTH} characters, got {len(value)}"
+        raise ValueError(msg)
+    if not WORK_ID_PATTERN.match(value):
+        msg = (
+            "work_id must be lowercase alphanumeric with hyphens, "
+            "author-slug and title-slug separated by double-hyphen (--). "
+            f"Got: {value!r}"
+        )
+        raise ValueError(msg)
+    return value
+
+
 class SourceClass(StrEnum):
     """Source classification hierarchy."""
 
@@ -215,17 +230,7 @@ class CatalogEntry(BaseModel):
     @field_validator("work_id")
     @classmethod
     def validate_work_id(cls, v: str) -> str:
-        if len(v) > WORK_ID_MAX_LENGTH:
-            msg = f"work_id must be at most {WORK_ID_MAX_LENGTH} characters, got {len(v)}"
-            raise ValueError(msg)
-        if not WORK_ID_PATTERN.match(v):
-            msg = (
-                "work_id must be lowercase alphanumeric with hyphens, "
-                "author-slug and title-slug separated by double-hyphen (--). "
-                f"Got: {v!r}"
-            )
-            raise ValueError(msg)
-        return v
+        return validate_work_id(v)
 
     @field_validator("genre_tags")
     @classmethod

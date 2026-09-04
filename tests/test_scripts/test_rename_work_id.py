@@ -112,7 +112,6 @@ class StatefulPg:
                 "table_name": child.table,
                 "column_name": child.column,
                 "is_deferrable": True,
-                "on_update": "a",
             }
             for child in _children()
         ]
@@ -141,6 +140,11 @@ class StatefulStorage:
     def __init__(self, *, fail_on: str) -> None:
         self.pg = StatefulPg(fail_on=fail_on)
         self.neo4j = StatefulNeo4j()
+
+
+class StoreAccessForbidden:
+    def __getattr__(self, name: str) -> Any:
+        raise AssertionError(f"store access must not occur for invalid replacement IDs: {name}")
 
 
 def _children() -> list[Any]:
@@ -293,7 +297,7 @@ async def test_already_renamed_is_noop_without_writes(monkeypatch: pytest.Monkey
         return children
 
     async def fake_collect(_storage: Any, work_id: str, *args: Any, **kwargs: Any) -> Any:
-        return empty if work_id == "old" else completed
+        return empty if work_id == "author--old" else completed
 
     async def scoped_clean(*args: Any, **kwargs: Any) -> None:
         return None
@@ -305,4 +309,19 @@ async def test_already_renamed_is_noop_without_writes(monkeypatch: pytest.Monkey
     monkeypatch.setattr(rename, "collect_counts", fake_collect)
     monkeypatch.setattr(rename, "_assert_scoped_chunk_identity", scoped_clean)
     monkeypatch.setattr(rename, "_global_consistency_report", global_report)
-    assert await rename.run(FakeStorage(), "old", "new", execute=True) == 0
+    assert await rename.run(FakeStorage(), "author--old", "author--new", execute=True) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("new_id", "message"),
+    [
+        ("Invalid--work-id", "lowercase alphanumeric"),
+        (f"author--{'a' * 121}", "at most 128 characters"),
+    ],
+)
+async def test_invalid_replacement_work_id_is_rejected_before_store_access(
+    new_id: str, message: str
+) -> None:
+    with pytest.raises(rename.RenameError, match=message):
+        await rename.run(StoreAccessForbidden(), "author--old", new_id, execute=False)

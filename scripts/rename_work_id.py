@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from author_library.catalog.models import validate_work_id
+
 
 class RenameError(RuntimeError):
     """The requested rename cannot be performed safely."""
@@ -36,7 +38,6 @@ class PgChildTable:
     table: str
     column: str
     is_deferrable: bool = False
-    on_update: str = "a"
 
     @property
     def display_name(self) -> str:
@@ -82,8 +83,7 @@ CHILD_TABLES_SQL = """
 SELECT child_ns.nspname AS schema_name,
        child.relname AS table_name,
        child_attr.attname AS column_name,
-       con.condeferrable AS is_deferrable,
-       con.confupdtype AS on_update
+       con.condeferrable AS is_deferrable
 FROM pg_constraint AS con
 JOIN pg_class AS parent ON parent.oid = con.confrelid
 JOIN pg_namespace AS parent_ns ON parent_ns.oid = parent.relnamespace
@@ -193,7 +193,6 @@ async def discover_child_tables(pg: Any) -> list[PgChildTable]:
             table=str(_row_value(row, "table_name")),
             column=str(_row_value(row, "column_name")),
             is_deferrable=bool(_row_value(row, "is_deferrable")),
-            on_update=str(_row_value(row, "on_update")),
         )
         for row in rows
     ]
@@ -566,6 +565,10 @@ def _is_completed_noop(source: StoreCounts, target: StoreCounts) -> bool:
 async def run(storage: Storage, old_id: str, new_id: str, *, execute: bool) -> int:
     if old_id == new_id:
         raise RenameError("--from and --to must differ")
+    try:
+        validate_work_id(new_id)
+    except ValueError as exc:
+        raise RenameError(f"invalid replacement work_id: {exc}") from exc
     children = await discover_child_tables(storage.pg)
     source = await collect_counts(storage, old_id, children)
     target = await collect_counts(storage, new_id, children)
