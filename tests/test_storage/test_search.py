@@ -163,6 +163,14 @@ async def test_fulltext_search_with_work_metadata_filters(
     results = await search_fulltext(
         pg_pool,
         "imagination",
+        subject_headings_filter=["poetry"],
+        genre_tags_filter=["sermon"],
+    )
+    assert results == []
+
+    results = await search_fulltext(
+        pg_pool,
+        "imagination",
         subject_headings_filter=["quantum mechanics"],
     )
     assert results == []

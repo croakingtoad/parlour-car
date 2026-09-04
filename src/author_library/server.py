@@ -299,7 +299,8 @@ TOOLS: list[Tool] = [
         description=(
             "List the works catalog for an author, optionally filtered by "
             "source class or subject heading. Includes metadata, genre tags, "
-            "subject headings, and source-class-specific fields."
+            "subject headings, and source-class-specific fields. When both "
+            "filters are provided, they combine with AND semantics."
         ),
         inputSchema={
             "type": "object",
@@ -658,7 +659,9 @@ TOOLS: list[Tool] = [
                             "description": "Filter by engagement pass.",
                         },
                     },
-                    "description": "Search filters.",
+                    "description": (
+                        "Search filters. Different filter types combine with AND semantics."
+                    ),
                 },
                 "include_personal": {
                     "type": "boolean",
