@@ -90,6 +90,38 @@ async def get_per_work_details(pg: "PostgresPool") -> list[dict[str, Any]]:
     return result
 
 
+async def get_per_work_theme_counts(neo4j: "Neo4jConnection") -> dict[str, Any]:
+    """Return per-work theme counts and an error state when Neo4j is unavailable.
+
+    This intentionally aggregates the graph once for the whole dashboard
+    rather than making one Neo4j request for every PostgreSQL work row.
+    """
+    result: dict[str, Any] = {"error": None, "theme_counts": {}}
+    try:
+        rows = await neo4j.execute_read(
+            """
+            MATCH (c:Chunk)-[:EXPLORES_THEME]->(t:Theme)
+            WHERE c.work_id IS NOT NULL
+            RETURN c.work_id AS work_id,
+                   count(DISTINCT c) AS themed_chunk_count,
+                   count(DISTINCT t) AS distinct_theme_count
+            """
+        )
+    except Exception as exc:
+        log.warning("per_work_theme_counts_neo4j_failed", error=str(exc))
+        result["error"] = str(exc)
+        return result
+
+    result["theme_counts"] = {
+        row["work_id"]: {
+            "themed_chunk_count": row["themed_chunk_count"],
+            "distinct_theme_count": row["distinct_theme_count"],
+        }
+        for row in rows
+    }
+    return result
+
+
 async def get_graph_stats(neo4j: "Neo4jConnection") -> dict[str, Any]:
     """Node/edge counts and top shared themes from Neo4j."""
     stats: dict[str, Any] = {"error": None}
