@@ -51,13 +51,22 @@ async def handle_stats(request: Request) -> JSONResponse:
     """Return all library stats as JSON."""
     storage = _storage(request)
     try:
-        library, works, graph, theme_counts = await asyncio.gather(
+        library, works, graph, theme_count_result = await asyncio.gather(
             get_library_overview(storage.pg),
             get_per_work_details(storage.pg),
             get_graph_stats(storage.neo4j),
             get_per_work_theme_counts(storage.neo4j),
         )
+        theme_counts = theme_count_result["theme_counts"]
+        theme_coverage_available = theme_count_result["error"] is None
         for work in works:
+            work["theme_coverage_available"] = theme_coverage_available
+            if not theme_coverage_available:
+                work["themed_chunk_count"] = None
+                work["distinct_theme_count"] = None
+                work["theme_coverage_pct"] = None
+                continue
+
             counts = theme_counts.get(work["work_id"], {})
             themed_chunks = counts.get("themed_chunk_count", 0)
             chunk_count = work["chunk_count"] or 0

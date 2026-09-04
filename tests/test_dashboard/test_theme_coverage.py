@@ -1,12 +1,16 @@
 """Unit tests for graph-wide theme coverage in dashboard stats."""
 
 import json
+from typing import TYPE_CHECKING, cast
 
 from starlette.applications import Starlette
 from starlette.requests import Request
 
 from author_library.dashboard.endpoint import handle_stats
 from author_library.dashboard.queries import get_per_work_theme_counts
+
+if TYPE_CHECKING:
+    from author_library.storage.neo4j import Neo4jConnection
 
 
 class FakeNeo4j:
@@ -37,13 +41,13 @@ class FakePostgres:
     async def fetch_one(self, query: str) -> dict[str, object]:
         if "FROM works" in query:
             return {
-                "total_works": 2,
+                "total_works": 3,
                 "primary_works": 0,
                 "secondary_works": 0,
                 "contextual_works": 0,
                 "tertiary_works": 0,
                 "personal_works": 0,
-                "reference_works": 2,
+                "reference_works": 3,
                 "total_words": 0,
                 "unique_authors": 1,
                 "last_ingestion_date": None,
@@ -79,14 +83,35 @@ class FakePostgres:
                 "chunk_count": 6,
                 "embedded_count": 6,
             },
+            {
+                "work_id": "test--without-chunks",
+                "title": "Empty Work",
+                "author": "Test Author",
+                "source_class": "reference",
+                "ingestion_date": "2026-09-03",
+                "classification_confidence": 1.0,
+                "chunk_count": 0,
+                "embedded_count": 0,
+            },
         ]
 
 
+class FailingNeo4j:
+    """Neo4j fake that makes every graph read unavailable."""
+
+    async def execute_read(self, query: str, parameters: object = None) -> list[dict[str, object]]:
+        del query, parameters
+        raise RuntimeError("Neo4j is unavailable")
+
+
 async def test_theme_counts_use_one_graph_wide_aggregate() -> None:
-    result = await get_per_work_theme_counts(FakeNeo4j())  # type: ignore[arg-type]
+    result = await get_per_work_theme_counts(cast("Neo4jConnection", FakeNeo4j()))
 
     assert result == {
-        "test--with-themes": {"themed_chunk_count": 94, "distinct_theme_count": 12}
+        "error": None,
+        "theme_counts": {
+            "test--with-themes": {"themed_chunk_count": 94, "distinct_theme_count": 12}
+        },
     }
 
 
@@ -112,5 +137,37 @@ async def test_stats_merges_theme_coverage_and_preserves_zero_theme_works() -> N
 
     assert works["test--with-themes"]["theme_coverage_pct"] == 94.0
     assert works["test--with-themes"]["distinct_theme_count"] == 12
+    assert works["test--with-themes"]["theme_coverage_available"] is True
     assert works["test--without-themes"]["theme_coverage_pct"] == 0.0
     assert works["test--without-themes"]["distinct_theme_count"] == 0
+    assert works["test--without-themes"]["theme_coverage_available"] is True
+    assert works["test--without-chunks"]["theme_coverage_pct"] == 0.0
+    assert works["test--without-chunks"]["distinct_theme_count"] == 0
+    assert works["test--without-chunks"]["theme_coverage_available"] is True
+
+
+async def test_stats_marks_theme_coverage_unavailable_when_neo4j_fails() -> None:
+    app = Starlette()
+    app.state.dashboard_state = {
+        "storage": type("Storage", (), {"pg": FakePostgres(), "neo4j": FailingNeo4j()})()
+    }
+    request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/dashboard/stats",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "server": ("testserver", 80),
+        "client": ("testclient", 50000),
+        "app": app,
+    })
+
+    response = await handle_stats(request)
+    works = json.loads(response.body)["works"]
+
+    assert response.status_code == 200
+    assert all(work["theme_coverage_available"] is False for work in works)
+    assert all(work["theme_coverage_pct"] is None for work in works)
+    assert all(work["themed_chunk_count"] is None for work in works)
+    assert all(work["distinct_theme_count"] is None for work in works)
