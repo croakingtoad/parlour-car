@@ -26,6 +26,8 @@ async def keyword_search(
     *,
     source_class_filter: str | None = None,
     work_filter: str | None = None,
+    subject_headings_filter: list[str] | None = None,
+    genre_tags_filter: list[str] | None = None,
     limit: int = 20,
 ) -> list[RetrievalResult]:
     """Run full-text keyword search with ts_rank scoring.
@@ -35,6 +37,8 @@ async def keyword_search(
         query: Natural-language search query.
         source_class_filter: Optional filter on source_class.
         work_filter: Optional filter on work_id.
+        subject_headings_filter: Match works with any requested subject heading.
+        genre_tags_filter: Match works with any requested genre tag.
         limit: Maximum number of results.
 
     Returns:
@@ -49,6 +53,8 @@ async def keyword_search(
             query,
             source_class_filter=source_class_filter,
             work_filter=work_filter,
+            subject_headings_filter=subject_headings_filter,
+            genre_tags_filter=genre_tags_filter,
             limit=limit,
         )
     except Exception as exc:

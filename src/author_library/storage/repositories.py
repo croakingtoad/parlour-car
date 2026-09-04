@@ -131,6 +131,8 @@ class EmbeddingRepository(ABC):
         model: str,
         limit: int = 20,
         source_class_filter: str | None = None,
+        subject_headings_filter: list[str] | None = None,
+        genre_tags_filter: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Find chunks similar to the query embedding using cosine distance."""
 
@@ -564,6 +566,8 @@ class PgEmbeddingRepository(EmbeddingRepository):
         model: str,
         limit: int = 20,
         source_class_filter: str | None = None,
+        subject_headings_filter: list[str] | None = None,
+        genre_tags_filter: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
         conditions = [
@@ -576,6 +580,16 @@ class PgEmbeddingRepository(EmbeddingRepository):
         if source_class_filter is not None:
             conditions.append(f"c.source_class = ${idx}")
             params.append(source_class_filter)
+            idx += 1
+
+        if subject_headings_filter:
+            conditions.append(f"w.subject_headings && ${idx}::text[]")
+            params.append(subject_headings_filter)
+            idx += 1
+
+        if genre_tags_filter:
+            conditions.append(f"w.genre_tags && ${idx}::text[]")
+            params.append(genre_tags_filter)
             idx += 1
 
         params.append(limit)
@@ -594,6 +608,9 @@ class PgEmbeddingRepository(EmbeddingRepository):
                 (ce.embedding <=> $1::vector) AS distance
             FROM chunk_embeddings ce
             JOIN chunks c ON c.id = ce.chunk_id
+            -- Work metadata is editable; keep one source of truth instead of
+            -- denormalizing it onto every chunk.
+            JOIN works w ON w.work_id = c.work_id
             WHERE {where}
             ORDER BY ce.embedding <=> $1::vector
             LIMIT ${idx}

@@ -298,7 +298,8 @@ TOOLS: list[Tool] = [
         name="list_works",
         description=(
             "List the works catalog for an author, optionally filtered by "
-            "source class. Includes metadata, genre tags, and source-class-specific fields."
+            "source class or subject heading. Includes metadata, genre tags, "
+            "subject headings, and source-class-specific fields."
         ),
         inputSchema={
             "type": "object",
@@ -309,8 +310,22 @@ TOOLS: list[Tool] = [
                 },
                 "source_class": {
                     "type": "string",
-                    "enum": ["primary", "secondary", "contextual", "tertiary"],
+                    "enum": [
+                        "primary",
+                        "secondary",
+                        "contextual",
+                        "tertiary",
+                        "personal",
+                    ],
                     "description": "Optional filter by source class.",
+                },
+                "subject_headings": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Filter by subject heading. Multiple values use OR semantics: "
+                        "a work matching any requested heading is included."
+                    ),
                 },
             },
             "required": ["author_id"],
@@ -604,6 +619,22 @@ TOOLS: list[Tool] = [
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "Limit to specific works.",
+                        },
+                        "subject_headings": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Filter by work subject heading. Multiple values use OR "
+                                "semantics: a work matching any requested heading is included."
+                            ),
+                        },
+                        "genre_tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Filter by work genre tag. Multiple values use OR semantics: "
+                                "a work matching any requested tag is included."
+                            ),
                         },
                         "speaker": {
                             "type": "string",

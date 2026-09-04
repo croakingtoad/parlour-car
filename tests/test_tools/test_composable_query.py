@@ -125,6 +125,49 @@ class TestHandleSearchChunksValidation:
             )
 
 
+class TestSearchChunksWorkMetadataFilters:
+    """Work metadata filters reach both retrieval paths."""
+
+    async def test_filters_are_passed_to_vector_and_fulltext_search(self) -> None:
+        storage = _make_storage_mock()
+
+        with (
+            patch(
+                "author_library.tools.composable_query.vector_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as vector_mock,
+            patch(
+                "author_library.tools.composable_query.keyword_search",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as keyword_mock,
+            patch(
+                "author_library.tools.composable_query.GraphQueryService",
+                return_value=_make_graph_service_mock(),
+            ),
+        ):
+            await handle_search_chunks(
+                {
+                    "query": "prosody",
+                    "filters": {
+                        "subject_headings": ["Prosody", "Poetics"],
+                        "genre_tags": ["poetry", "criticism"],
+                    },
+                    "include_passage_links": False,
+                },
+                settings=None,  # type: ignore[arg-type]
+                storage=storage,
+                embedding_provider=MagicMock(),
+            )
+
+        vector_kwargs = vector_mock.await_args.kwargs
+        keyword_kwargs = keyword_mock.await_args.kwargs
+        assert vector_kwargs["subject_headings_filter"] == ["Prosody", "Poetics"]
+        assert vector_kwargs["genre_tags_filter"] == ["poetry", "criticism"]
+        assert keyword_kwargs["subject_headings_filter"] == ["Prosody", "Poetics"]
+        assert keyword_kwargs["genre_tags_filter"] == ["poetry", "criticism"]
+
 class TestHandleGetPassageLinksValidation:
     """Validate required argument checks for get_passage_links."""
 

@@ -72,6 +72,22 @@ SAMPLE_CHUNKS: list[dict[str, Any]] = [
     },
 ]
 
+SECOND_WORK: dict[str, Any] = {
+    **SAMPLE_WORK,
+    "work_id": "test--critic--poetic-imagination",
+    "title": "Poetic Imagination",
+    "author": "test--critic",
+    "source_class": "tertiary",
+}
+
+SECOND_CHUNK: dict[str, Any] = {
+    "work_id": SECOND_WORK["work_id"],
+    "text": "This reference traces imagination through several schools of poetry.",
+    "granularity": "meso",
+    "source_class": "tertiary",
+    "position": 1,
+}
+
 
 async def _seed_data(pool: PostgresPool) -> None:
     """Insert author, work, and chunks for search tests."""
@@ -82,10 +98,12 @@ async def _seed_data(pool: PostgresPool) -> None:
     )
     work_repo = PgWorkRepository(pool)
     await work_repo.create(SAMPLE_WORK)
+    await work_repo.create(SECOND_WORK)
 
     chunk_repo = PgChunkRepository(pool)
     for chunk in SAMPLE_CHUNKS:
         await chunk_repo.create(chunk)
+    await chunk_repo.create(SECOND_CHUNK)
 
 
 # -- Tests -------------------------------------------------------------------
@@ -120,6 +138,34 @@ async def test_fulltext_search_with_filters(pg_pool: PostgresPool) -> None:
         pg_pool, "imagination", source_class_filter="secondary"
     )
     assert len(results) == 0
+
+
+async def test_fulltext_search_with_work_metadata_filters(
+    pg_pool: PostgresPool,
+) -> None:
+    """Work metadata filters match any requested array value."""
+    await run_migrations(pg_pool)
+    await _seed_data(pg_pool)
+
+    results = await search_fulltext(
+        pg_pool,
+        "imagination",
+        subject_headings_filter=["missing", "poetry"],
+        genre_tags_filter=["missing", "theology"],
+    )
+    assert len(results) == 3
+    assert {result.source_class for result in results} == {"primary", "tertiary"}
+    assert {result.work_id for result in results} == {
+        SAMPLE_WORK["work_id"],
+        SECOND_WORK["work_id"],
+    }
+
+    results = await search_fulltext(
+        pg_pool,
+        "imagination",
+        subject_headings_filter=["quantum mechanics"],
+    )
+    assert results == []
 
 
 async def test_phrase_search(pg_pool: PostgresPool) -> None:

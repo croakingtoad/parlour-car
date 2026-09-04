@@ -49,7 +49,7 @@ async def handle_search_chunks(
     Arguments:
         query (str): Search query.
         filters (dict, optional): source_class[], work_ids[], speaker, granularity[],
-            themes[], pass_number.
+            themes[], pass_number, subject_headings[], genre_tags[].
         include_personal (bool, optional): Include Personal source class (default true).
         max_results (int, optional): Maximum results (default 10).
         include_passage_links (bool, optional): Include passage links (default true).
@@ -73,6 +73,8 @@ async def handle_search_chunks(
     pass_number_filter = filters.get("pass_number")  # int or None
     speaker_filter = filters.get("speaker")  # str or None
     themes_filter = filters.get("themes")  # list[str] or None
+    subject_headings_filter = filters.get("subject_headings")  # list[str] or None
+    genre_tags_filter = filters.get("genre_tags")  # list[str] or None
 
     # Build source class filter string for search functions
     # If multiple source classes given, we'll filter post-search
@@ -102,6 +104,8 @@ async def handle_search_chunks(
             source_class_filter=sc_filter_str,
             work_id_filter=work_filter_str,
             granularity_filter=gran_filter_str,
+            subject_headings_filter=subject_headings_filter,
+            genre_tags_filter=genre_tags_filter,
         )
     )
     keyword_task = asyncio.create_task(
@@ -110,6 +114,8 @@ async def handle_search_chunks(
             query,
             source_class_filter=sc_filter_str,
             work_filter=work_filter_str,
+            subject_headings_filter=subject_headings_filter,
+            genre_tags_filter=genre_tags_filter,
             limit=max_results * 2,
         )
     )

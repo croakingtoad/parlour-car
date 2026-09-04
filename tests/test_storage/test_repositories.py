@@ -176,6 +176,26 @@ async def test_embedding_store_and_search(pg_pool: PostgresPool) -> None:
     assert len(results) == 1
     assert results[0]["chunk_id"] == chunk_id
 
+    # Work metadata stays normalized on works; multiple values use OR semantics.
+    results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=["missing", "poetry"],
+        genre_tags_filter=["missing", "theology"],
+        limit=5,
+    )
+    assert len(results) == 1
+
+    results = await emb_repo.similarity_search(
+        query_emb,
+        provider="voyage",
+        model="voyage-3-large",
+        subject_headings_filter=["quantum mechanics"],
+        limit=5,
+    )
+    assert results == []
+
 
 # -- Annotation Roundtrip Tests -----------------------------------------------
 

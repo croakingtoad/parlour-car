@@ -150,6 +150,7 @@ async def handle_list_works(
     Arguments:
         author_id (str): The author's slug identifier.
         source_class (str, optional): Filter by source class.
+        subject_headings (list[str], optional): Match any requested subject heading.
 
     Returns:
         JSON with works catalog for the author.
@@ -159,11 +160,20 @@ async def handle_list_works(
         raise RetrievalError("author_id is required", context={"arguments": arguments})
 
     source_class_filter = arguments.get("source_class")
+    subject_headings_filter = arguments.get("subject_headings")
 
     works = await storage.works.list_by_author(author_id)
 
     if source_class_filter:
         works = [w for w in works if w.get("source_class") == source_class_filter]
+
+    if subject_headings_filter:
+        requested_headings = set(subject_headings_filter)
+        works = [
+            w
+            for w in works
+            if requested_headings.intersection(w.get("subject_headings", []))
+        ]
 
     catalog: list[dict[str, Any]] = []
     for w in works:
@@ -176,6 +186,7 @@ async def handle_list_works(
             "format_ingested": w.get("format_ingested", ""),
             "word_count": w.get("word_count", 0),
             "genre_tags": w.get("genre_tags", []),
+            "subject_headings": w.get("subject_headings", []),
         }
 
         # Add source-class-specific metadata
@@ -198,6 +209,7 @@ async def handle_list_works(
         "author_id": author_id,
         "total_works": len(catalog),
         "filter": source_class_filter,
+        "subject_headings_filter": subject_headings_filter,
         "works": catalog,
     }, indent=2)
 
