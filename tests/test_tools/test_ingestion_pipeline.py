@@ -2,13 +2,140 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from structlog.testing import capture_logs
 
 from author_library.tools.ingestion_pipeline import IngestionPipeline, IngestionResult
+
+
+class TestCanonicalChunkIds:
+    """Ensure full ingestion uses only PostgreSQL-returned chunk IDs downstream."""
+
+    async def test_pg_ids_reach_graph_extraction_and_linking(self) -> None:
+        from author_library.catalog.models import ProcessingRoute, SourceClass
+        from author_library.chunking.models import Chunk, ChunkGranularity
+
+        canonical_id = UUID("11111111-1111-4111-8111-111111111111")
+        stored_chunk = Chunk(
+            id="provisional-stored",
+            text="Stored chunk text",
+            granularity=ChunkGranularity.MACRO,
+            work_id="author--work",
+            source_class="primary",
+            position=0,
+        )
+        failed_chunk = Chunk(
+            id="provisional-failed",
+            text="Failed chunk text",
+            granularity=ChunkGranularity.MACRO,
+            work_id="author--work",
+            source_class="primary",
+            position=1,
+        )
+
+        document = MagicMock()
+        document.metadata.title = "Work"
+        document.metadata.word_count = 10
+        document.format = "txt"
+
+        catalog_entry = MagicMock()
+        catalog_entry.work_id = "author--work"
+        catalog_entry.title = "Work"
+        catalog_entry.author = "Author"
+        catalog_entry.publication_year = 2026
+        catalog_entry.genre_tags = ["essay"]
+        pipeline_result = SimpleNamespace(
+            catalog_entry=catalog_entry,
+            classification=SimpleNamespace(source_class=SourceClass.PRIMARY),
+            processing_route=ProcessingRoute.FULL_ENRICHMENT,
+        )
+
+        storage = MagicMock()
+        storage.pg = AsyncMock()
+        storage.neo4j = AsyncMock()
+        storage.graph = AsyncMock()
+        storage.graph.delete_chunks_for_work.return_value = 0
+        storage.chunks = AsyncMock()
+        storage.chunks.get_max_pass_number.return_value = 0
+        storage.chunks.delete_by_work.return_value = 0
+        storage.chunks.create.side_effect = [canonical_id, RuntimeError("PG failed")]
+        storage.works = AsyncMock()
+        storage.embeddings = AsyncMock()
+
+        embedding = AsyncMock()
+        embedding.embed_batch.return_value = SimpleNamespace(vectors=[[0.1, 0.2]])
+        embedding.provider_name = "test"
+        embedding.model_name = "test-model"
+        embedding.dimensions = 2
+
+        settings = MagicMock()
+        settings.llm.entity_extraction_granularities = "macro"
+
+        strategy = MagicMock()
+        strategy.chunk.return_value = [stored_chunk, failed_chunk]
+        annotator = AsyncMock()
+        annotator.annotate_chunks.return_value = [stored_chunk, failed_chunk]
+        extractor = AsyncMock()
+        extractor.extract_and_persist.return_value = SimpleNamespace(
+            nodes_created=0,
+            edges_created=0,
+            errors=[],
+        )
+
+        with (
+            patch(
+                "author_library.tools.ingestion_pipeline.ClassificationPipeline"
+            ) as classification_cls,
+            patch(
+                "author_library.tools.ingestion_pipeline.get_chunking_strategy",
+                return_value=strategy,
+            ),
+            patch(
+                "author_library.tools.ingestion_pipeline.ChunkAnnotator",
+                return_value=annotator,
+            ),
+            patch(
+                "author_library.tools.ingestion_pipeline.EntityExtractor",
+                return_value=extractor,
+            ),
+            patch(
+                "author_library.graph.theme_dedup.deduplicate_themes",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(
+                    merged_count=0,
+                    original_count=0,
+                    canonical_count=0,
+                    errors=[],
+                ),
+            ),
+        ):
+            classification_cls.return_value.process = AsyncMock(return_value=pipeline_result)
+            pipeline = IngestionPipeline(
+                settings=settings,
+                storage=storage,
+                embedding_provider=embedding,
+            )
+            pipeline._create_passage_links = AsyncMock(return_value=0)
+            pipeline._surface_connections = AsyncMock(return_value=None)
+            pipeline._run_quality_checks = AsyncMock(return_value={"status": "pass"})
+
+            await pipeline.ingest_document(document, subject_author_id="author")
+
+        graph_chunks = [
+            call.args[0]["chunk_id"] for call in storage.graph.upsert_chunk_node.await_args_list
+        ]
+        extraction_chunks = extractor.extract_and_persist.await_args.args[0]
+        linking_chunks = pipeline._create_passage_links.await_args.args[0]
+
+        assert graph_chunks == [str(canonical_id)]
+        assert [chunk.id for chunk in extraction_chunks] == [str(canonical_id)]
+        assert [chunk.id for chunk in linking_chunks] == [str(canonical_id)]
+        assert storage.embeddings.store.await_args.args[0] == canonical_id
 
 
 class TestIngestionResult:

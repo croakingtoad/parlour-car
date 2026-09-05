@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
 import structlog
 
@@ -35,8 +34,11 @@ from author_library.graph.linking_implicit import ImplicitEngagementDetector
 from author_library.graph.linking_thematic import ThematicParallelDetector
 from author_library.parsing import get_parser
 from author_library.parsing.models import SectionType
+from author_library.tools.chunk_persistence import canonicalize_stored_chunks
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from author_library.cache import CacheManager
     from author_library.chunking.models import Chunk
     from author_library.config import Settings
@@ -548,12 +550,12 @@ async def handle_chunk_source(
     )
 
     errors: list[str] = []
-    chunk_id_map: dict[str, UUID] = {}
+    provisional_to_pg_id: dict[str, UUID] = {}
     pg_chunk_errors = 0
     for chunk in sorted_chunks:
         resolved_parent: UUID | None = None
         if chunk.parent_chunk_id is not None:
-            resolved_parent = chunk_id_map.get(chunk.parent_chunk_id)
+            resolved_parent = provisional_to_pg_id.get(chunk.parent_chunk_id)
 
         metadata = dict(chunk.metadata)
         metadata["section_type"] = chunk.section_type
@@ -575,7 +577,7 @@ async def handle_chunk_source(
         }
         try:
             pg_id = await storage.chunks.create(chunk_data)
-            chunk_id_map[chunk.id] = pg_id
+            provisional_to_pg_id[chunk.id] = pg_id
         except Exception as exc:
             pg_chunk_errors += 1
             if pg_chunk_errors <= 3:
@@ -597,13 +599,18 @@ async def handle_chunk_source(
         log.error(
             "pg_chunk_store_summary",
             work_id=work_id,
-            stored=len(chunk_id_map),
+            stored=len(provisional_to_pg_id),
             failed=pg_chunk_errors,
             total=len(sorted_chunks),
         )
         errors.append(
             f"PG chunk storage: {pg_chunk_errors}/{len(sorted_chunks)} chunks failed"
         )
+
+    chunks, chunk_id_map = canonicalize_stored_chunks(
+        chunks,
+        provisional_to_pg_id,
+    )
 
     # Update engagement_passes on the work record
     await storage.works.update(work_id, {"engagement_passes": pass_number})

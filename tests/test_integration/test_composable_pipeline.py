@@ -486,6 +486,13 @@ class TestChunkSource:
             # Verify chunks exist in PG
             all_chunks = await clean_storage.chunks.list_by_work(work_id)
             assert len(all_chunks) > 0, "No chunks found in PG after chunk_source"
+            pg_chunk_ids = {str(chunk["id"]) for chunk in all_chunks}
+            graph_chunks = await clean_storage.neo4j.execute_read(
+                "MATCH (c:Chunk {work_id: $wid}) RETURN c.chunk_id AS chunk_id",
+                {"wid": work_id},
+            )
+            graph_chunk_ids = {row["chunk_id"] for row in graph_chunks}
+            assert graph_chunk_ids == pg_chunk_ids
 
         finally:
             temp_path.unlink(missing_ok=True)

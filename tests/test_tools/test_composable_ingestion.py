@@ -7,8 +7,10 @@ error handling, and edge cases without needing live database connections.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 
@@ -171,7 +173,7 @@ class TestHandleCatalogSourceValidation:
             format="txt",
             metadata=DocumentMetadata(
                 title="Faith, Hope and Poetry",
-                author="Malcolm Guite",
+                author="Test",
                 publisher="Ashgate",
                 publication_date="2012",
                 word_count=4,
@@ -200,7 +202,7 @@ class TestHandleCatalogSourceValidation:
                 "source_class": "primary",
                 "work_type": "monograph",
                 "metadata_overrides": {
-                    "subject_author_id": "malcolm-guite",
+                    "subject_author_id": "test",
                     "subject_headings": ["Christian Poetry"],
                 },
             },
@@ -235,6 +237,122 @@ class TestHandleChunkSourceValidation:
                 storage=None,  # type: ignore[arg-type]
                 embedding_provider=None,  # type: ignore[arg-type]
             )
+
+
+class TestCanonicalChunkIds:
+    """Ensure chunk_source uses only PostgreSQL-returned IDs downstream."""
+
+    async def test_pg_ids_reach_graph_and_entity_extraction(self, tmp_path) -> None:
+        from author_library.chunking.models import Chunk, ChunkGranularity
+
+        canonical_id = UUID("22222222-2222-4222-8222-222222222222")
+        stored_chunk = Chunk(
+            id="provisional-stored",
+            text="Stored chunk text",
+            granularity=ChunkGranularity.MACRO,
+            work_id="author--work",
+            source_class="primary",
+            position=0,
+        )
+        failed_chunk = Chunk(
+            id="provisional-failed",
+            text="Failed chunk text",
+            granularity=ChunkGranularity.MACRO,
+            work_id="author--work",
+            source_class="primary",
+            position=1,
+        )
+        source_path = tmp_path / "work.txt"
+        source_path.write_text("Work text")
+
+        storage = MagicMock()
+        storage.works = AsyncMock()
+        storage.works.get.return_value = {
+            "work_id": "author--work",
+            "title": "Work",
+            "author": "Author",
+            "source_class": "primary",
+            "genre_tags": ["essay"],
+            "source_metadata": {"file_path": str(source_path)},
+        }
+        storage.chunks = AsyncMock()
+        storage.chunks.get_max_pass_number.return_value = 0
+        storage.chunks.delete_by_work.return_value = 0
+        storage.chunks.create.side_effect = [canonical_id, RuntimeError("PG failed")]
+        storage.graph = AsyncMock()
+        storage.graph.delete_chunks_for_work.return_value = 0
+        storage.neo4j = AsyncMock()
+        storage.embeddings = AsyncMock()
+
+        embedding = AsyncMock()
+        embedding.embed_batch.return_value = SimpleNamespace(vectors=[[0.1, 0.2]])
+        embedding.provider_name = "test"
+        embedding.model_name = "test-model"
+        embedding.dimensions = 2
+
+        strategy = MagicMock()
+        strategy.chunk.return_value = [stored_chunk, failed_chunk]
+        annotator = AsyncMock()
+        annotator.annotate_chunks.return_value = [stored_chunk, failed_chunk]
+        parser = AsyncMock()
+        parser.parse.return_value = MagicMock()
+        extractor = AsyncMock()
+        extractor.extract_and_persist.return_value = SimpleNamespace(
+            nodes_created=0,
+            errors=[],
+        )
+
+        with (
+            patch(
+                "author_library.tools.composable_ingestion.get_parser",
+                return_value=parser,
+            ),
+            patch(
+                "author_library.tools.composable_ingestion.get_chunking_strategy",
+                return_value=strategy,
+            ),
+            patch(
+                "author_library.tools.composable_ingestion.ChunkAnnotator",
+                return_value=annotator,
+            ),
+            patch(
+                "author_library.tools.composable_ingestion.EntityExtractor",
+                return_value=extractor,
+            ),
+            patch(
+                "author_library.graph.theme_dedup.deduplicate_themes",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(
+                    merged_count=0,
+                    original_count=0,
+                    canonical_count=0,
+                    errors=[],
+                ),
+            ),
+            patch(
+                "author_library.tools.ingestion_pipeline.IngestionPipeline._run_quality_checks",
+                new_callable=AsyncMock,
+                return_value={"status": "pass"},
+            ),
+        ):
+            result = json.loads(
+                await handle_chunk_source(
+                    {"work_id": "author--work"},
+                    settings=MagicMock(),
+                    storage=storage,
+                    embedding_provider=embedding,
+                )
+            )
+
+        graph_chunks = [
+            call.args[0]["chunk_id"] for call in storage.graph.upsert_chunk_node.await_args_list
+        ]
+        extraction_chunks = extractor.extract_and_persist.await_args.args[0]
+
+        assert result["status"] == "partial"
+        assert graph_chunks == [str(canonical_id)]
+        assert [chunk.id for chunk in extraction_chunks] == [str(canonical_id)]
+        assert storage.embeddings.store.await_args.args[0] == canonical_id
 
 
 class TestHandleDetectPassageLinksValidation:
