@@ -66,3 +66,6 @@ test-corpus/
 
 # Testing scripts (local only)
 testing/
+
+# Backup script credentials (real file lives outside the repo, see ops/backup.env.example)
+ops/backup.env
